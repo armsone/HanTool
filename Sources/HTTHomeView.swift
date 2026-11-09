@@ -161,10 +161,20 @@ public struct HTTHomeView: View {
     // MARK: - 3대 통합 모듈 상태 카드 그리드
 
     private var serviceStatusGrid: some View {
-        VStack(spacing: 16) {
-            translationCard
-            inputHelperCard
-            macManagementCard
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 16) {
+                translationCard
+                    .frame(minWidth: 230, maxWidth: .infinity)
+                inputHelperCard
+                    .frame(minWidth: 230, maxWidth: .infinity)
+                macManagementCard
+                    .frame(minWidth: 230, maxWidth: .infinity)
+            }
+            VStack(spacing: 16) {
+                translationCard
+                inputHelperCard
+                macManagementCard
+            }
         }
     }
 
@@ -182,58 +192,58 @@ public struct HTTHomeView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("화면 번역:")
                             .font(.subheadline.bold())
-                        Text("투명 캡처 영역의 글자를 원문 줄 위치에 즉시 번역 (캡처 모드 중에는 이 창이 잠시 숨겨졌다가 끝나면 돌아옵니다 · 전역 단축키 \(GlobalHotKey.displayString), 앱 내 ⌘0)")
+                        Text("투명 캡처 영역 번역 (\(GlobalHotKey.displayString), ⌘0)")
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("메일 번역:")
                             .font(.subheadline.bold())
-                        Text("Apple Mail 선택 메일 즉시 번역 (전역 단축키 \(GlobalHotKey.mailDisplayString), 앱 내 ⇧⌘T)")
+                        Text("Apple Mail 선택 메일 즉시 번역 (\(GlobalHotKey.mailDisplayString), ⇧⌘T)")
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
-                    HStack {
-                        Text("브라우저:")
-                            .font(.subheadline.bold())
-                        Text("Chrome, Whale, Safari 웹페이지 및 이미지 실시간 번역 지원")
-                            .font(.subheadline)
-                            .foregroundStyle(palette.text2)
-                    }
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("번역 브라우저:")
                             .font(.subheadline.bold())
-                        Text("HTT에 들어 있는 브라우저입니다. 원문으로 시작하며, 직접 번역을 누르면 번역하고 원문으로 돌아가거나 종료할 때까지 유지합니다. 받은 파일은 그대로 보관됩니다. 전역 단축키 \(GlobalHotKey.browserDisplayString)로도 열 수 있습니다.")
+                        Text("원문 유지 내장 브라우저 (\(GlobalHotKey.browserDisplayString))")
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
                 }
 
+                Spacer(minLength: 0)
+                Divider()
+
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Button("화면 번역 캡처 시작") {
-                            MailWindowCoordinator.shared.startCaptureModeFromWorkbench()
-                        }
-                        Button("Mail에서 선택한 메일 번역") {
-                            AppModel.shared.translateSelectedMail()
-                        }
-                        Button("메일·이미지 번역 보기") {
-                            settingsStore.section = .mail
-                        }
+                    Button {
+                        MailWindowCoordinator.shared.startCaptureModeFromWorkbench()
+                    } label: {
+                        Label("화면 번역 캡처", systemImage: "viewfinder")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    HStack {
-                        Spacer()
-                        Button("브라우저 열기") {
-                            EmbeddedBrowser.open()
-                        }
-                        Button("브라우저 번역 설정") {
-                            settingsStore.section = .browser
-                        }
-                        .buttonStyle(.link)
+                    Button {
+                        AppModel.shared.translateSelectedMail()
+                    } label: {
+                        Label("선택 메일 번역", systemImage: "envelope")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    Button {
+                        EmbeddedBrowser.open()
+                    } label: {
+                        Label("번역 브라우저 열기", systemImage: "safari")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Button {
+                        settingsStore.section = .mail
+                    } label: {
+                        Label("메일·이미지 번역 보기", systemImage: "chevron.right")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.link)
                 }
                 .controlSize(.small)
             }
@@ -261,52 +271,56 @@ public struct HTTHomeView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("설정 상태:")
-                            .font(.subheadline.bold())
-                        Text(isEnabled ? "입력 도우미 켜짐" : "입력 도우미 꺼짐")
-                            .font(.subheadline)
-                            .foregroundStyle(isEnabled ? palette.accentStrong : palette.muted)
-                        Text("·")
-                            .foregroundStyle(palette.muted)
-                        Text("준비 상태:")
+                    HStack(alignment: .top) {
+                        Text("상태:")
                             .font(.subheadline.bold())
                         Text(inputReadyDescription(isEnabled: isEnabled, status: status, conflict: conflict, migrationFailed: migrationFailed))
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("주요 기능:")
                             .font(.subheadline.bold())
-                        Text(verbatim: "앱별 언어 전환, 한글 오타 교정, 첫 단어 복구, 단어 변환 및 한영 번역 (''), 문장 뒤 백슬래시 두 번으로 번역 (\\\\, macOS 26+), 트랙패드 보호 (긴급 잠금 해제 ⌃⌥⌘⎋)")
+                        Text("앱별 언어 전환, 한글 오타 교정, 단어 변환/한영 번역 (''), 트랙패드 보호 (⌃⌥⌘⎋)")
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
                 }
 
+                Spacer(minLength: 0)
+                Divider()
+
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Button(isEnabled ? "입력 도우미 끄기" : "입력 도우미 켜기") {
-                            inputCoordinator.toggleEnabled()
-                        }
-                        if isEnabled && status == .needsAccessibility {
-                            Button("손쉬운 사용 권한 열기…") {
-                                inputState.requestAccessibilityAndRetry()
-                            }
-                        }
-                        if isEnabled, case .unavailable = status {
-                            Button("다시 시도") {
-                                inputState.retry()
-                            }
+                    Button {
+                        inputCoordinator.toggleEnabled()
+                    } label: {
+                        Label(isEnabled ? "입력 도우미 끄기" : "입력 도우미 켜기",
+                              systemImage: isEnabled ? "pause.circle" : "play.circle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if isEnabled && status == .needsAccessibility {
+                        Button {
+                            inputState.requestAccessibilityAndRetry()
+                        } label: {
+                            Label("손쉬운 사용 권한 열기…", systemImage: "exclamationmark.triangle")
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                    HStack {
-                        Spacer()
-                        Button("입력 도우미 설정") {
-                            settingsStore.section = .input
+                    if isEnabled, case .unavailable = status {
+                        Button {
+                            inputState.retry()
+                        } label: {
+                            Label("다시 시도", systemImage: "arrow.clockwise")
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .buttonStyle(.link)
                     }
+                    Button {
+                        settingsStore.section = .input
+                    } label: {
+                        Label("입력 도우미 설정", systemImage: "chevron.right")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.link)
                 }
                 .controlSize(.small)
             }
@@ -334,35 +348,39 @@ public struct HTTHomeView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("모듈 상태:")
                             .font(.subheadline.bold())
                         Text(btnIntegration.statusSummary)
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
-                    HStack {
+                    HStack(alignment: .top) {
                         Text("안전 원칙:")
                             .font(.subheadline.bold())
-                        Text("수동 정리는 항목 선택과 최종 확인 후 실행합니다. 자동 정리는 저위험 파일만 휴지통으로 옮깁니다. 시뮬레이터 삭제·데이터 초기화는 되돌릴 수 없습니다.")
+                        Text("수동 정리는 확인 후 실행하며 저위험 파일만 휴지통으로 이동합니다.")
                             .font(.subheadline)
                             .foregroundStyle(palette.text2)
                     }
                 }
 
+                Spacer(minLength: 0)
+                Divider()
+
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Button("Mac 상태·정리 항목 보기") {
-                            settingsStore.section = .macManagement
-                        }
+                    Button {
+                        settingsStore.section = .macManagement
+                    } label: {
+                        Label("Mac 상태·정리 항목 보기", systemImage: "cpu")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    HStack {
-                        Spacer()
-                        Button("Mac 관리 설정") {
-                            settingsStore.section = .macManagementSettings
-                        }
-                        .buttonStyle(.link)
+                    Button {
+                        settingsStore.section = .macManagementSettings
+                    } label: {
+                        Label("Mac 관리 설정", systemImage: "chevron.right")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .buttonStyle(.link)
                 }
                 .controlSize(.small)
             }

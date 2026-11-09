@@ -378,13 +378,18 @@ final class KoreanTypoCorrector {
 
     // 우리가 요청한 전환이 확인되면 되돌리기 기록을 확정하고, 그 밖의 입력기 변경은 사용자 전환으로 보고 초기화한다.
     private func handleInputSourceChange() {
-        if let expected = selfSwitch, Date() < expected.deadline, currentInputSourceID == expected.id {
-            selfSwitch = nil
-            lastCorrection = pendingCorrection
-            lastCorrection?.inputSourceID = expected.id
-            pendingCorrection = nil
-            return
+        if let expected = selfSwitch, Date() < expected.deadline {
+            if currentInputSourceID == expected.id {
+                selfSwitch = nil
+                if let pending = pendingCorrection {
+                    lastCorrection = pending
+                    lastCorrection?.inputSourceID = expected.id
+                    pendingCorrection = nil
+                }
+                return
+            }
         }
+        // 기대한 ID가 아닌 모든 입력기 변경(QWERTY 포함)은 사용자 전환으로 보고 즉시 초기화한다.
         reset()
     }
 
@@ -1302,6 +1307,7 @@ final class KoreanTypoCorrector {
     // 첫 단어 보호가 확정할 최종 문자열. 기존 복원·혼용 규칙과 같은 판별만 쓰며 화면이나 상태를 바꾸지 않는다.
     // nil이면 두벌식 조합 결과를 그대로 쓴다.
     func firstWordText(forKeys keys: [Character]) -> String? {
+        if prefersKorean { return nil }
         let word = String(keys)
         guard correctsMixedAndEnglish, word.count >= 3, word.allSatisfy(Self.isASCIIQwertyLetter),
               !isExcluded(word) else { return nil }
@@ -1315,6 +1321,7 @@ final class KoreanTypoCorrector {
 
     // 한글 입력기에서 친 영어 단어를 확인 후 복원하도록 예약한다. 예약하면 true.
     private func scheduleRestoration(of word: String, delimiter: Character) -> Bool {
+        if prefersKorean { return false }
         guard word.count >= 3, word.allSatisfy(Self.isASCIIQwertyLetter), !isExcluded(word) else { return false }
         let split = Self.mixedSplit(of: word)
         guard split != nil || Self.looksLikeEnglish(word) else { return false }
@@ -1901,8 +1908,11 @@ final class KoreanTypoCorrector {
             koreanSources.append(source)
         }
         let preferred = koreanSources.first { inputSourceID(of: $0) == "com.apple.inputmethod.Korean.2SetKorean" }
-        guard let target = preferred ?? koreanSources.first, let id = inputSourceID(of: target),
-              id != currentInputSourceID, TISSelectInputSource(target) == noErr else { return nil }
+        guard let target = preferred ?? koreanSources.first, let id = inputSourceID(of: target) else { return nil }
+
+        // 이미 같은 한국어 입력기이면 전환하지 않는다(ASCII 경유 순환 없음).
+        guard id != currentInputSourceID else { return nil }
+        guard TISSelectInputSource(target) == noErr else { return nil }
         return id
     }
 
@@ -2391,7 +2401,7 @@ extension KoreanTypoCorrector {
         guard !isExcluded(wordKey) else { return }
         let split: Int?
         if active.korean {
-            split = correctsMixedAndEnglish
+            split = (correctsMixedAndEnglish && !prefersKorean)
                 ? LanguageIntent.englishStart(in: word.keys, from: active.start, atEnd: atEnd) : nil
         } else {
             split = LanguageIntent.koreanStart(

@@ -159,7 +159,7 @@ final class FirstWordRecovery {
         if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
             cancelTracking()
             probeSuppressed = false
-            if completedElement != nil, completedWatch == nil { submissionBoundarySeen = true }
+            if completedElement != nil { submissionBoundarySeen = true }
             return false
         }
 
@@ -193,20 +193,23 @@ final class FirstWordRecovery {
         if !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
             cancelTracking()
             probeSuppressed = false
+            if completedElement != nil { submissionBoundarySeen = true }
             return false
         }
 
         // Return(36), Enter(76): 줄바꿈 또는 메시지 전송 경계. 추적 리셋 후 통과 (파괴적 교정 없음)
+        // 값 변경 알림이 도착한다는 보장이 없으므로 관찰자 유무와 무관하게 경계를 기록한다(재무장은 빈 입력창 확인 후에만).
         if keyCode == 36 || keyCode == 76 {
             cancelTracking()
             probeSuppressed = false
-            if completedWatch == nil { submissionBoundarySeen = true }
+            if completedElement != nil { submissionBoundarySeen = true }
             return false
         }
 
         // Backspace / Delete(51): 사용자 백스페이스 발생 시 조합 모호성 방지를 위해 즉시 추적 무효화 후 통과
         if keyCode == 51 {
             cancelTracking()
+            if completedElement != nil { submissionBoundarySeen = true }
             return false
         }
 
@@ -274,9 +277,10 @@ final class FirstWordRecovery {
         // 이미 첫 단어가 처리된 필드인지 확인
         if let completed = completedElement {
             if CFEqual(completed, element) {
-                // 관찰자가 없을 때 전송 경계 이후 빈 값이면 새 초안으로 재무장
-                if completedWatch == nil, submissionBoundarySeen,
-                   isEditableTextElement(element), editorBaseline(element) != nil {
+                // 관찰자 알림 수신 여부와 무관하게, 전송·삭제 경계 이후 같은 입력창이 빈 값(캐럿 끝, 선택 없음)이면 새 초안으로 재무장
+                // 내용이 남아 있으면 baseline이 nil이라 그대로 억제 유지(값 읽기가 가장 싼 확인이므로 먼저 수행)
+                if submissionBoundarySeen,
+                   editorBaseline(element) != nil, isEditableTextElement(element) {
                     clearCompleted()
                 } else {
                     return
@@ -527,6 +531,7 @@ final class FirstWordRecovery {
             let units = Array(character.utf16)
             if !current.isEmpty, current.count + units.count > maxChunkUnits {
                 chunks.append(current)
+                current = []
             }
             current.append(contentsOf: units)
         }

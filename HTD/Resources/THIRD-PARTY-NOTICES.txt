@@ -1,0 +1,32 @@
+HTD — third-party components of the portable engine
+====================================================
+
+This file lists what the portable engine (Resources/EngineRuntime) is built from and where the public sources are.
+It is informational. It is not legal advice and not a grant of redistribution rights. The portable build is meant
+for the recipients it was handed to; review the licenses below (in particular the FFmpeg build configuration and
+GPL-licensed components) before passing it on to anyone else.
+
+The license and notice files that were available inside the installed packages at build time are copied to
+EngineRuntime/licenses/<package>/. portable-manifest.json records the exact versions, file hashes and whether the
+bundled FFmpeg was configured with --enable-gpl / --enable-version3. Those files, not this summary, are authoritative.
+
+Component            Public source                                   License (see upstream for the exact terms)
+-------------------  ----------------------------------------------  -----------------------------------------------
+yt-dlp               https://github.com/yt-dlp/yt-dlp                Unlicense; some bundled parts carry their own terms
+yt-dlp-ejs           https://github.com/yt-dlp/ejs                   Unlicense; bundled JavaScript parts carry their own terms
+CPython              https://github.com/python/cpython               Python Software Foundation License
+PyInstaller          https://github.com/pyinstaller/pyinstaller      GPL-2.0-or-later with an exception for bundled apps
+FFmpeg               https://ffmpeg.org/download.html                LGPL-2.1+ or GPL-2.0+, depending on the build
+                                                                     configuration of the binary that was bundled
+Deno                 https://github.com/denoland/deno                MIT
+PyCryptodome(x)      https://github.com/Legrandin/pycryptodome       BSD-2-Clause (some parts public domain)
+
+Other Python packages pulled in by yt-dlp[default] (for example brotli, certifi, mutagen, requests, urllib3,
+websockets) are listed with their own licenses in EngineRuntime/licenses/ when the installed package shipped one.
+Some of them may be copyleft (for example mutagen); check the copied license files.
+
+FFmpeg and Deno are executed as separate programs from EngineRuntime/_internal/tools. Their source code
+is available from the public URLs above; ask the sender of this build if you need the exact source revision.
+
+The portable engine targets Apple Silicon (arm64) and the macOS version recorded in portable-manifest.json
+(targetMacOS / machoMaxMinOS). No claim is made about older macOS versions.

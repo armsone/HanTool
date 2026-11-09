@@ -76,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             viewModel.status = .error(browserHotKey.statusDescription)
         }
 
+        // 보조키 더블탭(Command 2회 또는 Shift 2회) 브라우저 호출 감시 시작
+        BrowserDoubleTapShortcut.shared.start()
+
         // 메일 번역: Mail › 서비스 메뉴, Mail 위 번역 버튼(기본 켜짐)
         MailWindowCoordinator.shared.start()
 
@@ -86,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         DockVisibilityStore.shared.applyInitial()
         loginItem.applyInitialDefaultIfNeeded()
+        WakeLaunchManager().applyInitialDefaultIfNeeded()
         updater.start()
         // 브라우저 번역 엔진 연결(허용했거나 브라우저 도우미가 실행한 경우에만 연다)
         BrowserIntegration.shared.applicationDidLaunch()
@@ -119,12 +123,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// .eml·이미지 파일 열기(Finder '다음으로 열기', Dock 아이콘으로 끌어놓기)
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard let url = urls.first else { return }
+        // http/https 주소는 HTT 안의 브라우저로 넘기고, 파일 열기는 기존 동작을 그대로 유지한다.
+        let webURLs = EmbeddedBrowser.forwardableWebURLs(urls)
+        if !webURLs.isEmpty { EmbeddedBrowser.open(urls: webURLs) }
+        guard let url = urls.first(where: { $0.isFileURL }) else { return }
         AppModel.shared.open(url: url)
         AppModel.shared.showMainWindow()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        BrowserDoubleTapShortcut.shared.stop()
         MailWindowCoordinator.shared.prepareForTermination()
         InputMateCoordinator.shared.stop()
         BTNIntegration.shared.stop()
@@ -212,7 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         menu.addItem(headerItem())
-        menu.addItem(item("HTT 홈", #selector(showHome), symbol: "house"))
+        menu.addItem(item("HTT 열기", #selector(showHome), symbol: "house"))
         menu.addItem(.separator())
 
         // MARK: 번역
@@ -246,11 +254,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mailItem = item("Mail에서 선택한 메일 번역", #selector(translateSelectedMail), symbol: "envelope")
         applyKeyEquivalent(mailItem, GlobalHotKey.mailKeyEquivalent, GlobalHotKey.mailModifierMask)
         menu.addItem(mailItem)
-        menu.addItem(item("메일·이미지 번역 열기", #selector(showMailWindow), symbol: "envelope.open"))
+
         let browserItem = item("브라우저 열기", #selector(openEmbeddedBrowser), symbol: "safari")
         applyKeyEquivalent(browserItem, GlobalHotKey.browserKeyEquivalent, GlobalHotKey.browserModifierMask)
         menu.addItem(browserItem)
-        menu.addItem(item("브라우저 번역", #selector(showBrowserSetup), symbol: "globe"))
 
         menu.addItem(.separator())
 
@@ -262,29 +269,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             symbol: isInputEnabled ? "keyboard" : "pause.circle"
         )
         menu.addItem(inputToggle)
-        menu.addItem(item("입력 도우미 설정", #selector(showInputSettings), symbol: "keyboard.badge.ellipsis"))
 
         menu.addItem(.separator())
 
-        // MARK: Mac 관리 (HTT 창 안의 Mac 관리 섹션)
-        menu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement), symbol: "cpu"))
-        menu.addItem(item("Mac 관리 설정", #selector(showMacManagementSettings), symbol: "slider.horizontal.3"))
+        // MARK: Mac 관리
         menu.addItem(item("USB 정리·추출", #selector(showCleanUSB), symbol: "externaldrive"))
 
         menu.addItem(.separator())
 
-        // MARK: 앱 설정·도움말
-        menu.addItem(item("앱 설정", #selector(showSettings), symbol: "gearshape"))
-        menu.addItem(item("사용 방법", #selector(showGuide), symbol: "questionmark.circle"))
-        let status = item("권한·연결 상태", nil, symbol: "info.circle")
-        status.submenu = statusMenu()
-        menu.addItem(status)
+        // MARK: 설정 / 업데이트 / 종료
+        let settingsItem = item("앱 설정", #selector(showSettings), symbol: "gearshape")
+        applyKeyEquivalent(settingsItem, ",", .command)
+        menu.addItem(settingsItem)
+        let diagnostics = item("권한·연결 상태", nil, symbol: "info.circle")
+        diagnostics.submenu = statusMenu()
+        menu.addItem(diagnostics)
 
-        menu.addItem(.separator())
         if let warning = actionNeededWarningItem() {
             menu.addItem(warning)
         }
-        menu.addItem(item("HTT 정보", #selector(showAbout), symbol: "info.circle"))
         menu.addItem(item("업데이트 확인…", #selector(checkForUpdates), symbol: "arrow.down.circle"))
         menu.addItem(item("HTT 종료", #selector(NSApplication.terminate(_:)), target: NSApp, symbol: "power"))
     }
@@ -496,12 +499,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(item("HTT 홈", #selector(showHome), symbol: "house"))
+        appMenu.addItem(item("HTT 열기", #selector(showHome), symbol: "house"))
         appMenu.addItem(item("HTT 정보", #selector(showAbout)))
         appMenu.addItem(item("업데이트 확인…", #selector(checkForUpdates)))
         appMenu.addItem(.separator())
-        appMenu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement)))
         appMenu.addItem(item("USB 정리·추출", #selector(showCleanUSB)))
+        appMenu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement)))
         let settings = NSMenuItem(title: "앱 설정", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)

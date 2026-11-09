@@ -4,7 +4,7 @@
 #   SIGN_IDENTITY  : 서명 인증서 SHA1 (기본: 기존 Developer ID Application, 팀 T7B4EPLHPK)
 #   SIGN_TIMESTAMP : 1이면 보안 타임스탬프 포함(배포/공증용, 네트워크 필요)
 #   HTD_APP_SOURCE : HTT 안에 넣을 서명 완료된 HTD.app 경로
-#                    (기본: ../HTD/dist/install-*/HTD.app 중 가장 높은 버전)
+#                    (기본: HTD/dist/install-*/HTD.app 중 가장 높은 버전)
 #   HTD_EXPECTED_TEAM : HTD의 개발자 서명 팀(기본: T7B4EPLHPK)
 set -euo pipefail
 
@@ -30,11 +30,6 @@ fi
 if [ ! -f "$ROOT_DIR/Resources/AppIcon.icns" ] || [ "$ROOT_DIR/Resources/AppIcon-source.png" -nt "$ROOT_DIR/Resources/AppIcon.icns" ]; then
   echo "==> 앱 아이콘 생성"
   "$ROOT_DIR/scripts/make-icon.sh"
-fi
-
-if [ ! -f "$ROOT_DIR/Sources/CleanUSB/USBContentView.swift" ]; then
-  echo "오류: HTT에 필요한 USB 정리·추출 소스가 없습니다." >&2
-  exit 1
 fi
 
 echo "==> 빌드 디렉터리 정리"
@@ -208,7 +203,7 @@ ditto "$SPARKLE_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.
 HTD_EXPECTED_ID="com.hanstree.HttpsDown"
 HTD_EXPECTED_TEAM="${HTD_EXPECTED_TEAM:-T7B4EPLHPK}"
 if [ -z "${HTD_APP_SOURCE:-}" ]; then
-  HTD_APP_SOURCE="$(ls -d "$ROOT_DIR"/../HTD/dist/install-*/HTD.app 2>/dev/null | sort -V | tail -1 || true)"
+  HTD_APP_SOURCE="$(ls -d "$ROOT_DIR"/HTD/dist/install-*/HTD.app 2>/dev/null | sort -V | tail -1 || true)"
 fi
 if [ -z "$HTD_APP_SOURCE" ] || [ ! -d "$HTD_APP_SOURCE" ]; then
   echo "오류: 포함할 HTD.app을 찾지 못했습니다. HTD_APP_SOURCE=<서명된 HTD.app 경로>를 지정하세요." >&2
@@ -274,6 +269,17 @@ codesign "${SIGN_ARGS[@]}" --identifier "$HELPER_ID" "$APP_BUNDLE/Contents/Helpe
 # Safari 확장: 앱 샌드박스만(앱 그룹·임시 예외 없음)
 plutil -lint "$SAFARI_ENTITLEMENTS" >/dev/null
 codesign "${SIGN_ARGS[@]}" --entitlements "$SAFARI_ENTITLEMENTS" --identifier "$SAFARI_ID" "$SAFARI_APPEX"
+
+# 잠자기 깨어남 헬퍼 (SMAppService.loginItem)
+WAKE_HELPER_DIR="$APP_BUNDLE/Contents/Library/LoginItems/HTTWakeHelper.app"
+mkdir -p "$WAKE_HELPER_DIR/Contents/MacOS"
+xcrun swiftc -target "$SWIFT_TARGET" -sdk "$SDK_PATH" -swift-version 5 -framework AppKit \
+    "$ROOT_DIR/WakeHelper/main.swift" \
+    -o "$WAKE_HELPER_DIR/Contents/MacOS/HTTWakeHelper"
+cp "$ROOT_DIR/WakeHelper/Info.plist" "$WAKE_HELPER_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$WAKE_HELPER_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD" "$WAKE_HELPER_DIR/Contents/Info.plist"
+codesign "${SIGN_ARGS[@]}" --identifier "com.local.screentranslator.wake-helper" "$WAKE_HELPER_DIR"
 
 echo "==> 앱 서명 (identity: $SIGN_IDENTITY, identifier: $BUNDLE_ID, entitlements: Apple Events)"
 plutil -lint "$ENTITLEMENTS" >/dev/null

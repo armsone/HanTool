@@ -8,3 +8,13 @@ Vendor/
 *.key
 *private*key*
 *.env.local
+
+# Local browser builds, release snapshots, and research artifacts.
+/HTD/.build/
+/HTD/.paused-work/
+/HTD/.public-release/
+/HTD/dist/
+/HTD/research/
+/HTD/tools/
+/HTD/validation/
+/HTD/**/__pycache__/

@@ -17,7 +17,12 @@ struct AISettingsView: View {
     @State private var loginEnabled = false
     @State private var loginStatus = ""
     @State private var loginNeedsApproval = false
+    @State private var wakeManager = WakeLaunchManager()
+    @State private var wakeEnabled = true
+    @State private var wakeStatus = ""
+    @State private var wakeNeedsApproval = false
     @ObservedObject private var appearance = HTTAppearanceStore.shared
+    @ObservedObject private var doubleTapShortcut = BrowserDoubleTapShortcut.shared
 
     var body: some View {
         Form {
@@ -84,6 +89,42 @@ struct AISettingsView: View {
             }
 
             Section {
+                HStack {
+                    Text("두 번 누를 키")
+                    Spacer()
+                    Picker("", selection: $doubleTapShortcut.selectedModifier) {
+                        ForEach(BrowserDoubleTapModifier.allCases) { modifier in
+                            Text(modifier.displayName).tag(modifier)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 170)
+                }
+
+                if doubleTapShortcut.selectedModifier != .off && !doubleTapShortcut.isAccessibilityTrusted {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                            Text("다른 앱 실행 중 전역 키 감지에는 손쉬운 사용 권한이 필요합니다. 권한이 없으면 HTT 앱 외부에서의 두 번 누름이 동작하지 않을 수 있습니다.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("손쉬운 사용 권한 설정 열기…") {
+                            InputMateCoordinator.shared.appState.requestAccessibilityAndRetry()
+                            doubleTapShortcut.updateAccessibilityStatus()
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
+                }
+            } header: {
+                Text("브라우저 호출 단축키")
+            } footer: {
+                Text("기존 조합 단축키(⇧⌃⌥⌘B)는 그대로 유지되며, Command 키 또는 Shift 키를 짧게 두 번 눌러 HTD 브라우저를 빠르게 앞으로 가져올 수 있습니다. 원하는 경우 기본 설정을 변경할 수 있습니다.")
+            }
+
+            Section {
                 Toggle("로그인 시 자동 시작", isOn: Binding(
                     get: { loginEnabled },
                     set: { enabled in
@@ -95,10 +136,25 @@ struct AISettingsView: View {
                 if loginNeedsApproval {
                     Button("로그인 항목 설정 열기") { loginItem.openSystemSettings() }
                 }
+
+                Toggle("잠자기에서 깨어나면 HTT 실행", isOn: Binding(
+                    get: { wakeEnabled },
+                    set: { enabled in
+                        wakeManager.setEnabled(enabled)
+                        refreshWakeStatus()
+                    }
+                ))
+                .disabled(!wakeManager.isInstalledInApplications)
+                if wakeNeedsApproval {
+                    Button("로그인 항목 설정 열기") { wakeManager.openSystemSettings() }
+                }
             } header: {
                 Text("시작")
             } footer: {
-                Text(loginStatus)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loginStatus)
+                    Text("HTT가 꺼져 있을 때만 실행합니다. 이미 실행 중인 HTT는 그대로 둡니다. (\(wakeStatus))")
+                }
             }
 
             Section {
@@ -244,7 +300,12 @@ struct AISettingsView: View {
         .onAppear {
             mailButtonEnabled = MailToolbarButton.shared.isEnabled
             refreshLoginStatus()
+            refreshWakeStatus()
+            doubleTapShortcut.updateAccessibilityStatus()
             if TranslationBackend.externalOptionsVisible { accounts.refreshAll() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshWakeStatus()
         }
     }
 
@@ -252,6 +313,12 @@ struct AISettingsView: View {
         loginEnabled = loginItem.status == .enabled || loginItem.status == .requiresApproval
         loginNeedsApproval = loginItem.status == .requiresApproval
         loginStatus = loginItem.lastError ?? loginItem.statusDescription
+    }
+
+    private func refreshWakeStatus() {
+        wakeEnabled = wakeManager.isPreferenceEnabled
+        wakeNeedsApproval = wakeManager.status == .requiresApproval
+        wakeStatus = wakeManager.lastError ?? wakeManager.statusDescription
     }
 
     @ViewBuilder
