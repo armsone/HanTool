@@ -68,6 +68,43 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         store.showsHostedBrowser = false
         store.section = section
         if section == .macManagement || section == .macManagementSettings { BTNIntegration.shared.prepareForDisplay() }
+        UnifiedBrowserManager.shared.showTool(section: section, inputPage: store.inputPage)
+        presentWorkbenchWindow()
+    }
+
+    /// 모듈 메인 브라우저 화면을 열고 메인 창을 앞으로 가져온다.
+    func openBrowserMain(urls: [URL] = []) {
+        abandonSuspendedCapture()
+        dismissCaptureOverlayIfNeeded()
+        store.showsHostedBrowser = false
+        UnifiedBrowserManager.shared.showBrowser(urls: urls)
+        presentWorkbenchWindow()
+    }
+
+    /// 모듈 내 네이티브 작업 공간(브라우저/Planner 등)이 선택되었을 때(호스트 도구 해제 시) 잠시 내린 캡처를 포기하고 캡처 오버레이를 닫는다.
+    func nativeWorkspaceDidSelect() {
+        abandonSuspendedCapture()
+        dismissCaptureOverlayIfNeeded()
+        store.showsHostedBrowser = false
+    }
+
+    /// 모듈에서 도구가 선택되었을 때 호스트 섹션을 동기화하고 같은 창을 표시한다.
+    func selectSectionFromModule(_ section: SettingsSection) {
+        abandonSuspendedCapture()
+        dismissCaptureOverlayIfNeeded()
+        store.showsHostedBrowser = false
+        store.section = section
+        if section == .macManagement || section == .macManagementSettings { BTNIntegration.shared.prepareForDisplay() }
+        presentWorkbenchWindow()
+    }
+
+    /// 모듈에서 입력 도우미 하위 페이지가 선택되었을 때 호스트 상태를 동기화하고 같은 창을 표시한다.
+    func selectInputPageFromModule(_ page: InputMatePage) {
+        abandonSuspendedCapture()
+        dismissCaptureOverlayIfNeeded()
+        store.showsHostedBrowser = false
+        store.section = .input
+        store.inputPage = page
         presentWorkbenchWindow()
     }
 
@@ -100,18 +137,25 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
     }
 
     private func makeWorkbenchWindow() -> NSWindow {
-        let rootView = SettingsView(store: store)
+        let toolRootView = SettingsView(store: store, showsSidebar: false)
             .environmentObject(InputMateCoordinator.shared.appState)
             .environmentObject(InputMateCoordinator.shared.settings)
             .environmentObject(InputMateCoordinator.shared.appInputLanguageStore)
-        let hosting = NSHostingController(rootView: rootView)
-        // 메일 섹션의 ContentView .toolbar(id:)를 이 창의 사용자 지정 가능한 도구 막대로 연결한다.
-        // 루트는 탐색 컨테이너 없는 HSplitView라 창의 도구 막대는 이 연결 하나뿐이고, 상세 영역 위에 별도 막대가 생기지 않는다.
-        hosting.sceneBridgingOptions = [.toolbars]
+        let toolAnyView = AnyView(toolRootView)
+
+        let controller: NSViewController
+        if let browserController = UnifiedBrowserManager.shared.makeMainBrowserViewController(toolView: toolAnyView) {
+            controller = browserController
+        } else {
+            let hosting = NSHostingController(rootView: toolRootView)
+            hosting.sceneBridgingOptions = [.toolbars]
+            controller = hosting
+        }
+
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
-        window.contentViewController = hosting
+        window.contentViewController = controller
         window.title = "HTT"
         window.identifier = NSUserInterfaceItemIdentifier("htt-workbench")
         window.isReleasedWhenClosed = false
@@ -138,6 +182,7 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
             store.hostedBrowsers.append(browser)
         }
         store.showsHostedBrowser = true
+        UnifiedBrowserManager.shared.showTool(section: store.section, inputPage: store.inputPage)
         presentWorkbenchWindow(forceLayout: true)
     }
 
@@ -153,6 +198,7 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         guard !isTerminating else { return }
         concealCaptureForAuxiliaryIfNeeded()
         store.statusPanel = panel
+        UnifiedBrowserManager.shared.showTool(section: store.section, inputPage: store.inputPage)
         presentWorkbenchWindow(forceLayout: true)
     }
 
@@ -258,11 +304,7 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         // 메인 창을 닫으면 메일 내용(문서·이미지·번역·외부 AI 실행)을 메모리에서 지운다.
         AppModel.shared.closeDocument()
         AppModel.shared.errorMessage = nil
-        workbenchWindow = nil
-        // 닫히는 중에 콘텐츠를 떼지 않도록 다음 실행 루프에서 창을 놓는다(다음에 열 때 새로 만든다).
-        DispatchQueue.main.async {
-            window.contentViewController = nil
-        }
+        // 창 닫기로 인해 브라우저/Planner 모델/컨트롤러가 파괴되지 않도록 윈도우와 컨트롤러를 유지한다.
     }
 }
 

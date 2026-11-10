@@ -1,0 +1,5667 @@
+import AppKit
+import Darwin
+import Foundation
+import Network
+import Sparkle
+import os.log
+
+private let ccmbLog = OSLog(subsystem: "com.codex.creditmenubar", category: "CCMB")
+
+private func writePrivateLog(_ message: String) {
+    os_log("%{private}@", log: ccmbLog, type: .debug, message)
+}
+
+private enum SharedUsageStore {
+    static let directoryURL = CCMBPaths.appSupportURL
+    static let snapshotURL = CCMBPaths.snapshotURL
+    static let helperURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".codex")
+        .appendingPathComponent("bin")
+        .appendingPathComponent("ccmb-usage")
+
+    static func publish(
+        _ snapshot: RateLimitSnapshot,
+        claudeSnapshot: ClaudeUsageSnapshot?,
+        claudeRetryAt: Date?,
+        claudeFailureLabel: String?,
+        geminiSnapshot: GeminiUsageSnapshot?,
+        geminiOnlineSnapshot: GeminiOnlineUsageSnapshot?,
+        grokSnapshot: GrokUsageSnapshot?,
+        consumptionHistory: UsageConsumptionHistoryStore,
+        refreshInterval: TimeInterval
+    ) throws {
+        let remainingPercent = snapshot.usedPercent.map(UsageCore.remainingPercent)
+        let freshForSeconds = max(45, Int(refreshInterval) + 15)
+        let sequence = Int64((snapshot.updatedAt.timeIntervalSince1970 * 1_000).rounded())
+
+        var claudePayload = ClaudeUsageCore.sharedPayload(from: claudeSnapshot)
+        let circuitOpen = claudeRetryAt.map { $0 > Date() } ?? false
+        claudePayload["circuitState"] = circuitOpen ? "open" : "closed"
+        claudePayload["nextEligibleAt"] = claudeRetryAt.map(iso8601Formatter.string(from:)) ?? NSNull()
+        let staleReason: Any = circuitOpen ? "rate-limited" : (claudeFailureLabel as Any? ?? NSNull())
+        claudePayload["staleReason"] = staleReason
+
+        // Gemini 온라인 공유 발행은 중단한다. CLI의 top-level `gemini` 필드만 발행한다.
+        let geminiPayload = GeminiUsageCore.sharedPayload(from: geminiSnapshot)
+
+        let payload: [String: Any] = [
+            "schemaVersion": 1,
+            "status": "ok",
+            "source": "chatgpt-wham-usage",
+            "method": "authenticated HTTPS",
+            "weeklyRemainingPercent": remainingPercent ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
+            "creditBalance": snapshot.creditBalance ?? NSNull(),
+            "usedPercent": snapshot.usedPercent ?? NSNull(),
+            "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
+            "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkResetsAt": NSNull(),
+            "sparkUsedPercent": NSNull(),
+            "sparkWindowDurationMins": NSNull(),
+            "fetchedAt": iso8601Formatter.string(from: snapshot.updatedAt),
+            "publishedAt": iso8601Formatter.string(from: Date()),
+            "sequence": sequence,
+            "refreshIntervalSeconds": Int(refreshInterval),
+            "freshForSeconds": freshForSeconds,
+            "ccmbProcessID": ProcessInfo.processInfo.processIdentifier,
+            "ccmbBundleIdentifier": Bundle.main.bundleIdentifier ?? "",
+            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+            "claude": claudePayload,
+            "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: freshForSeconds),
+            "gemini": geminiPayload,
+            "grok": GrokUsageCore.sharedPayload(from: grokSnapshot),
+            "consumptionHistory": consumptionHistoryPayload(consumptionHistory)
+        ]
+
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directoryURL.path)
+
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: snapshotURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path)
+    }
+
+    private static func consumptionHistoryPayload(_ history: UsageConsumptionHistoryStore) -> [String: Any] {
+        func samples(_ tracker: UsageConsumptionTracker) -> [[String: Any]] {
+            tracker.samples.map {
+                ["at": iso8601Formatter.string(from: $0.at), "amount": $0.amount]
+            }
+        }
+        return [
+            "slotCount": UsageConsumptionTracker.defaultCapacity,
+            "codex": samples(history.codex),
+            "codexSpark": samples(history.codexSpark),
+            "claude": samples(history.claude),
+            "claudeFable": samples(history.claudeFable),
+            "gemini": samples(history.gemini)
+        ]
+    }
+
+    static func installHelper() throws {
+        guard let executableURL = Bundle.main.executableURL else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let helperDirectory = helperURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: helperDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        if FileManager.default.fileExists(atPath: helperURL.path) {
+            let existingContents = try String(contentsOf: helperURL, encoding: .utf8)
+            guard UsageCore.canReplaceUsageHelper(existingContents: existingContents) else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+        }
+        let escapedExecutablePath = executableURL.path.replacingOccurrences(of: "'", with: "'\\''")
+        let script = """
+        #!/bin/sh
+        \(UsageCore.usageHelperMarker)1
+        exec '\(escapedExecutablePath)' --ccmb-usage "$@"
+        """ + "\n"
+        guard let data = script.data(using: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+        try data.write(to: helperURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helperURL.path)
+    }
+
+    static func readPayload() throws -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return nil }
+        let data = try Data(contentsOf: snapshotURL)
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              payload["schemaVersion"] as? Int == 1 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return payload
+    }
+
+    static func readClaudeSnapshot() -> ClaudeUsageSnapshot? {
+        guard let payload = try? readPayload(),
+              let claude = payload["claude"] as? [String: Any]
+        else { return nil }
+        return ClaudeUsageCore.snapshot(fromSharedPayload: claude)
+    }
+
+    static func readGeminiSnapshot() -> GeminiUsageSnapshot? {
+        guard let payload = try? readPayload(),
+              let gemini = payload["gemini"] as? [String: Any]
+        else { return nil }
+        return GeminiUsageCore.snapshot(fromSharedPayload: gemini)
+    }
+
+    static func readGrokSnapshot() -> GrokUsageSnapshot? {
+        guard let payload = try? readPayload(),
+              let grok = payload["grok"] as? [String: Any]
+        else { return nil }
+        return GrokUsageCore.snapshot(fromSharedPayload: grok)
+    }
+
+    private static var iso8601Formatter: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+}
+
+private enum UsageCommand {
+    static func runIfRequested() -> Bool {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        guard arguments.contains("--ccmb-usage") else { return false }
+
+        do {
+            var cacheIsCorrupt = false
+            let cached: [String: Any]?
+            do {
+                cached = try SharedUsageStore.readPayload().map(decorateCache)
+            } catch {
+                // A present-but-corrupt or unsupported-schema cache must not block
+                // the direct live query below; only --cache-only treats this as fatal.
+                cacheIsCorrupt = true
+                cached = nil
+            }
+
+            if arguments.contains("--verify-live") {
+                let direct = try readDirect()
+                var output = direct
+                output["verification"] = verification(cached: cached, direct: direct)
+                printJSON(output)
+            } else if arguments.contains("--cache-only") {
+                guard let cached else {
+                    throw UsageCommandError.message(
+                        UsageCore.cacheOnlyFailureMessage(cacheIsCorrupt: cacheIsCorrupt, path: SharedUsageStore.snapshotURL.path)
+                    )
+                }
+                printJSON(cached)
+            } else if let cached, cached["fresh"] as? Bool == true {
+                printJSON(cached)
+            } else {
+                var direct = try readDirect()
+                direct["cacheFallbackReason"] = UsageCore.cacheFallbackReason(cacheExists: cached != nil, cacheIsCorrupt: cacheIsCorrupt)
+                direct["claude"] = cached?["claude"]
+                    ?? ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read())
+                // No passive local cache exists for Gemini the way
+                // `claude-statusline.sh` provides one for Claude, so a stale
+                // CCMB cache is the only source here; absent that, Gemini is
+                // simply reported unavailable rather than blocking this
+                // command on a live `agy` launch.
+                direct["gemini"] = cached?["gemini"] ?? GeminiUsageCore.sharedPayload(from: nil)
+                // No passive local cache exists for Grok either — the local
+                // `auth.json` carries no usage numbers of its own — so a
+                // stale CCMB cache is likewise the only source here.
+                direct["grok"] = cached?["grok"] ?? GrokUsageCore.sharedPayload(from: nil)
+                if let cached {
+                    direct["ccmbCache"] = cached
+                }
+                printJSON(direct)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+            Darwin.exit(EXIT_FAILURE)
+        }
+
+        return true
+    }
+
+    private static func decorateCache(_ payload: [String: Any]) -> [String: Any] {
+        let storedClaude = payload["claude"] as? [String: Any]
+            ?? ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read())
+        let freshForSeconds = payload["freshForSeconds"] as? Int ?? 45
+        let storedCodex = payload["codex"] as? [String: Any]
+            ?? UsageCore.codexPayload(from: nil, freshForSeconds: freshForSeconds)
+        let storedGemini = payload["gemini"] as? [String: Any]
+            ?? GeminiUsageCore.sharedPayload(from: nil)
+        let storedGrok = payload["grok"] as? [String: Any]
+            ?? GrokUsageCore.sharedPayload(from: nil)
+        var output: [String: Any] = [
+            "weeklyRemainingPercent": payload["weeklyRemainingPercent"] ?? NSNull(),
+            "sparkRemainingPercent": NSNull(),
+            "creditBalance": payload["creditBalance"] ?? NSNull(),
+            "usedPercent": payload["usedPercent"] ?? NSNull(),
+            "sparkUsedPercent": NSNull(),
+            "windowDurationMins": payload["windowDurationMins"] ?? NSNull(),
+            "resetsAt": payload["resetsAt"] ?? NSNull(),
+            "sparkResetsAt": NSNull(),
+            "sparkWindowDurationMins": NSNull(),
+            "origin": "ccmb-cache",
+            "fetchedAt": payload["fetchedAt"] ?? NSNull(),
+            "claude": ClaudeUsageCore.refreshedSharedPayload(storedClaude),
+            "codex": UsageCore.refreshedCodexPayload(storedCodex),
+            "gemini": GeminiUsageCore.refreshedSharedPayload(storedGemini),
+            "grok": GrokUsageCore.refreshedSharedPayload(storedGrok)
+        ]
+
+        let fetchedAt = (payload["fetchedAt"] as? String).flatMap(iso8601Formatter.date(from:))
+        let ageSeconds = UsageCore.cacheAgeSeconds(fetchedAt: fetchedAt, now: Date())
+        let ccmbRunning = processMatches(
+            payload["ccmbProcessID"],
+            bundleIdentifier: payload["ccmbBundleIdentifier"] as? String
+        )
+        let statusOK = payload["status"] as? String == "ok"
+        output["ageSeconds"] = ageSeconds
+        output["freshForSeconds"] = freshForSeconds
+        output["fresh"] = UsageCore.cacheIsFresh(
+            statusOK: statusOK,
+            processMatches: ccmbRunning,
+            ageSeconds: ageSeconds,
+            freshForSeconds: freshForSeconds
+        )
+        output["evidence"] = [
+            "status": payload["status"] ?? NSNull(),
+            "source": payload["source"] ?? NSNull(),
+            "method": payload["method"] ?? NSNull(),
+            "sequence": payload["sequence"] ?? NSNull(),
+            "publishedAt": payload["publishedAt"] ?? NSNull(),
+            "ccmbRunning": ccmbRunning,
+            "cachePath": SharedUsageStore.snapshotURL.path
+        ]
+        return output
+    }
+
+    private static func readDirect() throws -> [String: Any] {
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var capturedSnapshot: RateLimitSnapshot?
+        var capturedError: String?
+        let client = CodexDirectAPIClient(callbackQueue: nil)
+
+        client.onRateLimitsUpdated = { snapshot in
+            lock.lock()
+            capturedSnapshot = snapshot
+            lock.unlock()
+            semaphore.signal()
+        }
+        client.onError = { message in
+            lock.lock()
+            capturedError = message
+            lock.unlock()
+            semaphore.signal()
+        }
+        client.start()
+        let waitResult = semaphore.wait(timeout: .now() + 15)
+        client.stop()
+
+        guard waitResult == .success else {
+            throw UsageCommandError.message("Codex 직접 API가 15초 안에 응답하지 않았습니다.")
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if let capturedError {
+            throw UsageCommandError.message(capturedError)
+        }
+        guard let snapshot = capturedSnapshot, let usedPercent = snapshot.usedPercent else {
+            throw UsageCommandError.message("Codex 사용량 응답을 읽지 못했습니다.")
+        }
+
+        let fetchedAt = iso8601Formatter.string(from: snapshot.updatedAt)
+        return [
+            "weeklyRemainingPercent": min(max(100 - usedPercent, 0), 100),
+            "sparkRemainingPercent": NSNull(),
+            "creditBalance": snapshot.creditBalance ?? NSNull(),
+            "usedPercent": usedPercent,
+            "sparkUsedPercent": NSNull(),
+            "windowDurationMins": snapshot.windowDurationMinutes ?? NSNull(),
+            "sparkWindowDurationMins": NSNull(),
+            "resetsAt": snapshot.resetsAt.map(iso8601Formatter.string(from:)) ?? NSNull(),
+            "sparkResetsAt": NSNull(),
+            "origin": "direct-api",
+            "fetchedAt": fetchedAt,
+            "ageSeconds": 0,
+            "freshForSeconds": 15,
+            "fresh": true,
+            "claude": ClaudeUsageCore.sharedPayload(from: ClaudeUsageStore.read()),
+            "codex": UsageCore.codexPayload(from: snapshot, freshForSeconds: 15, now: snapshot.updatedAt),
+            "gemini": GeminiUsageCore.sharedPayload(from: nil),
+            "grok": GrokUsageCore.sharedPayload(from: nil),
+            "evidence": [
+                "status": "ok",
+                "source": "chatgpt-wham-usage",
+                "method": "authenticated HTTPS",
+                "verifiedAt": fetchedAt
+            ]
+        ]
+    }
+
+    private static func verification(cached: [String: Any]?, direct: [String: Any]) -> [String: Any] {
+        let weeklyMatches = numbersMatch(cached?["weeklyRemainingPercent"], direct["weeklyRemainingPercent"])
+        let creditMatches = numbersMatch(cached?["creditBalance"], direct["creditBalance"])
+        return [
+            "mode": "independent-direct-api-read",
+            "matches": cached != nil && weeklyMatches && creditMatches,
+            "weeklyRemainingMatches": cached != nil && weeklyMatches,
+            "creditBalanceMatches": cached != nil && creditMatches,
+            "ccmb": cached ?? NSNull()
+        ]
+    }
+
+    private static func numbersMatch(_ left: Any?, _ right: Any?) -> Bool {
+        if left is NSNull || right is NSNull {
+            return left is NSNull && right is NSNull
+        }
+        guard let left = (left as? NSNumber)?.doubleValue,
+              let right = (right as? NSNumber)?.doubleValue else { return false }
+        return abs(left - right) <= 0.000001
+    }
+
+    private static func processMatches(_ value: Any?, bundleIdentifier: String?) -> Bool {
+        guard let pid = (value as? NSNumber)?.int32Value, pid > 1 else { return false }
+        guard Darwin.kill(pid, 0) == 0 || errno == EPERM else { return false }
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return true }
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == bundleIdentifier
+    }
+
+    private static func printJSON(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line.append("\n")
+        FileHandle.standardOutput.write(Data(line.utf8))
+    }
+
+    private static var iso8601Formatter: ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+}
+
+private enum UsageCommandError: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let message): message
+        }
+    }
+}
+
+private final class CodexAppServerClient: @unchecked Sendable {
+    private struct LaunchCommand {
+        let executable: URL
+        let arguments: [String]
+        let selectedCodexURL: URL?
+        let searchBinURLs: [URL]
+
+        var description: String {
+            ([executable.path] + arguments).joined(separator: " ")
+        }
+    }
+
+    private let processQueue = DispatchQueue(label: "CodexCreditMenuBar.CodexAppServerClient")
+    private let processQueueKey = DispatchSpecificKey<UInt8>()
+    private let callbackQueue: DispatchQueue?
+    private let diagnosticLog: DiagnosticLog?
+    private var process: Process?
+    private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
+    private var stdoutBuffer = Data()
+    private var stderrBuffer = Data()
+    private var nextID = 1
+    private var isInitialized = false
+    private var pending: [Int: (Result<Any, Error>) -> Void] = [:]
+    private var accountID: String?
+    private var accountPlanType: String?
+    private var isRefreshing = false
+    private var refreshStartedAt: Date?
+    private var refreshGeneration = 0
+    private var currentCommandDescription: String?
+    private var processFailureReported = false
+
+    var onRateLimitsUpdated: ((RateLimitSnapshot) -> Void)?
+    var onError: ((String) -> Void)?
+    var onRestartRequired: ((String) -> Void)?
+
+    init(callbackQueue: DispatchQueue? = .main, diagnosticLog: DiagnosticLog? = nil) {
+        self.callbackQueue = callbackQueue
+        self.diagnosticLog = diagnosticLog
+        processQueue.setSpecific(key: processQueueKey, value: 1)
+    }
+
+    func start() {
+        processQueue.async {
+            guard self.process?.isRunning != true else { return }
+            self.launchProcess()
+        }
+    }
+
+    func refreshRateLimits() {
+        processQueue.async {
+            guard self.process?.isRunning == true else {
+                self.launchProcess()
+                return
+            }
+
+            guard self.isInitialized else {
+                self.log("refresh skipped: initialization in progress")
+                self.diagnosticLog?.log("codex_refresh_skip_initializing")
+                return
+            }
+            if self.isRefreshing {
+                let elapsed = abs(self.refreshStartedAt?.timeIntervalSinceNow ?? 0)
+                guard elapsed > 15 else {
+                    self.log("refresh skipped: already in progress")
+                    self.diagnosticLog?.log("codex_refresh_skip_in_progress", ["elapsedSeconds": .int(Int(elapsed))])
+                    return
+                }
+
+                self.log("refresh stale after \(Int(elapsed))s; restarting app-server")
+                self.diagnosticLog?.log("codex_refresh_stale_restart", ["elapsedSeconds": .int(Int(elapsed))])
+                self.isRefreshing = false
+                self.stopCurrentProcess()
+                self.launchProcess()
+                return
+            }
+
+            self.isRefreshing = true
+            self.refreshStartedAt = Date()
+            self.refreshGeneration += 1
+            let generation = self.refreshGeneration
+            self.log("refresh begin")
+            self.diagnosticLog?.log("codex_refresh_begin", ["reason": .string("refresh")])
+            self.scheduleRefreshWatchdog(generation: generation, reason: "refresh")
+            // Account metadata is optional. A stalled or unsupported
+            // account/read must never prevent the quota response from being
+            // requested and displayed.
+            self.readAccount()
+            self.readRateLimits()
+        }
+    }
+
+    func recoverFromSleep() {
+        processQueue.async {
+            self.log("recover from sleep")
+            self.isRefreshing = false
+            self.refreshStartedAt = nil
+            self.accountID = nil
+            self.accountPlanType = nil
+            self.isInitialized = false
+            self.refreshGeneration += 1
+            self.pending.removeAll()
+            self.stopCurrentProcess()
+            self.launchProcess()
+        }
+    }
+
+    func setAutoRefreshInterval(_ interval: TimeInterval) {
+        processQueue.async {
+            self.log("auto refresh interval \(Int(interval))s")
+        }
+    }
+
+    func stop() {
+        performOnProcessQueueAndWait {
+            self.refreshGeneration += 1
+            self.stopCurrentProcess()
+        }
+    }
+
+    private func launchProcess() {
+        stopCurrentProcess()
+
+        let command = findCodexLaunchCommand()
+        let process = Process()
+        process.executableURL = command.executable
+        process.arguments = command.arguments
+        process.environment = Self.codexEnvironment(
+            preferredBinURL: command.selectedCodexURL?.deletingLastPathComponent(),
+            searchBinURLs: command.searchBinURLs
+        )
+        if let selectedCodexURL = command.selectedCodexURL {
+            log("selected codex executable \(selectedCodexURL.path)")
+        } else {
+            log("codex executable not found; falling back to /usr/bin/env")
+            log("searched codex paths \(command.searchBinURLs.map { $0.appendingPathComponent("codex").path }.joined(separator: ", "))")
+        }
+        log("launch \(command.description)")
+
+        let input = Pipe()
+        let output = Pipe()
+        let error = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+
+        output.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.processQueue.async {
+                guard let self, let process, self.process === process else { return }
+                self.handleOutput(data)
+            }
+        }
+
+        error.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.processQueue.async {
+                guard let self, let process, self.process === process else { return }
+                self.handleErrorOutput(data)
+            }
+        }
+
+        process.terminationHandler = { [weak self] terminatedProcess in
+            self?.processQueue.asyncAfter(deadline: .now() + .milliseconds(50)) {
+                self?.handleUnexpectedTermination(terminatedProcess, command: command)
+            }
+        }
+
+        self.process = process
+        stdinPipe = input
+        stdoutPipe = output
+        stderrPipe = error
+        currentCommandDescription = command.description
+        processFailureReported = false
+
+        do {
+            try process.run()
+            diagnosticLog?.log("appserver_launch", [
+                "command": .string(command.description),
+                "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+                "searchedPaths": .string(command.searchBinURLs.map { $0.appendingPathComponent("codex").path }.joined(separator: ":")),
+                "parentPATH": .string(ProcessInfo.processInfo.environment["PATH"] ?? "<missing>"),
+                "effectivePATH": .string(process.environment?["PATH"] ?? "<missing>")
+            ])
+            initialize()
+        } catch {
+            let message = "Codex app-server 시작 실패 (실행 \(command.description)): \(error.localizedDescription)"
+            log("launch failed \(message)")
+            diagnosticLog?.log("appserver_launch_failed", [
+                "command": .string(command.description),
+                "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+                "searchedPaths": .string(command.searchBinURLs.map { $0.appendingPathComponent("codex").path }.joined(separator: ":")),
+                "parentPATH": .string(ProcessInfo.processInfo.environment["PATH"] ?? "<missing>"),
+                "error": .string(error.localizedDescription)
+            ])
+            process.terminationHandler = nil
+            self.process = nil
+            currentCommandDescription = nil
+            processFailureReported = true
+            cleanupCurrentPipes()
+            emitError(message)
+        }
+    }
+
+    private func stopCurrentProcess() {
+        guard let currentProcess = process else {
+            cleanupCurrentPipes()
+            pending.removeAll()
+            isInitialized = false
+            isRefreshing = false
+            refreshStartedAt = nil
+            currentCommandDescription = nil
+            return
+        }
+
+        currentProcess.terminationHandler = nil
+        stdinPipe?.fileHandleForWriting.ccmbClose()
+
+        if currentProcess.isRunning {
+            log("stopping app-server pid \(currentProcess.processIdentifier) with SIGTERM")
+            currentProcess.terminate()
+
+            if !waitForExit(currentProcess, timeout: 0.5) {
+                let pid = currentProcess.processIdentifier
+                log("app-server pid \(pid) ignored SIGTERM; sending SIGKILL")
+                if Darwin.kill(pid, SIGKILL) != 0 {
+                    let errorNumber = errno
+                    log("SIGKILL failed for pid \(pid), errno \(errorNumber): \(String(cString: strerror(errorNumber)))")
+                }
+                currentProcess.waitUntilExit()
+            }
+        } else {
+            currentProcess.waitUntilExit()
+        }
+
+        process = nil
+        currentCommandDescription = nil
+        cleanupCurrentPipes()
+        pending.removeAll()
+        isInitialized = false
+        isRefreshing = false
+        refreshStartedAt = nil
+    }
+
+    private func performOnProcessQueueAndWait(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: processQueueKey) == 1 {
+            work()
+        } else {
+            processQueue.sync(execute: work)
+        }
+    }
+
+    private func waitForExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            + UInt64(timeout * Double(NSEC_PER_SEC))
+        while process.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        guard !process.isRunning else { return false }
+        process.waitUntilExit()
+        return true
+    }
+
+    private func handleUnexpectedTermination(_ terminatedProcess: Process, command: LaunchCommand) {
+        guard process === terminatedProcess else {
+            log("ignore stale app-server termination")
+            return
+        }
+
+        let status = terminatedProcess.terminationStatus
+        let reason = Self.terminationReasonDescription(terminatedProcess.terminationReason)
+        var message = "Codex app-server 예기치 않은 종료 (코드 \(status), 이유 \(reason), 실행 \(command.description))"
+        let stderr = stderrSummary()
+        if !stderr.isEmpty {
+            message += ": \(stderr)"
+        }
+        log("app-server terminated status \(status) reason \(reason)")
+        diagnosticLog?.log("appserver_terminate", [
+            "status": .int(Int(status)),
+            "reason": .string(reason),
+            "command": .string(command.description),
+            "resolvedCodexPath": .string(command.selectedCodexURL?.path ?? "<not-found>"),
+            "stderr": .string(stderr.isEmpty ? "<empty>" : stderr)
+        ])
+
+        let shouldReport = !processFailureReported
+        processFailureReported = true
+        process = nil
+        currentCommandDescription = nil
+        cleanupCurrentPipes()
+        pending.removeAll()
+        isInitialized = false
+        isRefreshing = false
+        refreshStartedAt = nil
+
+        if shouldReport {
+            emitError(message)
+        } else {
+            log("process failure already reported; suppress duplicate UI error")
+        }
+    }
+
+    private func cleanupCurrentPipes() {
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+
+        let handles = [
+            stdinPipe?.fileHandleForReading,
+            stdinPipe?.fileHandleForWriting,
+            stdoutPipe?.fileHandleForReading,
+            stdoutPipe?.fileHandleForWriting,
+            stderrPipe?.fileHandleForReading,
+            stderrPipe?.fileHandleForWriting
+        ]
+        for case let handle? in handles {
+            handle.ccmbClose()
+        }
+
+        stdinPipe = nil
+        stdoutPipe = nil
+        stderrPipe = nil
+        stdoutBuffer.removeAll()
+        stderrBuffer.removeAll()
+    }
+
+    private func initialize() {
+        let clientVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "development"
+        sendRequest(
+            method: "initialize",
+            params: [
+                "clientInfo": [
+                    "name": "codex_credit_menubar",
+                    "title": "CCMB",
+                    "version": clientVersion
+                ]
+            ]
+        ) { result in
+            switch result {
+            case .success:
+                guard self.sendNotification(method: "initialized", params: [:]) else { return }
+                self.isInitialized = true
+                self.isRefreshing = true
+                self.refreshStartedAt = Date()
+                self.refreshGeneration += 1
+                let generation = self.refreshGeneration
+                self.log("initial refresh begin")
+                self.diagnosticLog?.log("codex_refresh_begin", ["reason": .string("initial")])
+                self.scheduleRefreshWatchdog(generation: generation, reason: "initial refresh")
+                // Account metadata is optional; fetch usage independently so a
+                // CLI compatibility problem in account/read cannot blank CCMB.
+                self.readAccount()
+                self.readRateLimits()
+            case .failure(let error):
+                self.emitError(error.localizedDescription)
+                self.stopCurrentProcess()
+            }
+        }
+    }
+
+    private func sendRequest(method: String, params: [String: Any], completion: @escaping (Result<Any, Error>) -> Void) {
+        let id = nextID
+        nextID += 1
+        pending[id] = completion
+        if case .failure(let error) = sendJSONObject(["method": method, "id": id, "params": params]) {
+            pending.removeValue(forKey: id)
+            let isTransportFailure = error.isTransportFailure
+            if isTransportFailure {
+                processFailureReported = true
+            }
+            completion(.failure(error))
+            if isTransportFailure {
+                stopCurrentProcess()
+            }
+        }
+    }
+
+    private func scheduleRefreshWatchdog(generation: Int, reason: String) {
+        processQueue.asyncAfter(deadline: .now() + 20) {
+            guard self.isRefreshing else { return }
+            guard self.refreshGeneration == generation else { return }
+
+            let elapsed = abs(self.refreshStartedAt?.timeIntervalSinceNow ?? 0)
+            self.log("\(reason) timed out after \(Int(elapsed))s; restarting app-server")
+            self.diagnosticLog?.log("codex_refresh_watchdog_timeout", ["reason": .string(reason), "elapsedSeconds": .int(Int(elapsed))])
+            self.isRefreshing = false
+            self.refreshStartedAt = nil
+            self.refreshGeneration += 1
+            self.stopCurrentProcess()
+
+            self.deliverCallback {
+                self.onRestartRequired?("정보 가져오기가 늦어 연결만 다시 시작합니다.")
+            }
+        }
+    }
+
+    private func readRateLimits() {
+        log("read rate limits")
+        let startedAt = refreshStartedAt
+        sendRequest(method: "account/rateLimits/read", params: [:]) { result in
+            defer {
+                self.isRefreshing = false
+                self.refreshStartedAt = nil
+                self.log("refresh end")
+            }
+
+            switch result {
+            case .success(let value):
+                guard let object = value as? [String: Any] else {
+                    let elapsed = abs(startedAt?.timeIntervalSinceNow ?? 0)
+                    self.diagnosticLog?.log("codex_refresh_failed", [
+                        "kind": .string("invalid-response"),
+                        "elapsedSeconds": .double(elapsed)
+                    ])
+                    self.emitError("Codex 사용량 응답을 읽지 못했습니다.")
+                    return
+                }
+                let elapsed = abs(startedAt?.timeIntervalSinceNow ?? 0)
+                self.diagnosticLog?.log("codex_refresh_complete", ["elapsedSeconds": .double(elapsed)])
+                self.onRateLimitsUpdated?(Self.parseRateLimits(
+                    object,
+                    accountID: self.accountID,
+                    accountPlanType: self.accountPlanType
+                ))
+            case .failure(let error):
+                let elapsed = abs(startedAt?.timeIntervalSinceNow ?? 0)
+                let kind = (error as? CodexClientError)?.isTransportFailure == true ? "transport" : "request"
+                self.diagnosticLog?.log("codex_refresh_failed", [
+                    "kind": .string(kind),
+                    "elapsedSeconds": .double(elapsed)
+                ])
+                self.emitError(error.localizedDescription)
+            }
+        }
+    }
+
+    private func readAccount(completion: (() -> Void)? = nil) {
+        log("read account")
+        sendRequest(method: "account/read", params: [:]) { result in
+            switch result {
+            case .success(let value):
+                if let object = value as? [String: Any] {
+                    self.accountID = object.value(at: ["account", "email"]).map { String(describing: $0) }
+                    self.accountPlanType = object.value(at: ["account", "planType"]) as? String
+                }
+                completion?()
+            case .failure(let error):
+                self.emitError(error.localizedDescription)
+                if (error as? CodexClientError)?.isTransportFailure != true {
+                    completion?()
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    private func sendNotification(method: String, params: [String: Any]) -> Bool {
+        if case .failure(let error) = sendJSONObject(["method": method, "params": params]) {
+            if error.isTransportFailure {
+                processFailureReported = true
+            }
+            emitError(error.localizedDescription)
+            if error.isTransportFailure {
+                stopCurrentProcess()
+            }
+            return false
+        }
+        return true
+    }
+
+    private func sendJSONObject(_ object: [String: Any]) -> Result<Void, CodexClientError> {
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: object)
+        } catch {
+            return .failure(.message("Codex 요청 인코딩 실패: \(error.localizedDescription)"))
+        }
+        let newline = Data([0x0A])
+
+        let method = object["method"] as? String ?? "unknown"
+        let requestID = object["id"].flatMap(Self.numberAsInt)
+        log("send method \(method)\(requestID.map { " id \($0)" } ?? "")")
+        guard process?.isRunning == true, let inputHandle = stdinPipe?.fileHandleForWriting else {
+            let error = transportError("app-server가 실행 중이 아닙니다")
+            log("send skipped: \(error.localizedDescription)")
+            return .failure(error)
+        }
+
+        do {
+            try inputHandle.ccmbWrite(data)
+            try inputHandle.ccmbWrite(newline)
+            return .success(())
+        } catch {
+            let transportError = transportError("stdin 쓰기 실패: \(error.localizedDescription)")
+            log(transportError.localizedDescription)
+            return .failure(transportError)
+        }
+    }
+
+    private func transportError(_ detail: String) -> CodexClientError {
+        var context = currentCommandDescription.map { "실행 \($0)" } ?? "실행 경로 없음"
+        if let process, !process.isRunning {
+            context += ", 코드 \(process.terminationStatus), 이유 \(Self.terminationReasonDescription(process.terminationReason))"
+        }
+        diagnosticLog?.log("appserver_transport_failure")
+        return .transport("Codex app-server 통신 실패 (\(context)): \(detail)")
+    }
+
+    private func handleOutput(_ data: Data) {
+        guard !data.isEmpty else { return }
+        stdoutBuffer.append(data)
+
+        while let newlineRange = stdoutBuffer.firstRange(of: Data([0x0A])) {
+            let lineData = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<newlineRange.lowerBound)
+            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex...newlineRange.lowerBound)
+            guard !lineData.isEmpty else { continue }
+            handleLine(lineData)
+        }
+    }
+
+    private func handleErrorOutput(_ data: Data) {
+        guard !data.isEmpty else { return }
+        stderrBuffer.append(data)
+        if stderrBuffer.count > 8_192 {
+            stderrBuffer.removeFirst(stderrBuffer.count - 8_192)
+        }
+
+        let message = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty {
+            let flattened = message.replacingOccurrences(of: "\n", with: " | ")
+            log("stderr \(flattened)")
+            diagnosticLog?.log("appserver_stderr", ["message": .string(flattened)])
+        }
+    }
+
+    private func stderrSummary() -> String {
+        let summary = String(decoding: stderrBuffer, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " | ")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(
+                of: "\u{001B}\\[[0-9;]*m",
+                with: "",
+                options: .regularExpression
+            )
+
+        let maximumLength = 800
+        guard summary.count > maximumLength else { return summary }
+        return "…" + summary.suffix(maximumLength)
+    }
+
+    private func handleLine(_ data: Data) {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            log("recv invalid JSON")
+            return
+        }
+
+        if let method = object["method"] as? String {
+            log("recv notification \(method)")
+        } else if let rawID = object["id"], let id = Self.numberAsInt(rawID) {
+            log("recv response id \(id)")
+        } else {
+            log("recv unrecognized message")
+        }
+
+        if let method = object["method"] as? String, method == "account/rateLimits/updated" {
+            refreshRateLimits()
+            return
+        }
+
+        guard
+            let rawID = object["id"],
+            let id = Self.numberAsInt(rawID),
+            let completion = pending.removeValue(forKey: id)
+        else {
+            return
+        }
+
+        if let errorObject = object["error"] {
+            completion(.failure(CodexClientError.message(String(describing: errorObject))))
+            return
+        }
+
+        completion(.success(object["result"] ?? [:]))
+    }
+
+    private func emitError(_ message: String) {
+        guard !message.isEmpty else { return }
+        log("error \(message)")
+        deliverCallback {
+            self.onError?(message)
+        }
+    }
+
+    private func deliverCallback(_ callback: @escaping () -> Void) {
+        if let callbackQueue {
+            callbackQueue.async(execute: callback)
+        } else {
+            callback()
+        }
+    }
+
+    private func findCodexLaunchCommand() -> LaunchCommand {
+        let searchBinURLs = codexSearchBinURLs()
+        let candidates = searchBinURLs.map { $0.appendingPathComponent("codex") }
+
+        if let codexURL = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) {
+            return LaunchCommand(
+                executable: codexURL,
+                arguments: ["app-server"],
+                selectedCodexURL: codexURL,
+                searchBinURLs: searchBinURLs
+            )
+        }
+
+        return LaunchCommand(
+            // Finder-launched apps do not read the user's shell startup files.
+            // Give login-shell installs one last chance before reporting that
+            // Codex is missing. A shell is only used as a fallback; normal
+            // installs still launch the resolved executable directly.
+            executable: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-lc", "exec codex app-server"],
+            selectedCodexURL: nil,
+            searchBinURLs: searchBinURLs
+        )
+    }
+
+    private func codexSearchBinURLs() -> [URL] {
+        let fileManager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+        let homeURL = fileManager.homeDirectoryForCurrentUser
+        var binURLs: [URL] = []
+
+        if let currentPath = environment["PATH"] {
+            binURLs.append(contentsOf: currentPath
+                .split(separator: ":")
+                .map { URL(fileURLWithPath: String($0)) })
+        }
+
+        binURLs.append(contentsOf: [
+            homeURL.appendingPathComponent(".local/bin"),
+            homeURL.appendingPathComponent(".local/npm-global/bin"),
+            homeURL.appendingPathComponent(".npm-global/bin"),
+            homeURL.appendingPathComponent(".yarn/bin"),
+            homeURL.appendingPathComponent(".config/yarn/global/node_modules/.bin"),
+            homeURL.appendingPathComponent(".pnpm"),
+            homeURL.appendingPathComponent(".bun/bin"),
+            homeURL.appendingPathComponent("Library/pnpm"),
+            homeURL.appendingPathComponent(".volta/bin"),
+            homeURL.appendingPathComponent(".asdf/shims"),
+            homeURL.appendingPathComponent(".mise/shims"),
+            homeURL.appendingPathComponent(".local/share/mise/shims")
+        ])
+
+        if let voltaHome = environment["VOLTA_HOME"], !voltaHome.isEmpty {
+            binURLs.append(URL(fileURLWithPath: voltaHome).appendingPathComponent("bin"))
+        }
+        if let asdfDataDirectory = environment["ASDF_DATA_DIR"], !asdfDataDirectory.isEmpty {
+            binURLs.append(URL(fileURLWithPath: asdfDataDirectory).appendingPathComponent("shims"))
+        }
+
+        var nvmRootURLs = [homeURL.appendingPathComponent(".nvm")]
+        if let nvmDirectory = environment["NVM_DIR"], !nvmDirectory.isEmpty {
+            nvmRootURLs.insert(URL(fileURLWithPath: nvmDirectory), at: 0)
+        }
+
+        for nvmRootURL in nvmRootURLs {
+            let versionsURL = nvmRootURL.appendingPathComponent("versions/node")
+            guard let versionURLs = try? fileManager.contentsOfDirectory(
+                at: versionsURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            binURLs.append(contentsOf: versionURLs
+                .sorted { lhs, rhs in
+                    lhs.lastPathComponent.compare(rhs.lastPathComponent, options: .numeric) == .orderedDescending
+                }
+                .map { $0.appendingPathComponent("bin") })
+        }
+
+        binURLs.append(contentsOf: [
+            URL(fileURLWithPath: "/opt/homebrew/bin"),
+            URL(fileURLWithPath: "/usr/local/bin"),
+            URL(fileURLWithPath: "/usr/bin"),
+            URL(fileURLWithPath: "/bin"),
+            URL(fileURLWithPath: "/usr/sbin"),
+            URL(fileURLWithPath: "/sbin")
+        ])
+
+        var seenPaths = Set<String>()
+        return binURLs.filter { seenPaths.insert($0.standardizedFileURL.path).inserted }
+    }
+
+    private static func codexEnvironment(preferredBinURL: URL?, searchBinURLs: [URL]) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        var pathEntries: [String] = []
+        if let preferredBinURL {
+            pathEntries.append(preferredBinURL.standardizedFileURL.path)
+        }
+        pathEntries.append(contentsOf: searchBinURLs.map { $0.standardizedFileURL.path })
+        if let currentPath = environment["PATH"] {
+            pathEntries.append(contentsOf: currentPath.split(separator: ":").map(String.init))
+        }
+
+        var seenPaths = Set<String>()
+        environment["PATH"] = pathEntries
+            .filter { !$0.isEmpty && seenPaths.insert($0).inserted }
+            .joined(separator: ":")
+        return environment
+    }
+
+    private static func terminationReasonDescription(_ reason: Process.TerminationReason) -> String {
+        switch reason {
+        case .exit:
+            return "exit"
+        case .uncaughtSignal:
+            return "signal"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private func log(_ message: String) {
+        writePrivateLog(message)
+    }
+
+    private static func parseRateLimits(
+        _ object: [String: Any],
+        accountID: String?,
+        accountPlanType: String?
+    ) -> RateLimitSnapshot {
+        let rateLimits = object["rateLimits"] as? [String: Any]
+        let primary = rateLimits?["primary"] as? [String: Any]
+
+        let resetCredits = object.value(at: ["rateLimitResetCredits", "availableCount"]).flatMap(numberAsInt)
+        let resetsAt = primary?["resetsAt"].flatMap(numberAsDouble).map {
+            Date(timeIntervalSince1970: $0)
+        }
+
+        return RateLimitSnapshot(
+            accountID: accountID,
+            planType: rateLimits?["planType"] as? String ?? accountPlanType,
+            usedPercent: primary?["usedPercent"].flatMap(numberAsDouble),
+            windowDurationMinutes: primary?["windowDurationMins"].flatMap(numberAsInt),
+            resetsAt: resetsAt,
+            resetCredits: resetCredits,
+            creditBalance: object.value(at: ["rateLimits", "credits", "balance"]).flatMap(numberAsDouble),
+            sparkUsedPercent: nil,
+            sparkWindowDurationMinutes: nil,
+            sparkResetsAt: nil,
+            detailedCreditsReturned: object.containsKeyRecursively("credits"),
+            updatedAt: Date()
+        )
+    }
+
+    private static func numberAsDouble(_ value: Any) -> Double? {
+        if let double = value as? Double { return double }
+        if let int = value as? Int { return Double(int) }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    private static func numberAsInt(_ value: Any) -> Int? {
+        if let int = value as? Int { return int }
+        if let double = value as? Double { return Int(double) }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
+}
+
+private enum CodexClientError: LocalizedError {
+    case message(String)
+    case transport(String)
+
+    var isTransportFailure: Bool {
+        if case .transport = self { return true }
+        return false
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let message):
+            return message
+        case .transport(let message):
+            return message
+        }
+    }
+}
+
+private extension Dictionary where Key == String, Value == Any {
+    func value(at path: [String]) -> Any? {
+        guard let first = path.first else { return self }
+        guard let value = self[first] else { return nil }
+        guard path.count > 1 else { return value }
+        return (value as? [String: Any])?.value(at: Array(path.dropFirst()))
+    }
+
+    func containsKeyRecursively(_ searchedKey: String) -> Bool {
+        for (key, value) in self {
+            if key == searchedKey { return true }
+            if let dictionary = value as? [String: Any], dictionary.containsKeyRecursively(searchedKey) {
+                return true
+            }
+            if let array = value as? [[String: Any]], array.contains(where: { $0.containsKeyRecursively(searchedKey) }) {
+                return true
+            }
+        }
+
+        return false
+    }
+}
+
+private extension FileHandle {
+    func ccmbWrite(_ data: Data) throws {
+        if #available(macOS 10.15.4, *) {
+            try write(contentsOf: data)
+        } else {
+            write(data)
+        }
+    }
+
+    func ccmbClose() {
+        if #available(macOS 10.15.4, *) {
+            try? close()
+        } else {
+            closeFile()
+        }
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSMenuDelegate {
+    var callbacks = HTTCCMBRuntime.HostCallbacks()
+    var isMenuBarVisible: Bool = true
+    private var isStopped = false
+    private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+    init(callbacks: HTTCCMBRuntime.HostCallbacks = .init(), showMenuBar: Bool = true) {
+        self.callbacks = callbacks
+        self.isMenuBarVisible = showMenuBar
+        super.init()
+    }
+    private var statusMenu: NSMenu?
+    /// Codex usage is fetched over the authenticated HTTPS API. Keeping the
+    /// process-based client below for now avoids a broad source deletion while
+    /// the direct path becomes the only live runtime path.
+    private let client = CodexDirectAPIClient(diagnosticLog: .shared)
+    private let networkMonitor = NWPathMonitor()
+    private let networkQueue = DispatchQueue(label: "CodexCreditMenuBar.NetworkMonitor")
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: false,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
+    private var countdownTimer: DispatchSourceTimer?
+    private var autoRefreshTimer: DispatchSourceTimer?
+    private var refreshIntervalPreference = Int(AppDelegate.savedRefreshInterval())
+    private var claudeRefreshIntervalPreference = Int(AppDelegate.savedClaudeRefreshInterval())
+    private var geminiRefreshIntervalPreference = Int(AppDelegate.savedGeminiRefreshInterval())
+    private var codexSmartRefreshPolicy = SmartRefreshPolicy()
+    private var claudeSmartRefreshPolicy = SmartRefreshPolicy()
+    private var geminiSmartRefreshPolicy = SmartRefreshPolicy()
+    private static let nasRefreshInterval: TimeInterval = 180
+    private var refreshInterval: TimeInterval {
+        if isNASMode { return Self.nasRefreshInterval }
+        return refreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? codexSmartRefreshPolicy.interval
+            : TimeInterval(refreshIntervalPreference)
+    }
+    private var claudeRefreshInterval: TimeInterval {
+        if isNASMode { return Self.nasRefreshInterval }
+        return claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? claudeSmartRefreshPolicy.interval
+            : TimeInterval(claudeRefreshIntervalPreference)
+    }
+    private var geminiRefreshInterval: TimeInterval {
+        if isNASMode { return Self.nasRefreshInterval }
+        return geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference
+            ? geminiSmartRefreshPolicy.interval
+            : TimeInterval(geminiRefreshIntervalPreference)
+    }
+    private var grokRefreshInterval: TimeInterval = AppDelegate.savedGrokRefreshInterval()
+    private var nextAutoRefreshAt = Date()
+    private var nextCodexRefreshAt = Date()
+    private var nextClaudeRefreshAt = Date()
+    private var nextGeminiRefreshAt = Date()
+    private var nextGrokRefreshAt = Date()
+    private var resetVerificationDates: [SmartProvider: Date] = [:]
+    private var resetVerificationWorkItems: [SmartProvider: [DispatchWorkItem]] = [:]
+    private var activity: NSObjectProtocol?
+    private var instanceLockFileDescriptor: Int32 = -1
+
+    private let accountItem = NSMenuItem(title: "계정 확인 중…", action: nil, keyEquivalent: "")
+    private let usageItem = NSMenuItem(title: "Codex 사용량 확인 중…", action: nil, keyEquivalent: "")
+    private let resetItem = NSMenuItem(title: "초기화 시간 확인 중…", action: nil, keyEquivalent: "")
+    private let resetCreditsItem = NSMenuItem(title: "초기화 크레딧 확인 중…", action: nil, keyEquivalent: "")
+    private let creditBalanceItem = NSMenuItem(title: "크레딧 확인 중…", action: nil, keyEquivalent: "")
+    private let updatedItem = NSMenuItem(title: "가져온 시간 없음", action: nil, keyEquivalent: "")
+    private let refreshItem = NSMenuItem(title: "새로 고침 · 30초 후", action: #selector(refresh), keyEquivalent: "")
+    private let codexLoginItem = NSMenuItem(title: "Codex 로그인", action: #selector(beginCodexOAuthLogin), keyEquivalent: "")
+    private let intervalItem = NSMenuItem(title: "자동 새로 고침 · 30초", action: nil, keyEquivalent: "")
+    /// Each provider owns its cadence and choices. The timer scheduler wakes
+    /// at the shortest enabled interval, while per-provider due dates ensure
+    /// that wake-up never turns into an early request for another provider.
+    private lazy var refreshIntervalItems: [NSMenuItem] = UsageCore.refreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: Self.refreshPreferenceTitle(seconds),
+            action: #selector(AppDelegate.setCodexRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
+    private lazy var claudeRefreshIntervalItems: [NSMenuItem] = UsageCore.claudeRefreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: Self.refreshPreferenceTitle(seconds),
+            action: #selector(AppDelegate.setClaudeRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
+    private lazy var geminiRefreshIntervalItems: [NSMenuItem] = UsageCore.geminiRefreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: Self.refreshPreferenceTitle(seconds),
+            action: #selector(AppDelegate.setGeminiRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
+    private lazy var grokRefreshIntervalItems: [NSMenuItem] = UsageCore.grokRefreshIntervalOptions.map { seconds in
+        let item = NSMenuItem(
+            title: seconds == 0 ? "끔" : Self.durationTitle(seconds: seconds),
+            action: #selector(AppDelegate.setGrokRefreshInterval(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = seconds
+        return item
+    }
+    private let codexIntervalItem = NSMenuItem(title: "Codex · 30초", action: nil, keyEquivalent: "")
+    private let claudeIntervalItem = NSMenuItem(title: "Claude · 10분", action: nil, keyEquivalent: "")
+    private let geminiIntervalItem = NSMenuItem(title: "Gemini · 5분", action: nil, keyEquivalent: "")
+    private let dataSourceItem = NSMenuItem(title: "수집 소스", action: nil, keyEquivalent: "")
+    private lazy var dataCollectionSourceItems: [NSMenuItem] = [DataCollectionSource.nas, .localMac].map { source in
+        let item = NSMenuItem(
+            title: source.title,
+            action: #selector(AppDelegate.setDataCollectionSource(_:)),
+            keyEquivalent: ""
+        )
+        item.representedObject = source.rawValue
+        return item
+    }
+    private let grokIntervalItem = NSMenuItem(title: "Grok · 5분", action: nil, keyEquivalent: "")
+    private let pinnedUsageWindowItem = NSMenuItem(
+        title: "항상 보기",
+        action: #selector(togglePinnedUsageWindow),
+        keyEquivalent: ""
+    )
+    private let launchAtLoginItem = NSMenuItem(title: "자동 실행", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+    private let shareItem = NSMenuItem(title: "사용량 공유", action: nil, keyEquivalent: "")
+    private let shareStatusItem = NSMenuItem(title: "공유 데이터 저장 대기 중…", action: nil, keyEquivalent: "")
+    private lazy var cloudSyncUploader = CloudSyncUploader(snapshotFileURL: SharedUsageStore.snapshotURL)
+    private lazy var remoteFolderPublisher = RemoteFolderPublisher(snapshotFileURL: SharedUsageStore.snapshotURL)
+    private let remoteSyncItem = NSMenuItem(title: "iPhone 원격 동기화", action: nil, keyEquivalent: "")
+    private let remoteSyncStatusItem = NSMenuItem(title: "동기화 기록 없음", action: nil, keyEquivalent: "")
+    private let remoteSyncToggleItem = NSMenuItem(
+        title: "자동 업로드 사용",
+        action: #selector(toggleRemoteSync),
+        keyEquivalent: ""
+    )
+    private let remoteSyncNowItem = NSMenuItem(
+        title: "지금 모두 동기화",
+        action: #selector(syncRemoteNow),
+        keyEquivalent: ""
+    )
+    private let remoteFolderStatusItem = NSMenuItem(title: "클라우드 폴더 선택 안 됨", action: nil, keyEquivalent: "")
+    private let chooseRemoteFolderItem = NSMenuItem(
+        title: "Dropbox·Google Drive 폴더 선택…",
+        action: #selector(chooseRemoteFolder),
+        keyEquivalent: ""
+    )
+    private let clearRemoteFolderItem = NSMenuItem(
+        title: "클라우드 폴더 연결 해제",
+        action: #selector(clearRemoteFolder),
+        keyEquivalent: ""
+    )
+    private let shareFolderItem = NSMenuItem(title: "저장 위치 열기", action: #selector(openSharedUsageFolder), keyEquivalent: "")
+    private let copySharePromptCombinedItem = NSMenuItem(
+        title: "전체(Codex+Claude+Gemini) 요청문 복사",
+        action: #selector(copySharePromptCombined),
+        keyEquivalent: ""
+    )
+    private let copySharePromptCodexItem = NSMenuItem(
+        title: "Codex 전용 요청문 복사",
+        action: #selector(copySharePromptCodex),
+        keyEquivalent: ""
+    )
+    private let copySharePromptClaudeItem = NSMenuItem(
+        title: "Claude 전용 요청문 복사",
+        action: #selector(copySharePromptClaude),
+        keyEquivalent: ""
+    )
+    private let copySharePromptGeminiItem = NSMenuItem(
+        title: "Gemini 전용 요청문 복사",
+        action: #selector(copySharePromptGemini),
+        keyEquivalent: ""
+    )
+    private let copySharePromptGrokItem = NSMenuItem(
+        title: "Grok 전용 요청문 복사",
+        action: #selector(copySharePromptGrok),
+        keyEquivalent: ""
+    )
+    private let copyShareCommandItem = NSMenuItem(title: "공유 명령 복사", action: #selector(copyShareCommand), keyEquivalent: "")
+    private let copyErrorItem = NSMenuItem(title: "오류 내용 복사", action: #selector(copyLastError), keyEquivalent: "")
+    private let usagePageLinksView = UsagePageButtonsView()
+    private let usagePageLinksItem = NSMenuItem()
+    private let menuRefreshControlsView = RefreshIntervalControlsView()
+    private let menuRefreshControlsItem = NSMenuItem()
+    private let lifecycleActionsView = LifecycleActionsRowView()
+    private let lifecycleActionsItem = NSMenuItem()
+    private let historyChartView = UsageHistoryChartView()
+    private let historyChartItem = NSMenuItem()
+    /// Per-refresh consumption strips, persisted so the chart is not blank for
+    /// the first stretch after every launch.
+    private var codexConsumption = UsageConsumptionTracker()
+    private var codexSparkConsumption = UsageConsumptionTracker()
+    private var claudeConsumption = UsageConsumptionTracker()
+    private var claudeFableConsumption = UsageConsumptionTracker()
+    private var geminiConsumption = UsageConsumptionTracker()
+    private var grokConsumption = UsageConsumptionTracker()
+    private let checkForUpdatesItem = NSMenuItem(
+        title: "업데이트 확인…",
+        action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+        keyEquivalent: ""
+    )
+    private lazy var updateVersionView = VersionOpacityRowView(
+        alwaysTitle: "항상 보기",
+        updateTitle: "업데이트 확인…",
+        versionTitle: "현재 버전 \(appVersion)"
+    )
+    private var panelOpacity: Double = AppDelegate.savedPanelOpacity()
+    private let updateVersionItem = NSMenuItem()
+    private let restartItem = NSMenuItem(title: "CCMB 다시 시작", action: #selector(restartApp), keyEquivalent: "")
+    private let diagnosticsItem = NSMenuItem(title: "진단", action: nil, keyEquivalent: "")
+    private let copyDiagnosticReportItem = NSMenuItem(title: "진단 리포트 복사", action: #selector(copyDiagnosticReport), keyEquivalent: "")
+    private let openDiagnosticLogItem = NSMenuItem(title: "진단 로그 폴더 열기", action: #selector(openDiagnosticLogFolder), keyEquivalent: "")
+    private let footerLinkItem = NSMenuItem(title: "GitHub에서 armsone 보기…", action: #selector(openFooterLink), keyEquivalent: "")
+    private let quitItem = NSMenuItem(title: "CCMB 종료", action: #selector(quit), keyEquivalent: "q")
+    private let splitPanelView = SplitUsagePanelView()
+    private let splitPanelItem = NSMenuItem()
+    private var pinnedUsageWindowController: PinnedUsageWindowController?
+    /// The status-item's own dropdown, once usage data has loaded at least
+    /// once. Reuses the exact same content stack as the persistent "항상
+    /// 보기" panel — one whole-panel background behind fully opaque
+    /// foreground rows — instead of an `NSMenu`, whose own vibrant
+    /// background can't be tinted by the opacity slider. Before the first
+    /// snapshot arrives, `showStatusMenu` still falls back to the native
+    /// `statusMenu` built below, which carries the original loading/offline
+    /// text rows.
+    private lazy var statusDropdownController: PinnedUsageWindowController = {
+        let controller = PinnedUsageWindowController(transient: true)
+        controller.dismissalExcludedView = statusItem.button
+        controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
+        controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
+        controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+        controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
+        controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
+        controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
+        controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+        controller.onRefreshAll = { [weak self] in self?.refresh() }
+        controller.onThemeChange = { [weak self] in self?.applyPanelTheme($0) }
+        controller.setShareMenu(makeShareMenu())
+        controller.onCheckForUpdates = { [weak self] in self?.callbacks.onCheckForUpdates?() }
+        controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
+        controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
+        controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
+        controller.onRestart = { [weak self] in self?.callbacks.onRestart?() }
+        controller.onQuit = { [weak self] in self?.callbacks.onQuit?() }
+        controller.onToggleAlwaysView = { [weak self] in self?.togglePinnedUsageWindow() }
+        controller.setOpacity(panelOpacity)
+        return controller
+    }()
+    private let usageSeparatorItem = NSMenuItem.separator()
+    private let accountSeparatorItem = NSMenuItem.separator()
+    private var lastRateLimitUpdatedAt: Date?
+    private var lastSnapshot: RateLimitSnapshot?
+    private var lastClaudeSnapshot: ClaudeUsageSnapshot?
+    private var lastClaudeFetchFailureLabel: String?
+    private var claudeNeedsReconnect = false
+    private var claudeLoginInProgress = false
+    /// Set only while a 429 backoff is active; drives a live "N초 후 재시도"
+    /// countdown in the panel instead of a static label frozen at fetch time.
+    private var lastClaudeRateLimitRetryAt: Date?
+    private var lastGeminiSnapshot: GeminiUsageSnapshot?
+    private var lastGeminiFetchFailureLabel: String?
+    /// NAS(놀이터) 쪽 네 카드 상태. 로컬 수집 상태(`lastSnapshot`,
+    /// `lastClaudeSnapshot`, `lastGeminiSnapshot`)와 완전히 분리되어 있으며,
+    /// 실패해도 서비스별 마지막 정상 값을 지우지 않는다. Gemini 본계정
+    /// (account1)과 부계정(account2)은 고정 신원으로 서로 뒤바뀌지 않는다.
+    private var nasState = NASFourServiceState()
+    /// When the last NAS snapshot response (of any per-service outcome)
+    /// arrived, for the panel header.
+    private var lastNASSnapshotReceivedAt: Date?
+    private let nasTaskStatusStore = NASTaskStatusStore()
+    /// Last successfully parsed NAS consumption-history v2 envelope. A
+    /// transport error, a helper `{ok:false}` result or an unknown schema
+    /// never clears this — it only stops updating it — and local history is
+    /// never shown in its place.
+    private var lastNASHistory: NASHistoryV2?
+    private var lastNASHistoryFetchFailureLabel: String?
+    /// 전역 수집 소스(놀이터/이 Mac). Codex·Claude·Gemini(본·부계정) 네
+    /// 카드 전체에 적용되며, NAS 실패는 로컬 수집으로 자동 전환되지 않는다.
+    private var dataCollectionSourcePreference = AppDelegate.savedDataCollectionSource()
+    /// Bumped on every source switch. Async results carry the generation
+    /// they were requested under and are dropped if it changed, so a local
+    /// read finishing after a switch to NAS (or the reverse) can never
+    /// overwrite the other source's values or be published as such.
+    private var dataSourceGeneration = 0
+    private var isNASMode: Bool { dataCollectionSourcePreference == .nas }
+    /// Gemini web ("Gemini 온라인") snapshot — sourced only from the CCMB-owned
+    /// WebKit session's read of gemini.google.com/usage, never inferred from
+    /// the CLI values.
+    private var lastGeminiOnlineSnapshot: GeminiOnlineUsageSnapshot?
+    private var geminiOnlineNeedsConnection = false
+    private var geminiOnlineParseFailed = false
+    private lazy var geminiOnlineController: GeminiOnlineWebController = {
+        let controller = GeminiOnlineWebController()
+        controller.onUpdate = { [weak self] update in
+            guard let self, !self.isStopped else { return }
+            switch update {
+            case .snapshot(let snapshot):
+                self.lastGeminiOnlineSnapshot = snapshot
+                self.geminiOnlineNeedsConnection = false
+                self.geminiOnlineParseFailed = false
+                self.diagnosticLog.log("gemini_online_snapshot")
+            case .connectionRequired:
+                self.geminiOnlineNeedsConnection = true
+                self.geminiOnlineParseFailed = false
+                self.diagnosticLog.log("gemini_online_connection_required")
+            case .parseFailed:
+                self.geminiOnlineParseFailed = true
+                self.diagnosticLog.log("gemini_online_parse_failed")
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            self.updateSplitPanel()
+        }
+        return controller
+    }()
+    private let menuHeaderView = UsagePanelHeaderView()
+    private let menuHeaderItem = NSMenuItem()
+    private var lastManualRefreshAt: Date?
+    private var lastGrokSnapshot: GrokUsageSnapshot?
+    private var lastGrokFetchFailureLabel: String?
+    private var grokLoginRequired = false
+    private var grokLoginInProgress = false
+    private var grokAuthRecoveryInProgress = false
+    private var lastGrokAuthRecoveryAttemptAt: Date?
+    private var lastSharedUsageAt: Date?
+    private var lastShareError: String?
+    private var helperInstallError: String?
+    private var shareFeedback: (message: String, expiresAt: Date)?
+    private var lastErrorMessage: String?
+    private var wakeRecoveryToken = 0
+    private let wakeRestartDelay: TimeInterval = 14
+    /// Closed between system sleep and the next interactive wake.
+    /// While closed, no provider fetch is started and no snapshot is
+    /// published or uploaded, so a dark wake in a bag can never mint a fresh
+    /// `fetchedAt`/`publishedAt` for the iPhone.
+    private var isSleepGateClosed = false
+    private var lastWakeRecoveryStartedAt: Date?
+    private var isOffline = false
+    private let diagnosticLog = DiagnosticLog.shared
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
+
+    deinit {
+        writePrivateLog("app delegate deinit")
+    }
+
+    func start() {
+        appLog("controller starting")
+        diagnosticLog.log("app_launch", ["version": .string(appVersion)])
+        if !acquireSingleInstanceLock() {
+            appLog("single instance lock acquisition returned false; continuing in-process")
+        }
+        migrateVisibleProvidersToSmartRefreshIfNeeded()
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Keep Codex, Claude, Gemini, and Grok usage auto-refresh running"
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWakeFromSleep),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWillSleep),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidSleep),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleScreensDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        loadConsumptionTrackers()
+        loadNASCaches()
+        lastGeminiOnlineSnapshot = GeminiOnlineUsageCore.loadPersistedSnapshot(defaults: CCMBPreferences.shared.defaults)
+        configureStatusItem()
+        configureClient()
+        startNetworkMonitor()
+        client.setAutoRefreshInterval(refreshInterval)
+        if DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) {
+            client.start()
+        }
+        diagnosticLog.log("data_source_at_launch", ["source": .string(dataCollectionSourcePreference.rawValue)])
+        startCountdownTimer()
+        restartAutoRefreshTimer()
+        refreshCodexUsage()
+        refreshClaudeUsage()
+        refreshGeminiUsage()
+        refreshGrokUsage()
+    }
+
+    func stop() {
+        guard !isStopped else { return }
+        isStopped = true
+        dataSourceGeneration += 1
+        diagnosticLog.log("app_terminate")
+        countdownTimer?.cancel()
+        countdownTimer = nil
+        resetVerificationWorkItems.values.flatMap { $0 }.forEach { $0.cancel() }
+        resetVerificationWorkItems.removeAll()
+        resetVerificationDates.removeAll()
+        networkMonitor.cancel()
+        stopAutoRefreshLoop()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
+        client.stop()
+        NASFourServiceClient.cancelInFlight()
+        NASHistoryClient.cancelInFlight()
+        nasTaskStatusStore.cancelInFlight()
+        statusDropdownController.close()
+        pinnedUsageWindowController?.onClose = nil
+        pinnedUsageWindowController?.close()
+        pinnedUsageWindowController = nil
+        NSStatusBar.system.removeStatusItem(statusItem)
+        if instanceLockFileDescriptor >= 0 {
+            Darwin.close(instanceLockFileDescriptor)
+            instanceLockFileDescriptor = -1
+        }
+        diagnosticLog.flush()
+    }
+
+    func showDashboard() {
+        if let button = statusItem.button, let window = button.window, statusItem.isVisible {
+            showStatusMenu()
+        } else {
+            let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            if hasPanelContent {
+                let point = NSPoint(
+                    x: screenFrame.midX - UsagePanelLayout.viewWidth / 2,
+                    y: screenFrame.maxY - 20
+                )
+                statusDropdownController.positionTopLeft(point)
+                statusDropdownController.show()
+            } else if let menu = statusMenu {
+                menu.update()
+                let point = NSPoint(
+                    x: screenFrame.midX - menu.size.width / 2,
+                    y: screenFrame.midY
+                )
+                menu.popUp(positioning: nil, at: point, in: nil)
+            }
+        }
+    }
+
+    func setMenuBarVisible(_ visible: Bool) {
+        isMenuBarVisible = visible
+        statusItem.isVisible = visible
+    }
+
+    func handleServerTargetChanged(newTarget: String) {
+        CCMBPreferences.shared.serverTarget = newTarget
+        if isNASMode {
+            NASFourServiceClient.cancelInFlight()
+            NASHistoryClient.cancelInFlight()
+            nasTaskStatusStore.resetThrottle()
+            dataSourceGeneration += 1
+            nasState = NASFourServiceState()
+            lastNASSnapshotReceivedAt = nil
+            lastNASHistory = nil
+            lastNASHistoryFetchFailureLabel = nil
+            CCMBPreferences.shared.clearNASCaches()
+
+            if NASConfig.isValidTarget(newTarget) {
+                if !isOffline {
+                    refreshAllFromNAS(force: true)
+                }
+            } else {
+                nasState.applyFailure(label: "NAS 서버 미설정")
+                lastNASHistoryFetchFailureLabel = "NAS 서버 미설정"
+            }
+            restartAutoRefreshTimer()
+            refreshStatusTitle()
+            updateSplitPanel()
+        }
+    }
+
+    func setServerTarget(_ target: String) {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if CCMBPreferences.shared.serverTarget != trimmed {
+            handleServerTargetChanged(newTarget: trimmed)
+        }
+    }
+
+    func setDataSource(_ source: String) {
+        guard let resolved = DataCollectionSource(rawValue: source) else { return }
+        applyDataCollectionSource(resolved)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        diagnosticLog.log("menu_open")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        diagnosticLog.log("app_terminate")
+        countdownTimer?.cancel()
+        resetVerificationWorkItems.values.flatMap { $0 }.forEach { $0.cancel() }
+        networkMonitor.cancel()
+        stopAutoRefreshLoop()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+        }
+        client.stop()
+        if instanceLockFileDescriptor >= 0 {
+            Darwin.close(instanceLockFileDescriptor)
+            instanceLockFileDescriptor = -1
+        }
+        diagnosticLog.flush()
+    }
+
+    private func acquireSingleInstanceLock() -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: SharedUsageStore.directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            appLog("single instance directory failed: \(error.localizedDescription)")
+            return false
+        }
+
+        let lockURL = SharedUsageStore.directoryURL.appendingPathComponent("instance.lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else {
+            appLog("single instance lock open failed: errno \(errno)")
+            return false
+        }
+        guard Darwin.lockf(descriptor, F_TLOCK, 0) == 0 else {
+            Darwin.close(descriptor)
+            appLog("another CCMB instance is already running")
+            return false
+        }
+        instanceLockFileDescriptor = descriptor
+        return true
+    }
+
+    @objc private func handleWillSleep() {
+        closeSleepGate(reason: "system_sleep")
+    }
+
+    @objc private func handleScreensDidSleep() {
+        // Display sleep alone leaves the Mac running: keep collecting and
+        // uploading usage for the iPhone. Only system sleep closes the gate.
+        diagnosticLog.log("display_sleep_refresh_continues")
+    }
+
+    private func closeSleepGate(reason: String) {
+        guard !isSleepGateClosed else { return }
+        isSleepGateClosed = true
+        // Invalidating the token also silences wake watchdogs scheduled
+        // before this sleep, so they cannot restart the app-server mid-sleep.
+        wakeRecoveryToken += 1
+        appLog("sleep gate closed: \(reason)")
+        diagnosticLog.log("sleep_gate_closed", ["reason": .string(reason)])
+        stopAutoRefreshLoop()
+    }
+
+    @objc private func handleWakeFromSleep() {
+        appLog("did wake from sleep")
+        // A dark wake (Power Nap, lid closed in a bag) can deliver this
+        // notification while the display stays off; recovering here would
+        // publish a "fresh" snapshot the user never saw being taken.
+        guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else {
+            diagnosticLog.log("sleep_gate_dark_wake_ignored")
+            return
+        }
+        openSleepGateAndRecover(reason: "did_wake")
+    }
+
+    @objc private func handleScreensDidWake() {
+        guard isSleepGateClosed else { return }
+        openSleepGateAndRecover(reason: "screens_wake")
+    }
+
+    private func openSleepGateAndRecover(reason: String) {
+        let gateWasClosed = isSleepGateClosed
+        isSleepGateClosed = false
+        // didWake and screensDidWake both fire on a normal wake; only the
+        // first transition triggers the single recovery refresh.
+        if !gateWasClosed,
+           let last = lastWakeRecoveryStartedAt,
+           Date().timeIntervalSince(last) < 10 {
+            return
+        }
+        lastWakeRecoveryStartedAt = Date()
+        diagnosticLog.log("sleep_wake_recovery", ["reason": .string(reason)])
+        recoverAfterWake()
+    }
+
+    private func recoverAfterWake() {
+        guard !isOffline else {
+            showOfflineStatus()
+            return
+        }
+
+        wakeRecoveryToken += 1
+        let token = wakeRecoveryToken
+        lastRateLimitUpdatedAt = nil
+
+        setDetailTitle("잠자기 복귀: 복구 중...", for: usageItem)
+        setDetailTitle("잠자기 복귀: 복구 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 복구 중")
+
+        stopAutoRefreshLoop()
+        countdownTimer?.cancel()
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else {
+            // NAS mode: no local app-server to recover; one stored-snapshot
+            // read replaces the app-server watchdog chain.
+            startCountdownTimer()
+            restartAutoRefreshTimer()
+            resetCountdown()
+            refreshAllFromNAS(force: true)
+            return
+        }
+        client.recoverFromSleep()
+        startCountdownTimer()
+        restartAutoRefreshTimer()
+        resetCountdown()
+        scheduleWakeRecoveryWatchdog(token: token)
+    }
+
+    private func scheduleWakeRecoveryWatchdog(token: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self else { return }
+            guard token == self.wakeRecoveryToken else { return }
+            guard DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) else { return }
+            guard !self.isOffline else {
+                self.showOfflineStatus()
+                return
+            }
+
+            guard self.lastRateLimitUpdatedAt == nil else { return }
+
+            self.appLog("wake recovery watchdog: no update after 8s, retry app-server")
+            self.setDetailTitle("복구 재시도 중...", for: self.updatedItem)
+            self.client.recoverFromSleep()
+            self.scheduleWakeRecoveryRestart(token: token)
+        }
+    }
+
+    private func scheduleWakeRecoveryRestart(token: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + wakeRestartDelay) { [weak self] in
+            guard let self else { return }
+            guard token == self.wakeRecoveryToken else { return }
+            guard DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) else { return }
+            guard !self.isOffline else {
+                self.showOfflineStatus()
+                return
+            }
+            guard self.lastRateLimitUpdatedAt == nil else { return }
+
+            self.appLog("wake recovery watchdog: retry app-server")
+            self.setDetailTitle("연결을 다시 시작하는 중...", for: self.updatedItem)
+            self.client.recoverFromSleep()
+        }
+    }
+
+    @objc private func checkForUpdates() {
+        callbacks.onCheckForUpdates?()
+    }
+
+    @objc private func restartApp() {
+        diagnosticLog.log("app_restart_requested", ["reason": .string("manual")])
+        callbacks.onRestart?()
+    }
+
+    private func startCountdownTimer() {
+        countdownTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            self?.updateCountdown()
+        }
+        countdownTimer = timer
+        timer.resume()
+        updateCountdown()
+    }
+
+    private func restartAutoRefreshTimer() {
+        autoRefreshTimer?.cancel()
+        autoRefreshTimer = nil
+        resetProviderDeadlines()
+        scheduleNextAutoRefresh()
+        updateCountdown()
+    }
+
+    /// Arms a one-shot timer for the exact earliest provider deadline. A
+    /// repeating 30-second scheduler could leave slower providers displayed at
+    /// zero for almost a full tick before it happened to wake again.
+    private func scheduleNextAutoRefresh() {
+        autoRefreshTimer?.cancel()
+        autoRefreshTimer = nil
+        updateNextAutoRefreshAt()
+        guard nextAutoRefreshAt != .distantFuture else {
+            appLog("auto refresh timer off")
+            diagnosticLog.log("auto_refresh_timer_stop", ["reason": .string("disabled")])
+            return
+        }
+
+        let delay = max(0, nextAutoRefreshAt.timeIntervalSinceNow)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(
+            deadline: .now() + delay,
+            leeway: .milliseconds(100)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performAutoRefresh()
+        }
+        autoRefreshTimer = timer
+        timer.resume()
+        appLog("auto refresh scheduler next \(Int(ceil(delay)))s")
+        diagnosticLog.log("auto_refresh_timer_start", ["intervalSeconds": .int(Int(ceil(delay)))])
+    }
+
+    private func stopAutoRefreshLoop() {
+        autoRefreshTimer?.cancel()
+        autoRefreshTimer = nil
+        appLog("auto refresh timer stop")
+        diagnosticLog.log("auto_refresh_timer_stop", ["reason": .string("stop")])
+    }
+
+    private func performAutoRefresh() {
+        guard !isStopped else { return }
+        guard !isSleepGateClosed else {
+            diagnosticLog.log("auto_refresh_skip_asleep")
+            return
+        }
+        if isNASMode && !NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) {
+            return
+        }
+        let now = Date()
+        let refreshCodex = refreshInterval > 0 && now >= nextCodexRefreshAt
+        let refreshClaude = claudeRefreshInterval > 0 && now >= nextClaudeRefreshAt
+        let refreshGemini = geminiRefreshInterval > 0 && now >= nextGeminiRefreshAt
+        let refreshGrok = grokRefreshInterval > 0 && now >= nextGrokRefreshAt
+        guard refreshCodex || refreshClaude || refreshGemini || refreshGrok else {
+            updateNextAutoRefreshAt()
+            scheduleNextAutoRefresh()
+            updateCountdown()
+            return
+        }
+        if refreshCodex { nextCodexRefreshAt = now.addingTimeInterval(refreshInterval) }
+        if refreshClaude { nextClaudeRefreshAt = now.addingTimeInterval(claudeRefreshInterval) }
+        if refreshGemini { nextGeminiRefreshAt = now.addingTimeInterval(geminiRefreshInterval) }
+        if refreshGrok { nextGrokRefreshAt = now.addingTimeInterval(grokRefreshInterval) }
+        updateNextAutoRefreshAt()
+        scheduleNextAutoRefresh()
+        appLog("auto refresh perform codex=\(refreshCodex) claude=\(refreshClaude) gemini=\(refreshGemini) grok=\(refreshGrok)")
+        diagnosticLog.log("auto_refresh_timer_fire", [
+            "codex": .bool(refreshCodex),
+            "claude": .bool(refreshClaude),
+            "gemini": .bool(refreshGemini),
+            "grok": .bool(refreshGrok)
+        ])
+        guard !isOffline else {
+            showOfflineStatus()
+            return
+        }
+
+        setDetailTitle("자동 갱신 중...", for: usageItem)
+        setDetailTitle("자동 가져오기 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 업데이트 중")
+        updateCountdown()
+        if refreshCodex { refreshCodexUsage() }
+        if refreshClaude { refreshClaudeUsage() }
+        if refreshGemini {
+            refreshGeminiUsage()
+            // Gemini 온라인 자동 수집은 중단한다. CLI 세션/주간만 갱신한다.
+        }
+        if refreshGrok { refreshGrokUsage() }
+    }
+
+    /// Background/global quiet refresh of the Gemini web snapshot. Skipped
+    /// entirely while reconnection is required, so CCMB never loads Google
+    /// sign-in behind the user's back.
+    private func refreshGeminiOnlineQuietly(force: Bool = false) {
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else { return }
+        guard !geminiOnlineNeedsConnection else { return }
+        geminiOnlineController.refreshQuietlyIfDue(force: force)
+    }
+
+    /// Explicit first-connection/reconnection action for Gemini 온라인.
+    private func connectGeminiOnline() {
+        diagnosticLog.log("gemini_online_connect")
+        geminiOnlineParseFailed = false
+        geminiOnlineController.connect()
+    }
+
+    private func resetCountdown() {
+        resetProviderDeadlines()
+        scheduleNextAutoRefresh()
+        updateCountdown()
+    }
+
+    private func resetProviderDeadlines() {
+        let now = Date()
+        let nasConfigured = !isNASMode || NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget)
+        nextCodexRefreshAt = (refreshInterval > 0 && nasConfigured) ? now.addingTimeInterval(refreshInterval) : .distantFuture
+        nextClaudeRefreshAt = (claudeRefreshInterval > 0 && nasConfigured) ? now.addingTimeInterval(claudeRefreshInterval) : .distantFuture
+        nextGeminiRefreshAt = (geminiRefreshInterval > 0 && nasConfigured) ? now.addingTimeInterval(geminiRefreshInterval) : .distantFuture
+        nextGrokRefreshAt = grokRefreshInterval > 0 ? now.addingTimeInterval(grokRefreshInterval) : .distantFuture
+        // Local Claude OAuth back-off/exhaustion must not delay NAS reads.
+        if !isNASMode, let retryAt = lastClaudeRateLimitRetryAt, retryAt > nextClaudeRefreshAt {
+            nextClaudeRefreshAt = retryAt
+        }
+        if !isNASMode,
+           claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+           let snapshot = lastClaudeSnapshot,
+           let unavailable = Self.claudeUnavailableState(from: snapshot, now: now) {
+            nextClaudeRefreshAt = unavailable.until.addingTimeInterval(1)
+        }
+        updateNextAutoRefreshAt()
+    }
+
+    private func updateNextAutoRefreshAt() {
+        nextAutoRefreshAt = [nextCodexRefreshAt, nextClaudeRefreshAt, nextGeminiRefreshAt, nextGrokRefreshAt].min() ?? .distantFuture
+    }
+
+    private enum SmartProvider: String, Hashable {
+        case codex, claude, gemini
+    }
+
+    private func smartCadenceDidChange(for provider: SmartProvider) {
+        guard !isNASMode else { return }
+        let now = Date()
+        let interval: TimeInterval
+        switch provider {
+        case .codex:
+            interval = refreshInterval
+            nextCodexRefreshAt = now.addingTimeInterval(interval)
+            client.setAutoRefreshInterval(interval)
+        case .claude:
+            interval = claudeRefreshInterval
+            nextClaudeRefreshAt = now.addingTimeInterval(interval)
+        case .gemini:
+            interval = geminiRefreshInterval
+            nextGeminiRefreshAt = now.addingTimeInterval(interval)
+        }
+        updateNextAutoRefreshAt()
+        scheduleNextAutoRefresh()
+        updateRefreshIntervalMenu()
+        updateCountdown()
+        diagnosticLog.log("smart_refresh_mode_changed", [
+            "provider": .string(provider.rawValue),
+            "intervalSeconds": .int(Int(interval))
+        ])
+    }
+
+    /// Runs targeted reads just after a quota reset, when an adaptive timer
+    /// could otherwise leave the old percentage visible for several minutes.
+    private func scheduleResetVerification(for provider: SmartProvider, candidates: [Date?]) {
+        let now = Date()
+        let graceStart = now.addingTimeInterval(-35)
+        guard let resetDate = candidates.compactMap({ $0 }).filter({ $0 > graceStart }).min() else {
+            resetVerificationWorkItems.removeValue(forKey: provider)?.forEach { $0.cancel() }
+            resetVerificationDates.removeValue(forKey: provider)
+            return
+        }
+        // Preserve the +10s/+30s probes if +1s still returns the old reset
+        // date while the provider is updating its usage data.
+        if resetVerificationDates[provider] == resetDate { return }
+
+        resetVerificationWorkItems.removeValue(forKey: provider)?.forEach { $0.cancel() }
+        resetVerificationDates[provider] = resetDate
+        let workItems = [1.0, 10.0, 30.0].compactMap { offset -> DispatchWorkItem? in
+            let delay = resetDate.addingTimeInterval(offset).timeIntervalSince(now)
+            guard delay > 0 else { return nil }
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.resetVerificationDates[provider] == resetDate else { return }
+                self.diagnosticLog.log("reset_verification", [
+                    "provider": .string(provider.rawValue),
+                    "offsetSeconds": .int(Int(offset))
+                ])
+                switch provider {
+                case .codex: self.refreshCodexUsage(force: true)
+                case .claude: self.refreshClaudeUsage(force: true)
+                case .gemini: self.refreshGeminiUsage(force: true)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return item
+        }
+        resetVerificationWorkItems[provider] = workItems
+    }
+
+    private func pauseClaudeRefreshUntilAvailable(_ snapshot: ClaudeUsageSnapshot) {
+        guard claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+              let unavailable = Self.claudeUnavailableState(from: snapshot, now: Date())
+        else { return }
+        resetVerificationWorkItems.removeValue(forKey: .claude)?.forEach { $0.cancel() }
+        resetVerificationDates.removeValue(forKey: .claude)
+        nextClaudeRefreshAt = unavailable.until.addingTimeInterval(1)
+        updateNextAutoRefreshAt()
+        scheduleNextAutoRefresh()
+        updateCountdown()
+        diagnosticLog.log("claude_refresh_paused_until_reset")
+    }
+
+    private func updateCountdown() {
+        updateShareStatus()
+        let remaining: (Date, TimeInterval) -> Int? = { deadline, interval in
+            guard interval > 0, deadline != .distantFuture else { return nil }
+            return max(0, Int(ceil(deadline.timeIntervalSinceNow)))
+        }
+        let codexRemaining = remaining(nextCodexRefreshAt, refreshInterval)
+        let claudeRemaining = remaining(nextClaudeRefreshAt, claudeRefreshInterval)
+        let geminiRemaining = remaining(nextGeminiRefreshAt, geminiRefreshInterval)
+        let grokRemaining = remaining(nextGrokRefreshAt, grokRefreshInterval)
+        menuRefreshControlsView.updateCountdown(
+            codex: codexRemaining,
+            claude: claudeRemaining,
+            gemini: geminiRemaining,
+            grok: grokRemaining
+        )
+        pinnedUsageWindowController?.updateRefreshCountdown(
+            codex: codexRemaining,
+            claude: claudeRemaining,
+            gemini: geminiRemaining,
+            grok: grokRemaining
+        )
+        statusDropdownController.updateRefreshCountdown(
+            codex: codexRemaining,
+            claude: claudeRemaining,
+            gemini: geminiRemaining,
+            grok: grokRemaining
+        )
+        guard nextAutoRefreshAt != .distantFuture else {
+            setDetailTitle("새로 고침", for: refreshItem)
+            return
+        }
+
+        let seconds = max(0, Int(ceil(nextAutoRefreshAt.timeIntervalSinceNow)))
+        setDetailTitle("다음 자동 갱신 · \(Self.durationTitle(seconds: seconds)) 후", for: refreshItem)
+        if lastClaudeRateLimitRetryAt != nil {
+            updateSplitPanel()
+        }
+    }
+
+    private func updateRefreshIntervalMenu() {
+        for item in refreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : refreshIntervalPreference) == seconds ? .on : .off
+            setDetailTitle(item.title, for: item)
+        }
+        for item in claudeRefreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : claudeRefreshIntervalPreference) == seconds ? .on : .off
+        }
+        for item in geminiRefreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = (isNASMode ? Int(Self.nasRefreshInterval) : geminiRefreshIntervalPreference) == seconds ? .on : .off
+        }
+        for item in grokRefreshIntervalItems {
+            let seconds = (item.representedObject as? Int) ?? -1
+            item.state = Int(grokRefreshInterval) == seconds ? .on : .off
+        }
+        codexIntervalItem.title = isNASMode ? "Codex · NAS 3분" : "Codex · \(refreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(refreshInterval)))" : Self.intervalTitle(refreshInterval))"
+        claudeIntervalItem.title = isNASMode ? "Claude · NAS 3분" : "Claude · \(claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(claudeRefreshInterval)))" : Self.intervalTitle(claudeRefreshInterval))"
+        geminiIntervalItem.title = isNASMode ? "Gemini · NAS 3분" : "Gemini · \(geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference ? "스마트 (현재 \(Self.intervalTitle(geminiRefreshInterval)))" : Self.intervalTitle(geminiRefreshInterval))"
+        grokIntervalItem.title = "Grok · \(Self.intervalTitle(grokRefreshInterval))"
+        menuRefreshControlsView.apply(
+            codex: isNASMode ? Int(Self.nasRefreshInterval) : refreshIntervalPreference,
+            claude: isNASMode ? Int(Self.nasRefreshInterval) : claudeRefreshIntervalPreference,
+            gemini: isNASMode ? Int(Self.nasRefreshInterval) : geminiRefreshIntervalPreference,
+            grok: Int(grokRefreshInterval)
+        )
+        setDetailTitle(isNASMode ? "자동 새로 고침 · NAS 공통 3분" : "자동 새로 고침 · 앱별 설정", for: intervalItem)
+    }
+
+    private func setDetailTitle(_ title: String, for item: NSMenuItem) {
+        item.title = title
+    }
+
+    private func prepareNativeMenu(_ menu: NSMenu) {
+        menu.autoenablesItems = false
+        for item in menu.items {
+            guard !item.isSeparatorItem else { continue }
+            if let submenu = item.submenu {
+                prepareNativeMenu(submenu)
+            }
+            // Items hosting a custom view (the split usage panel, the usage
+            // page buttons) manage their own subview interactivity and must
+            // stay enabled regardless of the item's own action/submenu.
+            guard item.view == nil else { continue }
+            item.isEnabled = item.action != nil || item.submenu != nil
+        }
+    }
+
+    private func configureStatusItem() {
+        statusItem.autosaveName = "CCMB.MainStatusItem"
+        statusItem.isVisible = isMenuBarVisible
+        statusItem.button?.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정·세 번째 계정 남은 사용량과 크레딧"
+        statusItem.button?.image = nil
+        statusItem.button?.imagePosition = .noImage
+        statusItem.button?.setAccessibilityLabel("Codex, Claude, Gemini 사용량")
+        setStatusTitle("…")
+        statusItem.button?.setAccessibilityValue("사용량 확인 중")
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        // Status-item menus anchor their trailing edge beneath the status
+        // button. Matching the dashboard width keeps the rightmost Gemini
+        // column directly below that button instead of leaving a side gutter.
+        menu.minimumWidth = UsagePanelLayout.viewWidth
+        accountItem.isEnabled = true
+        usageItem.isEnabled = true
+        resetItem.isEnabled = true
+        resetCreditsItem.isEnabled = true
+        creditBalanceItem.isEnabled = true
+        updatedItem.isEnabled = true
+        refreshItem.isEnabled = true
+        intervalItem.isEnabled = true
+        setDetailTitle(accountItem.title, for: accountItem)
+        setDetailTitle(usageItem.title, for: usageItem)
+        setDetailTitle(resetItem.title, for: resetItem)
+        setDetailTitle(resetCreditsItem.title, for: resetCreditsItem)
+        setDetailTitle(creditBalanceItem.title, for: creditBalanceItem)
+        setDetailTitle(updatedItem.title, for: updatedItem)
+        setDetailTitle(refreshItem.title, for: refreshItem)
+        setDetailTitle(intervalItem.title, for: intervalItem)
+        resetCreditsItem.isHidden = true
+
+        menuHeaderView.onRefresh = { [weak self] in self?.refresh() }
+        menuHeaderView.onSelectTheme = { [weak self] in self?.applyPanelTheme($0) }
+        menuHeaderItem.view = menuHeaderView
+        menuHeaderItem.isEnabled = true
+        menu.addItem(menuHeaderItem)
+
+        splitPanelItem.view = splitPanelView
+        splitPanelItem.isHidden = true
+        menu.addItem(splitPanelItem)
+
+        menuRefreshControlsView.onCodexChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
+        menuRefreshControlsView.onClaudeChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
+        menuRefreshControlsView.onGeminiChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+        menuRefreshControlsView.onGrokChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
+        menuRefreshControlsItem.view = menuRefreshControlsView
+        menuRefreshControlsItem.isEnabled = true
+        menu.addItem(menuRefreshControlsItem)
+
+        menu.addItem(usageItem)
+        menu.addItem(creditBalanceItem)
+        menu.addItem(resetCreditsItem)
+        menu.addItem(resetItem)
+        menu.addItem(usageSeparatorItem)
+        menu.addItem(updatedItem)
+        copyErrorItem.isHidden = true
+        menu.addItem(copyErrorItem)
+        historyChartItem.view = historyChartView
+        // Must stay enabled like every other view-hosting item: a disabled
+        // NSMenuItem renders its custom view's text fields in the dimmed
+        // disabled style, which makes the chart captions unreadable on the
+        // translucent menu background while the bars stay visible.
+        historyChartItem.isEnabled = true
+        historyChartItem.isHidden = true
+        menu.addItem(historyChartItem)
+
+        usagePageLinksView.codexButton.target = self
+        usagePageLinksView.codexButton.action = #selector(openDashboard)
+        usagePageLinksView.claudeButton.target = self
+        usagePageLinksView.claudeButton.action = #selector(performClaudeUsageAction)
+        usagePageLinksView.geminiButton.target = self
+        usagePageLinksView.geminiButton.action = #selector(openGeminiDashboard)
+        usagePageLinksView.grokButton.target = self
+        usagePageLinksView.grokButton.action = #selector(performGrokUsageAction)
+        usagePageLinksItem.view = usagePageLinksView
+        usagePageLinksItem.isEnabled = true
+        menu.addItem(usagePageLinksItem)
+
+        let codexIntervalMenu = NSMenu()
+        for item in refreshIntervalItems {
+            codexIntervalMenu.addItem(item)
+        }
+        codexIntervalItem.submenu = codexIntervalMenu
+
+        let claudeIntervalMenu = NSMenu()
+        for item in claudeRefreshIntervalItems {
+            claudeIntervalMenu.addItem(item)
+        }
+        claudeIntervalItem.submenu = claudeIntervalMenu
+
+        let geminiIntervalMenu = NSMenu()
+        for item in geminiRefreshIntervalItems {
+            geminiIntervalMenu.addItem(item)
+        }
+        geminiIntervalItem.submenu = geminiIntervalMenu
+
+        let dataSourceMenu = NSMenu()
+        for item in dataCollectionSourceItems {
+            dataSourceMenu.addItem(item)
+        }
+        dataSourceItem.submenu = dataSourceMenu
+        updateDataCollectionSourceMenu()
+
+        let grokIntervalMenu = NSMenu()
+        for item in grokRefreshIntervalItems {
+            grokIntervalMenu.addItem(item)
+        }
+        grokIntervalItem.submenu = grokIntervalMenu
+
+        let intervalMenu = NSMenu()
+        intervalMenu.addItem(dataSourceItem)
+        intervalMenu.addItem(NSMenuItem.separator())
+        intervalMenu.addItem(codexIntervalItem)
+        intervalMenu.addItem(claudeIntervalItem)
+        intervalMenu.addItem(geminiIntervalItem)
+        // Grok's interval item and submenu stay built above but are not
+        // listed while the provider is hidden from the visible UI.
+        intervalItem.submenu = intervalMenu
+        menu.addItem(accountItem)
+        menu.addItem(codexLoginItem)
+        menu.addItem(accountSeparatorItem)
+
+        configureShareMenu()
+        menu.addItem(shareItem)
+        configureRemoteSyncMenu()
+        menu.addItem(remoteSyncItem)
+        menu.addItem(.separator())
+        updateVersionView.updateButton.target = self
+        updateVersionView.updateButton.action = #selector(checkForUpdates)
+        updateVersionView.opacitySlider.target = self
+        updateVersionView.opacitySlider.action = #selector(changePanelOpacity(_:))
+        updateVersionView.setOpacity(panelOpacity)
+        updateVersionItem.view = updateVersionView
+        updateVersionItem.isEnabled = true
+        menu.addItem(updateVersionItem)
+        applyPanelOpacity()
+
+        configureDiagnosticsMenu()
+        updateVersionView.alwaysViewButton.target = self
+        updateVersionView.alwaysViewButton.action = #selector(togglePinnedUsageWindow)
+        lifecycleActionsView.launchButton.target = self
+        lifecycleActionsView.launchButton.action = #selector(toggleLaunchAtLogin)
+        lifecycleActionsView.diagnosticButton.target = self
+        lifecycleActionsView.diagnosticButton.action = #selector(openDiagnosticLogFolder)
+        lifecycleActionsView.githubButton.target = self
+        lifecycleActionsView.githubButton.action = #selector(openFooterLink)
+        lifecycleActionsView.restartButton.target = self
+        lifecycleActionsView.restartButton.action = #selector(restartApp)
+        lifecycleActionsView.quitButton.target = self
+        lifecycleActionsView.quitButton.action = #selector(quit)
+        lifecycleActionsItem.view = lifecycleActionsView
+        lifecycleActionsItem.isEnabled = true
+        menu.addItem(lifecycleActionsItem)
+
+        let bottomPaddingItem = NSMenuItem()
+        bottomPaddingItem.view = NSView(frame: NSRect(
+            x: 0,
+            y: 0,
+            width: UsagePanelLayout.viewWidth,
+            height: 4
+        ))
+        bottomPaddingItem.isEnabled = false
+        menu.addItem(bottomPaddingItem)
+
+        for item in menu.items {
+            item.target = self
+        }
+        checkForUpdatesItem.target = self
+        checkForUpdatesItem.action = #selector(checkForUpdates)
+        refreshItem.target = self
+        codexLoginItem.target = self
+        // The loop above only walks top-level items, so submenu items need
+        // their target set explicitly.
+        for item in refreshIntervalItems {
+            item.target = self
+        }
+        for item in claudeRefreshIntervalItems {
+            item.target = self
+        }
+        for item in geminiRefreshIntervalItems {
+            item.target = self
+        }
+        for item in grokRefreshIntervalItems {
+            item.target = self
+        }
+        launchAtLoginItem.target = self
+        pinnedUsageWindowItem.target = self
+        shareFolderItem.target = self
+        copySharePromptCombinedItem.target = self
+        copySharePromptCodexItem.target = self
+        copySharePromptClaudeItem.target = self
+        copySharePromptGeminiItem.target = self
+        copySharePromptGrokItem.target = self
+        copyShareCommandItem.target = self
+        copyErrorItem.target = self
+        restartItem.target = self
+        copyDiagnosticReportItem.target = self
+        openDiagnosticLogItem.target = self
+        footerLinkItem.target = self
+        quitItem.target = self
+        updateRefreshIntervalMenu()
+        updatePinnedUsageWindowMenu()
+        updateLaunchAtLoginMenu()
+        prepareNativeMenu(menu)
+
+        menu.delegate = self
+        statusMenu = menu
+        statusItem.menu = nil
+        statusItem.button?.target = self
+        statusItem.button?.action = #selector(showStatusMenu)
+        statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    /// Opens the wide dashboard centered beneath the status item, with its
+    /// top edge seven points below the menu-bar button's bottom edge.
+    @objc private func showStatusMenu() {
+        guard let button = statusItem.button, let window = button.window else { return }
+
+        // Before the first usage snapshot ever arrives, fall back to the
+        // native menu, which still carries the original loading/offline/
+        // error text rows that the dropdown panel has no equivalent for.
+        guard hasPanelContent else {
+            guard let menu = statusMenu else { return }
+            menu.update()
+            let windowRect = button.convert(button.bounds, to: nil)
+            let screenRect = window.convertToScreen(windowRect)
+            let point = NSPoint(x: screenRect.midX - menu.size.width / 2, y: screenRect.minY - 7)
+            button.highlight(true)
+            menu.popUp(positioning: nil, at: point, in: nil)
+            button.highlight(false)
+            return
+        }
+
+        if statusDropdownController.isVisible {
+            statusDropdownController.close()
+            return
+        }
+
+        diagnosticLog.log("menu_open")
+        let windowRect = button.convert(button.bounds, to: nil)
+        let screenRect = window.convertToScreen(windowRect)
+        let point = NSPoint(x: screenRect.midX - UsagePanelLayout.viewWidth / 2, y: screenRect.minY - 7)
+        button.highlight(true)
+        statusDropdownController.positionTopLeft(point)
+        statusDropdownController.show()
+        button.highlight(false)
+    }
+
+    private func configureClient() {
+        client.onRateLimitsUpdated = { [weak self] snapshot in
+            DispatchQueue.main.async {
+                guard let self, !self.isStopped else { return }
+                // The app-server only runs in local mode; a reply that lands
+                // after a switch to NAS belongs to neither card.
+                guard DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) else {
+                    self.diagnosticLog.log("codex_local_result_dropped_nas_mode")
+                    return
+                }
+                self.isOffline = false
+                self.lastRateLimitUpdatedAt = Date()
+                self.apply(snapshot)
+            }
+        }
+
+        client.onError = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, !self.isStopped else { return }
+                guard DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) else { return }
+                self.lastErrorMessage = message
+                self.setStatusTitle("!")
+                self.statusItem.button?.setAccessibilityValue("사용량 가져오기 실패")
+                self.setDetailTitle("사용량을 가져오지 못했습니다", for: self.usageItem)
+                self.usageItem.toolTip = message
+                self.copyErrorItem.isHidden = false
+                self.setDetailTitle("가져오기 실패 \(Self.timeFormatter.string(from: Date()))", for: self.updatedItem)
+            }
+        }
+
+        client.onRestartRequired = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, !self.isStopped else { return }
+                // Never relaunch the local app-server outside local mode.
+                guard DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) else { return }
+                guard !self.isOffline else {
+                    self.showOfflineStatus()
+                    return
+                }
+
+                self.appLog(message)
+                self.setStatusTitle("!")
+                self.setDetailTitle(message, for: self.updatedItem)
+                // Restarting the app-server mid-sleep would refetch during a
+                // dark wake; the wake recovery restart covers it instead.
+                guard !self.isSleepGateClosed else { return }
+                self.client.recoverFromSleep()
+            }
+        }
+    }
+
+    private func startNetworkMonitor() {
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self, !self.isStopped else { return }
+                let wasOffline = self.isOffline
+                self.isOffline = path.status != .satisfied
+
+                if self.isOffline {
+                    self.appLog("network offline")
+                    self.diagnosticLog.log("network_offline")
+                    self.showOfflineStatus()
+                } else if wasOffline {
+                    self.appLog("network online")
+                    self.diagnosticLog.log("network_online")
+                    // A dark wake briefly bringing the network up must not
+                    // start a fetch; wake recovery refreshes once instead.
+                    guard !self.isSleepGateClosed else { return }
+                    self.setDetailTitle("연결 복구, 다시 가져오는 중...", for: self.updatedItem)
+                    self.statusItem.button?.setAccessibilityValue("연결 복구 중")
+                    if DataSourceGate.allowsLocalCollection(self.dataCollectionSourcePreference) {
+                        self.client.recoverFromSleep()
+                    } else {
+                        self.refreshAllFromNAS(force: true)
+                    }
+                    self.restartAutoRefreshTimer()
+                }
+            }
+        }
+        networkMonitor.start(queue: networkQueue)
+    }
+
+    private func showOfflineStatus() {
+        setStatusTitle("OFF")
+        statusItem.button?.setAccessibilityValue("오프라인")
+        setDetailTitle("오프라인", for: usageItem)
+        setDetailTitle("인터넷 연결 대기 중...", for: updatedItem)
+        updateCountdown()
+    }
+
+    private func apply(_ snapshot: RateLimitSnapshot) {
+        guard !isStopped else { return }
+        if refreshIntervalPreference == UsageCore.smartRefreshPreference,
+           codexSmartRefreshPolicy.update(
+               values: [snapshot.usedPercent, snapshot.creditBalance],
+               identityTokens: [
+                   snapshot.accountID,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.resetsAt, usedIsZero: (snapshot.usedPercent ?? 0) == 0)
+               ]
+           ) {
+            smartCadenceDidChange(for: .codex)
+        }
+        scheduleResetVerification(
+            for: .codex,
+            candidates: [snapshot.resetsAt]
+        )
+        lastSnapshot = snapshot
+        recordCodexConsumption(from: snapshot)
+        refreshStatusTitle()
+        lastErrorMessage = nil
+        usageItem.toolTip = nil
+        copyErrorItem.isHidden = true
+
+        if let usedPercent = snapshot.usedPercent {
+            let remainingPercent = Self.remainingUsagePercent(from: usedPercent)
+            setDetailTitle("남은 주간 사용량 \(Self.percentTitle(from: remainingPercent))", for: usageItem)
+        } else {
+            setDetailTitle("주간 사용량 정보 없음", for: usageItem)
+        }
+
+        if let accountID = snapshot.accountID {
+            setDetailTitle("계정 \(accountID)", for: accountItem)
+        } else {
+            setDetailTitle("계정 정보 없음", for: accountItem)
+        }
+
+        if let resetsAt = snapshot.resetsAt {
+            setDetailTitle(Self.resetDateTimeTitle(resetsAt), for: resetItem)
+            resetItem.toolTip = nil
+        } else if let minutes = snapshot.windowDurationMinutes {
+            setDetailTitle("사용량 창 \(minutes)분", for: resetItem)
+            resetItem.toolTip = nil
+        } else {
+            setDetailTitle("초기화 시간 없음", for: resetItem)
+            resetItem.toolTip = nil
+        }
+
+        if let resetCredits = snapshot.resetCredits {
+            resetCreditsItem.isHidden = false
+            setDetailTitle("초기화 크레딧 \(resetCredits)개", for: resetCreditsItem)
+        } else {
+            resetCreditsItem.isHidden = true
+        }
+
+        if let creditBalance = snapshot.creditBalance {
+            setDetailTitle("크레딧 \(Self.creditDetailTitle(from: creditBalance))", for: creditBalanceItem)
+        } else {
+            setDetailTitle(
+                snapshot.detailedCreditsReturned ? "크레딧 형식 확인 필요" : "크레딧 정보 없음",
+                for: creditBalanceItem
+            )
+        }
+        setDetailTitle("최근 업데이트 \(Self.timeFormatter.string(from: snapshot.updatedAt))", for: updatedItem)
+        publishSharedUsage(snapshot, origin: "codex-fetch")
+        updateSplitPanel()
+    }
+
+    /// Writes the shared `usage-v1.json` snapshot. `origin` distinguishes a
+    /// genuine Codex fetch (`apply(_:)`, right after a fresh app-server
+    /// response) from a republish triggered by an unrelated Claude/Gemini
+    /// refresh reusing the last known Codex snapshot — the two look
+    /// identical in the written file but must not look identical in the
+    /// diagnostic log, or a stalled Codex fetch could hide behind a stream
+    /// of "successful" publishes that never carried new Codex data.
+    private func publishSharedUsage(_ snapshot: RateLimitSnapshot, origin: String) {
+        guard !isStopped else { return }
+        // `usage-v1.json` and its iCloud/remote-folder uploads describe this
+        // Mac's own local collection. In NAS mode nothing local is collected,
+        // so nothing is written or uploaded — the existing file is left as
+        // is (never deleted, never relabeled with NAS values).
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else {
+            diagnosticLog.log("shared_payload_publish_skip_nas_mode", ["origin": .string(origin)])
+            return
+        }
+        // In-flight fetches that complete after sleep began land here; the
+        // in-memory snapshot is kept, but nothing is written or uploaded
+        // until the next interactive wake republishes it via recovery.
+        guard !isSleepGateClosed else {
+            diagnosticLog.log("shared_payload_publish_skip_asleep", ["origin": .string(origin)])
+            return
+        }
+        do {
+            try SharedUsageStore.publish(
+                snapshot,
+                claudeSnapshot: lastClaudeSnapshot,
+                claudeRetryAt: lastClaudeRateLimitRetryAt,
+                claudeFailureLabel: lastClaudeFetchFailureLabel,
+                geminiSnapshot: lastGeminiSnapshot,
+                geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
+                grokSnapshot: lastGrokSnapshot,
+                consumptionHistory: UsageConsumptionHistoryStore(
+                    codex: codexConsumption,
+                    codexSpark: codexSparkConsumption,
+                    claude: claudeConsumption,
+                    claudeFable: claudeFableConsumption,
+                    gemini: geminiConsumption,
+                    grok: grokConsumption
+                ),
+                refreshInterval: refreshInterval
+            )
+            lastSharedUsageAt = snapshot.updatedAt
+            lastShareError = nil
+            updateShareStatus()
+            let codexAgeSeconds = max(0, Int(Date().timeIntervalSince(snapshot.updatedAt)))
+            diagnosticLog.log("shared_payload_published", [
+                "origin": .string(origin),
+                "codexFetchedAgeSeconds": .int(codexAgeSeconds)
+            ])
+            // Remote upload rides behind the successful local publish and is
+            // fire-and-forget: a CloudKit failure never affects the file or
+            // any menu behavior beyond the 원격 동기화 status line.
+            cloudSyncUploader.uploadIfEnabled(trigger: origin)
+            remoteFolderPublisher.publishIfConfigured()
+        } catch {
+            lastShareError = error.localizedDescription
+            updateShareStatus()
+            appLog("shared usage publish failed: \(error.localizedDescription)")
+            diagnosticLog.log("shared_payload_publish_failed")
+        }
+    }
+
+    private func refreshClaudeUsage(force: Bool = false) {
+        switch dataCollectionSourcePreference {
+        case .nas:
+            refreshAllFromNAS(force: force)
+        case .localMac:
+            // Local caches (CCMB's own shared file, the statusLine file) are
+            // local-mode data only; NAS mode never reads them into a card.
+            lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
+                current: lastClaudeSnapshot,
+                cache: SharedUsageStore.readClaudeSnapshot()
+            )
+            lastClaudeSnapshot = ClaudeUsageCore.mergingCacheSnapshot(
+                current: lastClaudeSnapshot,
+                cache: ClaudeUsageStore.read()
+            )
+            recordClaudeConsumption()
+            if let lastSnapshot {
+                publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            refreshStatusTitle()
+            updateSplitPanel()
+            refreshClaudeUsageFromLocalMac(force: force)
+        }
+    }
+
+    /// 보조 옵션: 이 Mac에서 직접 Claude OAuth 사용량을 조회한다(기존 동작
+    /// 그대로). 결과는 요청 당시의 소스/세대가 그대로일 때만 반영된다.
+    private func refreshClaudeUsageFromLocalMac(force: Bool) {
+        let requestedGeneration = dataSourceGeneration
+        // Claude's OAuth response is the canonical live value. Passive
+        // statusLine data remains a restart/failure fallback but never skips
+        // a due OAuth read, avoiding two sources drifting on screen.
+        let claudeFetchInterval = force ? 0 : max(claudeRefreshInterval, ClaudeUsageCore.minimumRequestIntervalSeconds)
+        ClaudeOAuthUsageClient.fetchIfDue(minimumInterval: claudeFetchInterval) { [weak self] outcome in
+            guard let self else { return }
+            guard self.acceptsResult(from: .localMac, generation: requestedGeneration, kind: "claude_local") else { return }
+            switch outcome {
+            case .success(let snapshot):
+                self.lastClaudeSnapshot = ClaudeUsageCore.merge(preferred: snapshot, fallback: self.lastClaudeSnapshot)
+                if self.claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+                   self.claudeSmartRefreshPolicy.update(
+                       values: [
+                           snapshot.fiveHourUsedPercent,
+                           snapshot.weeklyUsedPercent,
+                           ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
+                       ],
+                       identityTokens: [
+                           snapshot.account?.email,
+                           SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourUsedPercent ?? 0) == 0)
+                       ]
+                   ) {
+                    self.smartCadenceDidChange(for: .claude)
+                }
+                self.recordClaudeConsumption()
+                self.scheduleResetVerification(
+                    for: .claude,
+                    candidates: [snapshot.fiveHourResetsAt, snapshot.weeklyResetsAt]
+                        + snapshot.modelWeeklyLimits.map(\.resetsAt)
+                )
+                self.pauseClaudeRefreshUntilAvailable(snapshot)
+                self.lastClaudeFetchFailureLabel = nil
+                self.claudeNeedsReconnect = false
+                self.lastClaudeRateLimitRetryAt = nil
+            case .skippedInFlight:
+                break
+            case .skippedThrottled(let retryAt):
+                self.nextClaudeRefreshAt = retryAt
+                self.updateNextAutoRefreshAt()
+                self.scheduleNextAutoRefresh()
+            case .rateLimited(let retryAt), .skippedRateLimitBackoff(let retryAt):
+                self.lastClaudeFetchFailureLabel = nil
+                self.lastClaudeRateLimitRetryAt = retryAt
+                self.nextClaudeRefreshAt = retryAt
+                self.updateNextAutoRefreshAt()
+                self.scheduleNextAutoRefresh()
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            case .noCredential, .authenticationRecoveryFailed:
+                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                self.claudeNeedsReconnect = true
+                self.lastClaudeRateLimitRetryAt = nil
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            case .credentialUnavailable, .httpFailure, .transportFailure, .decodeFailure:
+                self.lastClaudeFetchFailureLabel = outcome.staleReasonLabel
+                self.claudeNeedsReconnect = false
+                self.lastClaudeRateLimitRetryAt = nil
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("claude usage fetch failed: \(diagnostic)")
+                }
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            self.refreshStatusTitle()
+            self.updateSplitPanel()
+        }
+    }
+
+    /// NAS mode reads the stored four-service snapshot. Local mode restores
+    /// the last successful Gemini snapshot from CCMB's own shared file first
+    /// (so a restart never shows "정보 없음" for data fetched minutes ago),
+    /// then asks `agy` for a fresh read on the same throttled cadence Claude
+    /// uses. Each call to `agy` spawns a subprocess, so this is deliberately
+    /// more conservative than Claude's HTTP floor.
+    private func refreshGeminiUsage(force: Bool = false) {
+        switch dataCollectionSourcePreference {
+        case .nas:
+            refreshAllFromNAS(force: force)
+        case .localMac:
+            if lastGeminiSnapshot == nil, let cached = SharedUsageStore.readGeminiSnapshot() {
+                lastGeminiSnapshot = cached
+                recordGeminiConsumption()
+                refreshStatusTitle()
+                updateSplitPanel()
+            }
+            refreshGeminiUsageFromLocalMac(force: force)
+        }
+    }
+
+    /// 보조 옵션: 이 Mac에서 직접 `agy`를 호출한다(기존 동작 그대로). 활성
+    /// 계정 이메일 메타데이터도 이 경로에서만 읽힌다.
+    private func refreshGeminiUsageFromLocalMac(force: Bool) {
+        let requestedGeneration = dataSourceGeneration
+        let minimumInterval = force ? 0 : max(geminiRefreshInterval, GeminiUsageCore.minimumRequestIntervalSeconds)
+        GeminiUsageClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
+            guard let self else { return }
+            guard self.acceptsResult(from: .localMac, generation: requestedGeneration, kind: "gemini_local") else { return }
+            switch outcome {
+            case .success(let snapshot):
+                self.lastGeminiSnapshot = snapshot
+                if self.geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference,
+                   self.geminiSmartRefreshPolicy.update(
+                       values: [
+                           snapshot.fiveHourRemainingFraction.map { $0 * 100 },
+                           snapshot.weeklyRemainingFraction.map { $0 * 100 },
+                           snapshot.creditBalance.map(Double.init)
+                       ],
+                       identityTokens: [
+                           snapshot.accountEmail,
+                           SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourRemainingFraction ?? 1) >= 1)
+                       ]
+                   ) {
+                    self.smartCadenceDidChange(for: .gemini)
+                }
+                self.recordGeminiConsumption()
+                self.scheduleResetVerification(
+                    for: .gemini,
+                    candidates: [snapshot.fiveHourResetsAt, snapshot.weeklyResetsAt]
+                )
+                self.lastGeminiFetchFailureLabel = nil
+            case .skippedInFlight, .skippedThrottled:
+                break
+            case .commandNotFound, .timedOut, .nonZeroExit, .decodeFailure:
+                self.lastGeminiFetchFailureLabel = outcome.staleReasonLabel
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("gemini usage fetch failed: \(diagnostic)")
+                }
+            }
+            if let lastSnapshot = self.lastSnapshot {
+                self.publishSharedUsage(lastSnapshot, origin: "cache-republish")
+            }
+            self.refreshStatusTitle()
+            self.updateSplitPanel()
+        }
+    }
+
+    /// Codex: the local app-server only in local mode, the NAS snapshot
+    /// otherwise. Every Codex refresh trigger (startup, timer, manual,
+    /// reset verification, login, interval change) goes through here.
+    private func refreshCodexUsage(force: Bool = false) {
+        switch dataCollectionSourcePreference {
+        case .localMac:
+            client.refreshRateLimits()
+        case .nas:
+            refreshAllFromNAS(force: force)
+        }
+    }
+
+    /// True when an async result was requested under the source and switch
+    /// generation that are still current; otherwise it is logged and dropped.
+    private func acceptsResult(from origin: DataCollectionSource, generation: Int, kind: String) -> Bool {
+        guard !isStopped else { return false }
+        guard DataSourceGate.accepts(
+            resultFrom: origin,
+            generation: generation,
+            current: dataCollectionSourcePreference,
+            currentGeneration: dataSourceGeneration
+        ) else {
+            diagnosticLog.log("data_source_result_dropped", [
+                "kind": .string(kind),
+                "current": .string(dataCollectionSourcePreference.rawValue)
+            ])
+            return false
+        }
+        return true
+    }
+
+    /// 기본 옵션: NAS가 네 카드(Codex·Claude·Gemini 본계정·Gemini 부계정)를
+    /// 모두 한 번에 조회한다. 서비스별로 독립적이며, 하나가 실패/미제공
+    /// 이어도 다른 서비스 값에는 영향이 없다. 연결 실패는 결코 이 Mac 직접
+    /// 조회로 자동 전환되지 않으며, 마지막 값/오래됨 표시만 남긴다. NAS 값은
+    /// 로컬 기록·공유 파일·iCloud 업로드로 흘러가지 않는다.
+    private func refreshAllFromNAS(force: Bool) {
+        guard isNASMode else { return }
+        guard NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) else {
+            nasState.applyFailure(label: "NAS 서버 미설정")
+            lastNASHistoryFetchFailureLabel = "NAS 서버 미설정"
+            refreshStatusTitle()
+            updateSplitPanel()
+            return
+        }
+        let requestedGeneration = dataSourceGeneration
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
+        NASFourServiceClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
+            guard let self else { return }
+            guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_snapshot") else { return }
+            switch outcome {
+            case .success(let snapshot):
+                self.nasState.apply(snapshot)
+                self.lastNASSnapshotReceivedAt = Date()
+                self.persistNASServiceCache()
+                self.updateNASSmartRefreshPolicies()
+                self.diagnosticLog.log("nas_snapshot_applied", [
+                    "okServices": .int(snapshot.entries.filter(\.ok).count)
+                ])
+            case .skippedInFlight, .skippedThrottled:
+                return
+            case .failure(let error):
+                self.nasState.applyFailure(label: error.label)
+                self.appLog("NAS fetch failed: \(error.label)")
+                self.diagnosticLog.log("nas_snapshot_failed", ["reason": .string(error.label)])
+            case .unreadableResponse:
+                self.nasState.applyFailure(label: "NAS 응답 형식 확인 불가")
+                self.diagnosticLog.log("nas_snapshot_failed", ["reason": .string("unreadable")])
+            }
+            self.refreshStatusTitle()
+            self.updateSplitPanel()
+        }
+        refreshNASHistory(force: force)
+        refreshNASTaskStatus(force: force)
+    }
+
+    /// Aggregate task counts for the header pill, on the same trigger and
+    /// throttle as the NAS snapshot. Results from a previous data source are
+    /// dropped by the generation guard.
+    private func refreshNASTaskStatus(force: Bool) {
+        guard isNASMode else { return }
+        guard NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) else { return }
+        let requestedGeneration = dataSourceGeneration
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
+        nasTaskStatusStore.fetchIfDue(minimumInterval: minimumInterval) { [weak self] in
+            guard let self, self.isNASMode, self.dataSourceGeneration == requestedGeneration else { return }
+            self.updatePanelHeaders()
+        }
+    }
+
+    private func currentTaskStatusDisplay() -> NASTaskStatusDisplay {
+        isNASMode ? nasTaskStatusStore.display() : .hidden
+    }
+
+    /// NAS mode never calls the OAuth/API clients directly, so the three
+    /// smart policies below are the only place a cached NAS read can drive
+    /// the adaptive cadence. Only meaningful usage/account/reset fields from
+    /// the mapped snapshots go in — never `fetchedAt`/`stale`, which change
+    /// on every poll and would pin every provider to `active` forever.
+    private func updateNASSmartRefreshPolicies() {
+        if refreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.codexSnapshot,
+           codexSmartRefreshPolicy.update(
+               values: [snapshot.usedPercent, snapshot.creditBalance],
+               identityTokens: [
+                   snapshot.accountID,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.resetsAt, usedIsZero: (snapshot.usedPercent ?? 0) == 0)
+               ]
+           ) {
+            smartCadenceDidChange(for: .codex)
+        }
+        if claudeRefreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.claudeSnapshot,
+           claudeSmartRefreshPolicy.update(
+               values: [
+                   snapshot.fiveHourUsedPercent,
+                   snapshot.weeklyUsedPercent,
+                   ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent
+               ],
+               identityTokens: [
+                   snapshot.account?.email,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourUsedPercent ?? 0) == 0)
+               ]
+           ) {
+            smartCadenceDidChange(for: .claude)
+        }
+        if geminiRefreshIntervalPreference == UsageCore.smartRefreshPreference, let snapshot = nasState.selectedGeminiSnapshot,
+           geminiSmartRefreshPolicy.update(
+               values: [
+                   snapshot.fiveHourRemainingFraction.map { $0 * 100 },
+                   snapshot.weeklyRemainingFraction.map { $0 * 100 },
+                   snapshot.creditBalance.map(Double.init)
+               ],
+               // `accountEmail` is always nil for a NAS-mapped snapshot (it is
+               // local-collector-only); the NAS-selected service's own
+               // account ref is the correct identity here, matching the
+               // guard `selectedGeminiSnapshot` already applies above. The
+               // "nas" host's own `selected_account_id` is the exact
+               // selection the guard checks against, so it is preferred over
+               // the entry's `actualAccountRef` when present. `selectionGeneration`
+               // is carried through as-is (nil when the host has not
+               // published one, e.g. auto-switch is off) rather than
+               // invented, so a real generation bump still reactivates the
+               // policy without a placeholder masking an absent one. The
+               // service identity itself (`gemini` vs `gemini2`) is included
+               // so switching the selected slot also reactivates the policy.
+               identityTokens: [
+                   nasState.hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectedAccountID
+                       ?? nasState.slot(nasState.selectedGeminiServiceID).lastGood?.actualAccountRef
+                       ?? nasState.selectedGeminiServiceID.accountRef,
+                   nasState.hostStatus?.hosts.first(where: { $0.hostID == "nas" })?.selectionGeneration,
+                   nasState.selectedGeminiServiceID.rawValue,
+                   SmartRefreshPolicy.quotaResetIdentityToken(snapshot.fiveHourResetsAt, usedIsZero: (snapshot.fiveHourRemainingFraction ?? 1) >= 1)
+               ]
+           ) {
+            smartCadenceDidChange(for: .gemini)
+        }
+    }
+
+    /// Reads the NAS consumption-history v2 on its own throttle. A helper
+    /// `{ok:false}` result, an unknown schema or a transport error only sets
+    /// a label — `lastNASHistory` keeps the last good read and the local
+    /// trackers are never drawn in its place.
+    private func refreshNASHistory(force: Bool) {
+        guard isNASMode else { return }
+        guard NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) else { return }
+        let requestedGeneration = dataSourceGeneration
+        let minimumInterval: TimeInterval = force ? 0 : Self.nasRefreshInterval
+        NASHistoryClient.fetchIfDue(minimumInterval: minimumInterval) { [weak self] outcome in
+            guard let self else { return }
+            guard self.acceptsResult(from: .nas, generation: requestedGeneration, kind: "nas_history") else { return }
+            switch outcome {
+            case .success(let result):
+                let (history, failureLabel) = NASHistoryV2Cache.apply(result, previous: self.lastNASHistory)
+                self.lastNASHistory = history
+                self.lastNASHistoryFetchFailureLabel = failureLabel
+                if failureLabel == nil, case .history = result, let current = history,
+                   let data = NASHistoryV2Core.encode(current) {
+                    CCMBPreferences.shared.defaults.set(data, forKey: Self.nasHistoryV2DefaultsKey)
+                }
+                if let failureLabel {
+                    self.diagnosticLog.log("nas_history_failed", ["reason": .string(failureLabel)])
+                }
+            case .skippedInFlight, .skippedThrottled:
+                return
+            case .failure(let error):
+                self.lastNASHistoryFetchFailureLabel = error.label
+                self.diagnosticLog.log("nas_history_failed", ["reason": .string(error.label)])
+            }
+            self.updateSplitPanel()
+        }
+    }
+
+    /// Restores the last good NAS card values and NAS history from their own
+    /// NAS-only caches, so a relaunch shows them (as stale) instead of
+    /// blanking the cards. These keys are separate from the local
+    /// `usageConsumptionHistoryV1` store, which is never read or rewritten
+    /// here.
+    private func loadNASCaches() {
+        if let data = CCMBPreferences.shared.defaults.data(forKey: Self.nasServiceCacheDefaultsKey),
+           let restored = NASFourServiceState.decodeCache(data) {
+            nasState = restored
+        }
+        if let data = CCMBPreferences.shared.defaults.data(forKey: Self.nasHistoryV2DefaultsKey),
+           let parsed = NASHistoryV2Core.parse(data) {
+            lastNASHistory = parsed
+        }
+    }
+
+    private func persistNASServiceCache() {
+        guard let data = nasState.encodedCache() else { return }
+        CCMBPreferences.shared.defaults.set(data, forKey: Self.nasServiceCacheDefaultsKey)
+    }
+
+    /// Restores the last successful Grok snapshot from CCMB's own shared
+    /// file first, then asks the billing endpoint for a fresh read on the
+    /// same throttled cadence Gemini uses. Expired OAuth state is first handed
+    /// to the official CLI for its own background token refresh.
+    private func refreshGrokUsage(force: Bool = false, allowAuthRecovery: Bool = true) {
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else { return }
+
+        if lastGrokSnapshot == nil, let cached = SharedUsageStore.readGrokSnapshot() {
+            lastGrokSnapshot = cached
+            recordGrokConsumption()
+            refreshStatusTitle()
+            updateSplitPanel()
+        }
+
+        let minimumInterval = max(grokRefreshInterval, GrokUsageCore.minimumRequestIntervalSeconds)
+        let requestedGeneration = dataSourceGeneration
+        GrokUsageClient.fetchIfDue(minimumInterval: minimumInterval, force: force) { [weak self] outcome in
+            DispatchQueue.main.async { @MainActor in
+                guard let self else { return }
+                guard self.acceptsResult(from: .localMac, generation: requestedGeneration, kind: "grok_usage") else {
+                    return
+                }
+                switch outcome {
+                case .success(let snapshot):
+                    self.lastGrokSnapshot = snapshot
+                    self.recordGrokConsumption()
+                    self.lastGrokFetchFailureLabel = nil
+                    self.grokLoginRequired = false
+                case .skippedInFlight, .skippedThrottled:
+                    break
+                case .notSignedIn:
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+                case .expiredCredential:
+                    if allowAuthRecovery, self.startAutomaticGrokAuthRecovery() { return }
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+                case .httpFailure(let status) where status == 401 || status == 403:
+                    if allowAuthRecovery, self.startAutomaticGrokAuthRecovery() { return }
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+                case .httpFailure, .transportFailure, .decodeFailure:
+                    self.lastGrokFetchFailureLabel = outcome.staleReasonLabel
+                }
+                if let diagnostic = outcome.diagnosticDescription {
+                    self.appLog("grok usage fetch failed: \(diagnostic)")
+                }
+                self.finishGrokRefreshUI()
+            }
+        }
+    }
+
+    /// Uses the CLI's harmless model-list command to let its built-in OAuth
+    /// refresher update `auth.json`, at most once per five minutes.
+    private func startAutomaticGrokAuthRecovery() -> Bool {
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else { return false }
+        guard !grokAuthRecoveryInProgress,
+              GrokAuthStore.readCredential()?.hasRefreshToken == true
+        else { return false }
+        if let lastGrokAuthRecoveryAttemptAt,
+           Date().timeIntervalSince(lastGrokAuthRecoveryAttemptAt) < 300 {
+            return false
+        }
+
+        grokAuthRecoveryInProgress = true
+        lastGrokAuthRecoveryAttemptAt = Date()
+        lastGrokFetchFailureLabel = nil
+        updateSplitPanel()
+        let requestedGeneration = dataSourceGeneration
+        GrokAuthenticationClient.refreshCredential { [weak self] result in
+            DispatchQueue.main.async { @MainActor in
+                guard let self else { return }
+                guard self.acceptsResult(from: .localMac, generation: requestedGeneration, kind: "grok_auth_recovery") else {
+                    return
+                }
+                self.grokAuthRecoveryInProgress = false
+                if case .success = result {
+                    self.refreshGrokUsage(force: true, allowAuthRecovery: false)
+                } else {
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                        "\($0) · 브라우저 로그인이 필요합니다"
+                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    self.finishGrokRefreshUI()
+                }
+            }
+        }
+        return true
+    }
+
+    private func finishGrokRefreshUI() {
+        if let lastSnapshot {
+            publishSharedUsage(lastSnapshot, origin: "cache-republish")
+        }
+        refreshStatusTitle()
+        updateSplitPanel()
+    }
+
+    @objc private func performGrokUsageAction() {
+        guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else {
+            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            return
+        }
+        guard grokLoginRequired else {
+            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            return
+        }
+        guard !grokLoginInProgress, !grokAuthRecoveryInProgress else { return }
+
+        grokLoginInProgress = true
+        lastGrokFetchFailureLabel = nil
+        updateSplitPanel()
+        let requestedGeneration = dataSourceGeneration
+        GrokAuthenticationClient.login { [weak self] result in
+            DispatchQueue.main.async { @MainActor in
+                guard let self else { return }
+                guard self.acceptsResult(from: .localMac, generation: requestedGeneration, kind: "grok_login") else {
+                    return
+                }
+                self.grokLoginInProgress = false
+                if case .success = result {
+                    self.grokLoginRequired = false
+                    self.lastGrokFetchFailureLabel = nil
+                    self.lastGrokAuthRecoveryAttemptAt = nil
+                    self.refreshGrokUsage(force: true, allowAuthRecovery: false)
+                } else {
+                    self.grokLoginRequired = true
+                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                        "\($0) · 브라우저 로그인이 필요합니다"
+                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    self.finishGrokRefreshUI()
+                }
+            }
+        }
+    }
+
+    // MARK: - Per-refresh consumption chart
+    //
+    // Everything below is plain data bookkeeping plus a view update. It runs on
+    // the main thread but never blocks it: no waits, no process control, no
+    // synchronous IPC. That matters because this code runs while the menu is
+    // open, and a stalled main thread during menu tracking freezes keyboard
+    // input for the whole system.
+
+    /// The chart is its own full-width row just above the usage-page buttons,
+    /// so it refreshes alongside the panel rather than as part of a column.
+    private func updateHistoryChart() {
+        let strips = currentHistoryStrips()
+        let hasContent = historyChartView.apply(
+            codex: strips.codex,
+            claude: strips.claude,
+            gemini: strips.gemini,
+            grok: strips.grok
+        )
+        historyChartItem.isHidden = !hasContent
+    }
+
+    /// The one place every chart (status menu, dropdown, pinned panel) gets
+    /// its strips from. NAS mode draws the NAS history for whichever
+    /// account `nasState.selectedGeminiServiceID` currently names — never
+    /// both accounts at once — and local mode draws the local trackers.
+    private func currentHistoryStrips() -> (
+        codex: UsageHistoryStrip?,
+        claude: UsageHistoryStrip?,
+        gemini: UsageHistoryStrip?,
+        grok: UsageHistoryStrip?
+    ) {
+        switch dataCollectionSourcePreference {
+        case .nas:
+            return (
+                nasCodexHistoryStrip(),
+                nasClaudeHistoryStrip(),
+                nasGeminiHistoryStrip(),
+                grokHistoryStrip()
+            )
+        case .localMac:
+            return (
+                lastSnapshot.flatMap { codexHistoryStrip(from: $0) },
+                claudeHistoryStrip(),
+                geminiHistoryStrip(),
+                grokHistoryStrip()
+            )
+        }
+    }
+
+    /// Codex bills against the weekly quota until it is exhausted and only then
+    /// draws down credits, so "how much did that refresh cost" is a different
+    /// number depending on which meter is live. The chart follows whichever one
+    /// is actually being spent.
+    private static func codexChartsCredits(_ snapshot: RateLimitSnapshot) -> Bool {
+        guard let balance = snapshot.creditBalance, balance > 0 else { return false }
+        guard let usedPercent = snapshot.usedPercent else { return true }
+        return remainingUsagePercent(from: usedPercent) <= 0
+    }
+
+    private func recordCodexConsumption(from snapshot: RateLimitSnapshot) {
+        let usesCredits = Self.codexChartsCredits(snapshot)
+        codexConsumption.record(
+            reading: usesCredits ? snapshot.creditBalance : snapshot.usedPercent,
+            at: snapshot.updatedAt,
+            isDecreasing: usesCredits,
+            metricKey: usesCredits ? "codex.credit" : "codex.weekly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func recordClaudeConsumption() {
+        guard let snapshot = lastClaudeSnapshot, let publishedAt = snapshot.publishedAt else { return }
+        // The weekly meter is the ordinary bucket so it stacks with Fable's
+        // own weekly limit like for like; the 5-hour session meter is the
+        // fallback for accounts that only report it.
+        let usesWeekly = snapshot.weeklyUsedPercent != nil
+        claudeConsumption.record(
+            reading: usesWeekly ? snapshot.weeklyUsedPercent : snapshot.fiveHourUsedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: usesWeekly ? "claude.weekly" : "claude.session"
+        )
+        // Only recorded when `modelWeeklyLimits` actually carries a Fable
+        // figure; otherwise the bucket stays missing for that refresh.
+        claudeFableConsumption.record(
+            reading: ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)?.usedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: "claude.fable.weekly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    /// Caption/accessibility text shared by the multi-bucket strips.
+    private static func stackedStripTexts(
+        series: [UsageHistorySeries],
+        unit: String
+    ) -> (caption: String, accessibilityValue: String) {
+        let stacked = UsageConsumptionCore.stackedSamples(series.map(\.samples))
+        let labels = series.map(\.label)
+        // Before the first measured refresh the ordinary meter reads "0",
+        // as it always has; the other buckets are simply not mentioned.
+        let unmeasured: [Double?] = [0] + Array(repeating: nil, count: max(0, series.count - 1))
+        let latestAmounts = stacked.last?.amounts ?? unmeasured
+        let breakdown = UsageConsumptionCore.breakdownTitle(amounts: latestAmounts, labels: labels, unit: unit)
+        return (
+            "갱신당 \(breakdown)",
+            "최근 \(stacked.count)회 갱신 소비 기록, 마지막 갱신 \(breakdown)"
+        )
+    }
+
+    private func codexHistoryStrip(from snapshot: RateLimitSnapshot) -> UsageHistoryStrip? {
+        // No emptiness guard: the strip is always drawn at full width, with
+        // not-yet-measured slots shown as faint placeholders.
+        let usesCredits = Self.codexChartsCredits(snapshot)
+        let unit = usesCredits ? " 크레딧" : "%"
+        let series = [UsageHistorySeries(
+            label: usesCredits ? "크레딧" : "주간",
+            samples: codexConsumption.samples,
+            color: UsageBrandColors.codex
+        )]
+        let texts = Self.stackedStripTexts(series: series, unit: unit)
+        return UsageHistoryStrip(
+            caption: texts.caption,
+            series: series,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: unit,
+            accessibilityValue: texts.accessibilityValue
+        )
+    }
+
+    private func claudeHistoryStrip() -> UsageHistoryStrip? {
+        let usesWeekly = lastClaudeSnapshot?.weeklyUsedPercent != nil
+        let series = [
+            UsageHistorySeries(
+                label: usesWeekly ? "주간" : "세션",
+                samples: claudeConsumption.samples,
+                color: UsageBrandColors.claude
+            ),
+            UsageHistorySeries(
+                label: "Fable",
+                samples: claudeFableConsumption.samples,
+                color: UsageBrandColors.claudeFable
+            )
+        ]
+        let texts = Self.stackedStripTexts(series: series, unit: "%")
+        return UsageHistoryStrip(
+            caption: texts.caption,
+            series: series,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: "%",
+            accessibilityValue: texts.accessibilityValue
+        )
+    }
+
+    /// Records Gemini's per-refresh consumption. Unlike Codex/Claude, `agy`
+    /// only ever reports a *remaining* fraction — never a used percentage
+    /// that counts up — so this always differences the remaining percent as
+    /// a decreasing metric, the same way Codex's credit balance is tracked.
+    private func recordGeminiConsumption() {
+        guard let snapshot = lastGeminiSnapshot, let publishedAt = snapshot.publishedAt else { return }
+        let usesFiveHour = snapshot.fiveHourRemainingFraction != nil
+        let remainingPercent = GeminiUsageCore.remainingPercent(
+            from: usesFiveHour ? snapshot.fiveHourRemainingFraction : snapshot.weeklyRemainingFraction
+        )
+        geminiConsumption.record(
+            reading: remainingPercent,
+            at: publishedAt,
+            isDecreasing: true,
+            metricKey: usesFiveHour ? "gemini.5h" : "gemini.weekly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func geminiHistoryStrip() -> UsageHistoryStrip? {
+        let usesFiveHour = lastGeminiSnapshot?.fiveHourRemainingFraction != nil
+        let samples = geminiConsumption.samples
+        let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
+        return UsageHistoryStrip(
+            caption: "갱신당 \(usesFiveHour ? "세션" : "주간") \(latest)",
+            samples: samples,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: "%",
+            color: UsageBrandColors.geminiText,
+            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(latest)"
+        )
+    }
+
+    /// Codex NAS strip: the weekly-percent series, or the credits series
+    /// once the NAS Codex values show credits are what is being spent —
+    /// never both in one strip, since their units differ.
+    private func nasCodexHistoryStrip() -> UsageHistoryStrip? {
+        guard let history = lastNASHistory else { return nil }
+        let usesCredits = nasState.codexSnapshot.map(Self.codexChartsCredits) ?? false
+        let key = usesCredits ? "codexCredits" : "codex"
+        let unit = usesCredits ? " 크레딧" : "%"
+        let series = [nasSeries(
+            label: usesCredits ? "크레딧" : "주간",
+            history.series[key],
+            unit: NASHistoryV2.unit(for: key),
+            color: UsageBrandColors.codex
+        )]
+        return nasStrip(series: series, unit: unit)
+    }
+
+    private func nasClaudeHistoryStrip() -> UsageHistoryStrip? {
+        guard let history = lastNASHistory else { return nil }
+        let series = [
+            nasSeries(label: "주간", history.series["claude"], unit: .percent, color: UsageBrandColors.claude),
+            nasSeries(label: "Fable", history.series["claudeFable"], unit: .percent, color: UsageBrandColors.claudeFable)
+        ]
+        return nasStrip(series: series, unit: "%")
+    }
+
+    /// NAS consumption points are used as-is, with each account kept separate
+    /// and drawn as its own line (blue / cyan / teal) in the one Gemini chart.
+    private func nasGeminiHistoryStrip() -> UsageHistoryStrip? {
+        guard let history = lastNASHistory else { return nil }
+        let series: [UsageHistorySeries] = [
+            (NASServiceID.gemini, "본", UsageTrendPalette.geminiMain),
+            (.gemini2, "부", UsageTrendPalette.geminiSecond),
+            (.gemini3, "세", UsageTrendPalette.geminiThird)
+        ].compactMap { id, label, color in
+            guard let entry = nasState.slot(id).lastGood else { return nil }
+            let raw = history.series[id.rawValue]
+            if let expected = entry.historyIdentity, raw?.identityGeneration != expected { return nil }
+            if entry.historyIdentity == nil, entry.actualAccountRef != nil && entry.actualAccountRef != id.accountRef { return nil }
+            return nasSeries(label: label, raw, unit: .percent, color: color)
+        }
+        return nasStrip(series: series, unit: "%")
+    }
+
+    /// One NAS series as a chart line: the real samples, the NAS's own gap
+    /// threshold (15 minutes unless the 24-hour envelope says otherwise) and
+    /// the baseline segment of every sample, so a line is never drawn across
+    /// a restarted baseline.
+    private func nasSeries(
+        label: String,
+        _ raw: NASHistorySeries?,
+        unit: NASHistoryUnit,
+        color: NSColor
+    ) -> UsageHistorySeries {
+        UsageHistorySeries(
+            label: label,
+            samples: NASHistoryChartCore.samples(raw, unit: unit),
+            color: color,
+            gapSeconds: lastNASHistory?.window?.gapSeconds ?? 900,
+            segmentKeys: NASHistoryChartCore.segmentKeys(raw, unit: unit)
+        )
+    }
+
+    private func nasStrip(series: [UsageHistorySeries], unit: String) -> UsageHistoryStrip {
+        let texts = Self.stackedStripTexts(series: series, unit: unit)
+        let failure = lastNASHistoryFetchFailureLabel.map { " · \($0)" } ?? ""
+        let asOf = lastNASHistory.map { Self.nasHistoryTimeFormatter.string(from: $0.generatedAt) }
+        // Only the 24-hour envelope reaches back a day; the older helper hands
+        // over just the newest 40 points, which the note says plainly.
+        let coverageNote = lastNASHistory?.window == nil ? "NAS 24시간 기록 미지원 · 최근 약 2시간" : nil
+        let sourceNote = ["NAS 기록 \(asOf ?? "—") 기준", coverageNote, lastNASHistoryFetchFailureLabel]
+            .compactMap { $0 }.joined(separator: " · ")
+        return UsageHistoryStrip(
+            caption: texts.caption,
+            series: series,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: unit,
+            accessibilityValue: "NAS 기록 · \(texts.accessibilityValue)\(failure)",
+            sourceNote: sourceNote
+        )
+    }
+
+    /// Records Grok's per-refresh consumption. The billing endpoint reports a
+    /// *used* percentage that counts up (weekly, or the monthly fallback when
+    /// no weekly figure is available), the same increasing-metric shape
+    /// Claude's own weekly percentage uses.
+    private func recordGrokConsumption() {
+        guard let snapshot = lastGrokSnapshot, let publishedAt = snapshot.publishedAt else { return }
+        let usesWeekly = snapshot.weeklyUsedPercent != nil
+        grokConsumption.record(
+            reading: usesWeekly ? snapshot.weeklyUsedPercent : snapshot.monthlyUsedPercent,
+            at: publishedAt,
+            isDecreasing: false,
+            metricKey: usesWeekly ? "grok.weekly" : "grok.monthly"
+        )
+        persistConsumptionTrackers()
+    }
+
+    private func grokHistoryStrip() -> UsageHistoryStrip? {
+        let samples = grokConsumption.samples
+        let usesWeekly = lastGrokSnapshot?.weeklyUsedPercent != nil
+        let latest = UsageConsumptionCore.amountTitle(samples.last?.amount ?? 0, unit: "%")
+        return UsageHistoryStrip(
+            caption: "갱신당 \(usesWeekly ? "주간" : "월간") \(latest)",
+            samples: samples,
+            slotCount: UsageConsumptionTracker.defaultCapacity,
+            unitSuffix: "%",
+            color: GrokBrandColor.mark,
+            accessibilityValue: "최근 \(samples.count)회 갱신 소비 기록, 마지막 갱신 \(latest)"
+        )
+    }
+
+    private func loadConsumptionTrackers() {
+        guard let data = CCMBPreferences.shared.defaults.data(forKey: Self.consumptionHistoryDefaultsKey),
+              let store = try? JSONDecoder().decode(UsageConsumptionHistoryStore.self, from: data) else { return }
+        codexConsumption = store.codex
+        codexSparkConsumption = store.codexSpark
+        claudeConsumption = store.claude
+        claudeFableConsumption = store.claudeFable
+        geminiConsumption = store.gemini
+        grokConsumption = store.grok
+    }
+
+    private func persistConsumptionTrackers() {
+        let store = UsageConsumptionHistoryStore(
+            codex: codexConsumption,
+            codexSpark: codexSparkConsumption,
+            claude: claudeConsumption,
+            claudeFable: claudeFableConsumption,
+            gemini: geminiConsumption,
+            grok: grokConsumption
+        )
+        guard let data = try? JSONEncoder().encode(store) else { return }
+        CCMBPreferences.shared.defaults.set(data, forKey: Self.consumptionHistoryDefaultsKey)
+    }
+
+    private func refreshStatusTitle() {
+        switch dataCollectionSourcePreference {
+        case .localMac:
+            guard let snapshot = lastSnapshot else { return }
+            setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil))
+            statusItem.button?.setAccessibilityValue(
+                Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil)
+            )
+        case .nas:
+            // Menu-bar figures in NAS mode come only from NAS values (Gemini
+            // = selected account), never from a leftover local reading.
+            let parts = Self.statusTitleParts(
+                from: nasState.codexSnapshot,
+                claude: nasState.claudeSnapshot,
+                gemini: nasState.geminiSnapshot,
+                gemini2: nasState.gemini2Snapshot,
+                gemini3: nasState.gemini3Snapshot
+            )
+            if parts.isEmpty {
+                setStatusTitle("NAS")
+            } else {
+                setStatusTitle(parts)
+            }
+            statusItem.button?.setAccessibilityValue(
+                "놀이터 기준 " + Self.accessibilityStatus(
+                    from: nasState.codexSnapshot,
+                    claude: nasState.claudeSnapshot,
+                    gemini: nasState.geminiSnapshot,
+                    gemini2: nasState.gemini2Snapshot,
+                    gemini3: nasState.gemini3Snapshot
+                )
+            )
+        }
+    }
+
+    /// Whether the dashboard panel has anything to render.
+    private var hasPanelContent: Bool {
+        if isNASMode {
+            return NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) &&
+                (lastNASSnapshotReceivedAt != nil ||
+                 nasState.codexSnapshot != nil ||
+                 nasState.claudeSnapshot != nil ||
+                 nasState.geminiSnapshot != nil)
+        } else {
+            return lastSnapshot != nil
+        }
+    }
+
+    private func makePanelModel() -> UsagePanelModel? {
+        let grok = Self.grokColumn(from: lastGrokSnapshot, fetchFailureLabel: lastGrokFetchFailureLabel)
+        switch dataCollectionSourcePreference {
+        case .localMac:
+            guard let lastSnapshot else { return nil }
+            return UsagePanelModel(
+                codex: Self.codexColumn(from: lastSnapshot),
+                claude: Self.claudeColumn(
+                    from: lastClaudeSnapshot,
+                    fetchFailureLabel: lastClaudeFetchFailureLabel,
+                    rateLimitRetryAt: lastClaudeRateLimitRetryAt
+                ),
+                gemini: geminiColumn(
+                    title: "Gemini",
+                    from: lastGeminiSnapshot,
+                    fetchFailureLabel: lastGeminiFetchFailureLabel,
+                    isStale: false,
+                    source: .localMac,
+                    colors: UsageBrandColors.geminiGradient
+                ),
+                grok: grok
+            )
+        case .nas:
+            return UsagePanelModel(
+                codex: nasCodexColumn(),
+                claude: nasClaudeColumn(),
+                gemini: nasGeminiColumn(title: "Gemini"),
+                grok: grok
+            )
+        }
+    }
+
+    private func updateSplitPanel() {
+        updateHistoryChart()
+        updatePanelHeaders()
+        usagePageLinksView.applyGrokAuthState(
+            loginRequired: grokLoginRequired,
+            loginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+        usagePageLinksView.applyClaudeAuthState(
+            loginRequired: claudeLoginRequiredForDisplay,
+            loginInProgress: claudeLoginInProgress
+        )
+        guard let model = makePanelModel() else {
+            splitPanelItem.isHidden = true
+            return
+        }
+        splitPanelView.apply(model)
+        updatePinnedUsageWindow(with: model)
+        updateStatusDropdown(with: model)
+
+        accountItem.isHidden = true
+        usageItem.isHidden = true
+        resetItem.isHidden = true
+        resetCreditsItem.isHidden = true
+        creditBalanceItem.isHidden = true
+        updatedItem.isHidden = true
+        usageSeparatorItem.isHidden = true
+        accountSeparatorItem.isHidden = true
+        splitPanelItem.isHidden = false
+    }
+
+    /// The Claude account-connect button belongs to the local OAuth
+    /// collector; in NAS mode it simply opens the usage page.
+    private var claudeLoginRequiredForDisplay: Bool {
+        !isNASMode && claudeNeedsReconnect
+    }
+
+    /// Applies a theme choice from any panel header, then re-renders every
+    /// panel instance from the same stored value so they never disagree.
+    private func applyPanelTheme(_ theme: UsagePanelTheme) {
+        UsagePanelThemeStore.current = theme
+        diagnosticLog.log("panel_theme_changed", ["theme": .string(theme.rawValue)])
+        updateSplitPanel()
+    }
+
+    /// Shared header state: last global refresh caption plus the stored
+    /// theme, mirrored into the menu header and both panel controllers.
+    private func updatePanelHeaders() {
+        let text: String
+        switch dataCollectionSourcePreference {
+        case .localMac:
+            let updatedAt = lastRateLimitUpdatedAt ?? lastSnapshot?.updatedAt
+            text = updatedAt.map { "마지막 갱신 \(Self.timeFormatter.string(from: $0))" } ?? ""
+        case .nas:
+            text = lastNASSnapshotReceivedAt.map { "마지막 갱신 \(Self.timeFormatter.string(from: $0))" } ?? ""
+        }
+        menuHeaderView.setLastUpdatedText(text)
+        menuHeaderView.applyThemeState()
+        let taskStatus = currentTaskStatusDisplay()
+        menuHeaderView.setTaskStatus(taskStatus)
+        statusDropdownController.applyHeaderState(lastUpdatedText: text, taskStatus: taskStatus)
+        pinnedUsageWindowController?.applyHeaderState(lastUpdatedText: text, taskStatus: taskStatus)
+    }
+
+    /// Shared status band for NAS-sourced cards: the latest failure (if
+    /// any) and whether the values shown are older than the latest read.
+    private static func nasStatus(issue: String?, isStale: Bool) -> (lines: [String], color: NSColor) {
+        switch (issue, isStale) {
+        case (let issue?, true): return (["오래된 정보 · \(issue)"], .systemOrange)
+        case (let issue?, false): return (["갱신 실패: \(issue)"], .systemRed)
+        case (nil, true): return (["오래된 정보"], .systemOrange)
+        case (nil, false): return ([], .secondaryLabelColor)
+        }
+    }
+
+    /// An honest "no values" card: never zero rings, never another card's
+    /// numbers.
+    private static func unavailableColumn(
+        title: String,
+        accentColor: NSColor,
+        reason: String,
+        detail: String? = nil,
+        accountLine: String = "계정 정보 없음",
+        extraAccountLines: [String] = [],
+        statusColor: NSColor = .secondaryLabelColor
+    ) -> UsagePanelColumn {
+        UsagePanelColumn(
+            title: title,
+            accentColor: accentColor,
+            quota: nil,
+            secondaryQuota: nil,
+            rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "사용량", value: "정보 없음", isEmphasized: true)])],
+            accountLines: [accountLine] + extraAccountLines,
+            refreshLine: nil,
+            statusLines: [reason] + (detail.map { [$0] } ?? []),
+            statusColor: statusColor
+        )
+    }
+
+    private static let nasAccountLine = "놀이터(NAS) 기준"
+
+    private func nasCodexColumn() -> UsagePanelColumn {
+        let slot = nasState.slot(.codex)
+        guard let snapshot = nasState.codexSnapshot else {
+            return Self.unavailableColumn(
+                title: "Codex",
+                accentColor: UsageBrandColors.codex,
+                reason: slot.issue.map { "갱신 실패: \($0)" } ?? "놀이터 값을 기다리는 중",
+                accountLine: Self.nasAccountLine,
+                statusColor: slot.issue == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+        return Self.codexColumn(from: snapshot, nasSlot: slot)
+    }
+
+    private func nasClaudeColumn() -> UsagePanelColumn {
+        let slot = nasState.slot(.claude)
+        guard let snapshot = nasState.claudeSnapshot else {
+            return Self.unavailableColumn(
+                title: "Claude",
+                accentColor: UsageBrandColors.claude,
+                reason: slot.issue.map { "갱신 실패: \($0)" } ?? "놀이터 값을 기다리는 중",
+                accountLine: Self.nasAccountLine,
+                statusColor: slot.issue == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+        return Self.claudeColumn(
+            from: snapshot,
+            fetchFailureLabel: slot.issue,
+            rateLimitRetryAt: nil,
+            nasSlot: slot
+        )
+    }
+
+    /// One card, with the primary pair followed by the current secondary pair.
+    private func nasGeminiColumn(title: String) -> UsagePanelColumn {
+        let primary = nasState.geminiSnapshot
+        let secondary = nasState.gemini2Snapshot
+        // 세 번째 계정은 NAS가 gemini3를 보낸 경우에만 나타난다.
+        let tertiary = nasState.hasGemini3 ? nasState.gemini3Snapshot : nil
+        let showsThird = nasState.hasGemini3
+        func quota(_ caption: String, _ value: Double?, _ color: NSColor, _ account: String) -> UsagePanelQuota {
+            let remaining = value.flatMap { GeminiUsageCore.remainingPercent(from: $0) }
+            return UsagePanelQuota(caption: caption, percentText: remaining.map(Self.percentTitle(from:)) ?? "—",
+                fraction: (remaining ?? 0) / 100, color: color,
+                accessibilityValue: remaining.map { "\(account) \(caption) \(Self.percentTitle(from: $0))" } ?? "\(account) \(caption) 정보 없음")
+        }
+        func reset(_ date: Date?) -> String { date.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음" }
+        var statuses: [String] = []
+        var statusAccounts = [(NASServiceID.gemini, "본계정"), (.gemini2, "부계정")]
+        if showsThird { statusAccounts.append((.gemini3, "세 번째 계정")) }
+        for (id, label) in statusAccounts {
+            let slot = nasState.slot(id)
+            let status = Self.nasStatus(issue: slot.issue, isStale: slot.isStale)
+            statuses += status.lines.map { "\(label) · \($0)" }
+        }
+        var accounts = [("본계정", primary), ("부계정", secondary)]
+        var resetRows = [
+            UsagePanelRow(label: "본 요금제", value: primary?.planTitle ?? "정보 없음"),
+            UsagePanelRow(label: "본 세션 초기화", value: reset(primary?.fiveHourResetsAt)),
+            UsagePanelRow(label: "본 주간 초기화", value: reset(primary?.weeklyResetsAt)),
+            UsagePanelRow(label: "부 세션 초기화", value: reset(secondary?.fiveHourResetsAt)),
+            UsagePanelRow(label: "부 주간 초기화", value: reset(secondary?.weeklyResetsAt))
+        ]
+        var supplementalQuotas: [UsagePanelQuota] = []
+        if showsThird {
+            accounts.append(("세 번째 계정", tertiary))
+            resetRows += [
+                UsagePanelRow(label: "3 세션 초기화", value: reset(tertiary?.fiveHourResetsAt)),
+                UsagePanelRow(label: "3 주간 초기화", value: reset(tertiary?.weeklyResetsAt))
+            ]
+            let third = UsageBrandColors.geminiThirdAccount
+            supplementalQuotas = [
+                quota("3 세션", tertiary?.fiveHourRemainingFraction, third, "세 번째 계정"),
+                quota("3 주간", tertiary?.weeklyRemainingFraction, third, "세 번째 계정")
+            ]
+        }
+        return UsagePanelColumn(
+            title: title, accentColor: UsageBrandColors.geminiText,
+            quota: quota("세션", primary?.fiveHourRemainingFraction, UsageBrandColors.geminiMainAccount, "본계정"),
+            secondaryQuota: quota("주간", primary?.weeklyRemainingFraction, UsageBrandColors.geminiMainAccount, "본계정"),
+            tertiaryQuota: quota("세션", secondary?.fiveHourRemainingFraction, UsageBrandColors.geminiSecondAccount, "부계정"),
+            quaternaryQuota: quota("주간", secondary?.weeklyRemainingFraction, UsageBrandColors.geminiSecondAccount, "부계정"),
+            rowGroups: [UsagePanelRowGroup(rows: resetRows)],
+            accountLines: accounts.map { label, snapshot in
+                let email = snapshot?.accountEmail ?? "정보 없음"
+                let display = email.lowercased().hasSuffix("@gmail.com") ? String(email.dropLast(10)) : email
+                return "\(label) \(display)"
+            },
+            refreshLine: accounts.map { label, snapshot in
+                snapshot?.publishedAt.map { "\(label) \(Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()))" } ?? "\(label) 미수집"
+            }.joined(separator: " · "),
+            statusLines: statuses, statusColor: statuses.isEmpty ? .secondaryLabelColor : .systemOrange,
+            supplementalQuotas: supplementalQuotas
+        )
+    }
+
+    private static func codexColumn(
+        from snapshot: RateLimitSnapshot,
+        fetchFailureLabel: String? = nil,
+        nasSlot: NASServiceSlot? = nil
+    ) -> UsagePanelColumn {
+        let accent = UsageBrandColors.codex
+        var quota: UsagePanelQuota?
+        var summaryRows: [UsagePanelRow] = []
+        var resetRows: [UsagePanelRow] = []
+        var creditRows: [UsagePanelRow] = []
+
+        if let planTitle = CodexPlanCore.title(for: snapshot.planType) {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if nasSlot != nil {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
+        }
+
+        let weeklyQuota: UsagePanelQuota?
+        if let usedPercent = snapshot.usedPercent {
+            let remaining = remainingUsagePercent(from: usedPercent)
+            let actualWeeklyQuota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Codex 주간 사용량 \(percentTitle(from: remaining))"
+            )
+            weeklyQuota = actualWeeklyQuota
+            if UsageCore.codexQuotaDisplaysCredits(
+                usedPercent: snapshot.usedPercent,
+                creditBalance: snapshot.creditBalance
+            ), let creditBalance = snapshot.creditBalance {
+                let creditTitle = creditDetailTitle(from: creditBalance)
+                quota = UsagePanelQuota(
+                    caption: "남은 크레딧",
+                    percentText: creditTitle,
+                    fraction: 0,
+                    color: accent,
+                    accessibilityValue: "남은 Codex 크레딧 \(creditTitle)",
+                    displayStyle: .prominentValue
+                )
+            } else {
+                quota = actualWeeklyQuota
+            }
+        } else {
+            weeklyQuota = nil
+            summaryRows.append(UsagePanelRow(label: "주간 남음", value: "정보 없음", isEmphasized: true))
+        }
+
+        if let resetsAt = snapshot.resetsAt {
+            resetRows.append(UsagePanelRow(
+                label: "주간 초기화",
+                value: Self.resetDateTimeTitle(resetsAt),
+                isEmphasized: true
+            ))
+        } else if let minutes = snapshot.windowDurationMinutes {
+            resetRows.append(UsagePanelRow(label: "주간 초기화", value: "\(minutes)분 창", isEmphasized: true))
+        }
+
+        if let resetCredits = snapshot.resetCredits {
+            let expiryDetail = snapshot.resetCreditExpirations.isEmpty
+                ? (nasSlot != nil && resetCredits > 0 ? "만료 정보 없음" : nil)
+                : snapshot.resetCreditExpirations.map { "만료 \(Self.resetDateTimeTitle($0))" }.joined(separator: "\n")
+            creditRows.append(UsagePanelRow(label: "리셋권", value: "\(resetCredits)개", detail: expiryDetail, detailAlignment: .right))
+        } else if nasSlot != nil {
+            creditRows.append(UsagePanelRow(label: "초기화", value: "NAS 미수집"))
+        }
+        if snapshot.creditsUnlimited {
+            creditRows.append(UsagePanelRow(label: "남은 크레딧", value: "무제한", isEmphasized: true))
+        } else if let creditBalance = snapshot.creditBalance {
+            creditRows.append(UsagePanelRow(
+                label: "남은 크레딧",
+                value: creditDetailTitle(from: creditBalance),
+                isEmphasized: true
+            ))
+        } else {
+            creditRows.append(UsagePanelRow(
+                label: "남은 크레딧",
+                value: snapshot.detailedCreditsReturned ? "형식 확인 필요" : "정보 없음",
+                isEmphasized: true
+            ))
+        }
+
+        let detailRows = summaryRows + resetRows + creditRows
+        let rowGroups = detailRows.isEmpty ? [] : [UsagePanelRowGroup(rows: detailRows)]
+
+        let relativeUpdate = relativeFormatter.localizedString(for: snapshot.updatedAt, relativeTo: Date())
+        let status: (lines: [String], color: NSColor)
+        if let nasSlot {
+            status = nasStatus(issue: nasSlot.issue, isStale: nasSlot.isStale)
+        } else {
+            status = (
+                fetchFailureLabel.map { ["갱신 실패: \($0)"] } ?? [],
+                fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+        return UsagePanelColumn(
+            title: "Codex",
+            accentColor: accent,
+            quota: quota,
+            secondaryQuota: weeklyQuota,
+            rowGroups: rowGroups,
+            accountLines: [snapshot.accountID.map { "계정 \($0)" } ?? "계정 정보 없음"],
+            refreshLine: "업데이트 \(relativeUpdate)",
+            statusLines: status.lines,
+            statusColor: status.color
+        )
+    }
+
+    private static func claudeColumn(
+        from snapshot: ClaudeUsageSnapshot?,
+        fetchFailureLabel: String?,
+        rateLimitRetryAt: Date?,
+        nasSlot: NASServiceSlot? = nil
+    ) -> UsagePanelColumn {
+        let accent = UsageBrandColors.claude
+        // A live countdown (rateLimitRetryAt) always takes priority over a
+        // static label so it keeps ticking down across UI refreshes.
+        let rateLimitLabel = rateLimitRetryAt.map { ClaudeUsageCore.rateLimitRetryLabel(retryAt: $0, now: Date()) }
+        let failureLabel = rateLimitLabel
+            ?? fetchFailureLabel
+
+        guard let snapshot else {
+            var statusLines: [String] = []
+            if let rateLimitLabel {
+                statusLines.append(rateLimitLabel)
+            } else if let failureLabel {
+                statusLines.append("갱신 실패: \(failureLabel)")
+            }
+            statusLines.append("아래 Claude 버튼을 눌러 계정을 연결하세요")
+            return UsagePanelColumn(
+                title: "Claude",
+                accentColor: accent,
+                quota: nil,
+                secondaryQuota: nil,
+                rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "Claude", value: "정보 없음")])],
+                accountLines: ["계정 정보 없음"],
+                refreshLine: nil,
+                statusLines: statusLines,
+                statusColor: rateLimitLabel != nil ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+            )
+        }
+
+        let freshnessWindow = snapshot.quotaSource == "claude-statusline"
+            ? ClaudeUsageCore.statusLineFreshForSeconds
+            : ClaudeUsageCore.sharedFreshForSeconds
+        let isCurrent = ClaudeUsageCore.isFresh(
+            publishedAt: snapshot.publishedAt,
+            now: Date(),
+            freshForSeconds: freshnessWindow
+        ) && failureLabel == nil
+        var quota: UsagePanelQuota?
+        var weeklyQuota: UsagePanelQuota?
+        var fableQuota: UsagePanelQuota?
+        var summaryRows: [UsagePanelRow] = []
+        var resetRows: [UsagePanelRow] = []
+        var modelLimitRows: [UsagePanelRow] = []
+        let fableLimit = ClaudeUsageCore.fableWeeklyLimit(in: snapshot.modelWeeklyLimits)
+
+        // A NAS-reported plan (from the fresh, same-token `claude_details`
+        // profile/usage data) always takes priority when present. The local
+        // `.claude.json` file read is this Mac's own metadata and is kept
+        // only as a fallback for a local (non-NAS) card lacking a remote
+        // plan.
+        if let planTitle = snapshot.planTitle ?? (nasSlot == nil ? ClaudePlanStore.readTitle() : nil) {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if nasSlot != nil {
+            summaryRows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
+        }
+
+        if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent) {
+            quota = UsagePanelQuota(
+                caption: "세션 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Claude 세션 사용량 \(percentTitle(from: remaining))"
+            )
+        } else {
+            summaryRows.append(UsagePanelRow(label: "세션 남음", value: "정보 없음", isEmphasized: true))
+        }
+
+        if let resetsAt = snapshot.fiveHourResetsAt, resetsAt > Date() {
+            resetRows.append(UsagePanelRow(
+                label: "세션 초기화",
+                value: Self.resetDateTimeTitle(resetsAt),
+                isEmphasized: true
+            ))
+        }
+        if let resetsAt = fableLimit?.resetsAt, resetsAt > Date() {
+            resetRows.append(UsagePanelRow(
+                label: "Fable 초기화",
+                value: Self.resetDateTimeTitle(resetsAt)
+            ))
+        }
+        if let remaining = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
+            weeklyQuota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Claude 주간 사용량 \(percentTitle(from: remaining))"
+            )
+        }
+        if let resetsAt = snapshot.weeklyResetsAt, resetsAt > Date() {
+            resetRows.append(UsagePanelRow(
+                label: "주간 초기화",
+                value: Self.resetDateTimeTitle(resetsAt)
+            ))
+        }
+        resetRows.append(UsagePanelRow(
+            label: "초기화",
+            value: snapshot.limitResets.map { "\($0.remainingCount)개" } ?? "확인 불가",
+            detail: snapshot.limitResets?.expiresAt.map { "만료 \(Self.resetDateTimeTitle($0))" },
+            detailAlignment: .right
+        ))
+        // The Fable weekly limit is promoted to its own top ring (session,
+        // Fable, weekly), so it is excluded from the lower model-limit rows
+        // that the rest of `modelWeeklyLimits` still populates.
+        if let fableLimit, let remaining = ClaudeUsageCore.remainingPercent(from: fableLimit.usedPercent) {
+            fableQuota = UsagePanelQuota(
+                caption: "Fable 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Claude Fable 주간 사용량 \(percentTitle(from: remaining))"
+            )
+        }
+        for limit in snapshot.modelWeeklyLimits {
+            guard limit != fableLimit else { continue }
+            guard let remaining = ClaudeUsageCore.remainingPercent(from: limit.usedPercent) else { continue }
+            let detail = limit.resetsAt.flatMap { $0 > Date() ? Self.resetDateTimeTitle($0) : nil }
+            modelLimitRows.append(UsagePanelRow(
+                label: "\(limit.modelName) 주간",
+                value: "\(percentTitle(from: remaining)) 남음",
+                detail: detail
+            ))
+        }
+        var rowGroups: [UsagePanelRowGroup] = []
+        let primaryRows = summaryRows + resetRows
+        if !primaryRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(rows: primaryRows))
+        }
+        if !modelLimitRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(title: "모델별 주간 한도", glyph: .chart, rows: modelLimitRows))
+        }
+        var accountLines: [String] = []
+        if let account = snapshot.account {
+            if let email = account.email {
+                accountLines.append("계정 \(email)")
+            }
+        }
+        if accountLines.isEmpty {
+            accountLines.append("계정 정보 없음")
+        }
+        let refreshLine = snapshot.publishedAt.map {
+            "\(isCurrent ? "업데이트" : "마지막 확인") \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+        }
+        if let nasSlot {
+            var status = nasStatus(issue: nasSlot.issue, isStale: nasSlot.isStale)
+            if nasSlot.issue != nil, let retryAt = nasSlot.retryAt, retryAt > Date() {
+                status.lines.append("\(Self.resetDateTimeTitle(retryAt)) 이후 다시 조회")
+            }
+            if status.lines.isEmpty, let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
+                status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))"], .systemOrange)
+            }
+            return UsagePanelColumn(
+                title: "Claude",
+                accentColor: accent,
+                quota: quota,
+                secondaryQuota: fableQuota ?? weeklyQuota,
+                tertiaryQuota: fableQuota != nil ? weeklyQuota : nil,
+                rowGroups: rowGroups,
+                accountLines: accountLines,
+                refreshLine: refreshLine,
+                statusLines: status.lines,
+                statusColor: status.color
+            )
+        }
+        var statusLines: [String] = []
+        if let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
+            statusLines.append("\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))에 다시 확인")
+        } else if let rateLimitLabel {
+            statusLines.append(isCurrent ? rateLimitLabel : "오래된 정보 · \(rateLimitLabel)")
+        } else if let failureLabel {
+            statusLines.append(isCurrent ? "갱신 실패: \(failureLabel)" : "오래된 정보 · 갱신 실패: \(failureLabel)")
+        } else if !isCurrent {
+            statusLines.append("오래된 정보")
+        }
+
+        return UsagePanelColumn(
+            title: "Claude",
+            accentColor: accent,
+            quota: quota,
+            secondaryQuota: fableQuota ?? weeklyQuota,
+            tertiaryQuota: fableQuota != nil ? weeklyQuota : nil,
+            rowGroups: rowGroups,
+            accountLines: accountLines,
+            refreshLine: refreshLine,
+            statusLines: statusLines,
+            statusColor: rateLimitLabel != nil || !isCurrent ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+        )
+    }
+
+    private static func claudeUnavailableState(
+        from snapshot: ClaudeUsageSnapshot,
+        now: Date
+    ) -> (reason: String, until: Date)? {
+        let sessionExhausted = ClaudeUsageCore.remainingPercent(from: snapshot.fiveHourUsedPercent).map { $0 <= 0.001 } ?? false
+        let weeklyExhausted = ClaudeUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent).map { $0 <= 0.001 } ?? false
+        guard sessionExhausted || weeklyExhausted else { return nil }
+
+        var resetDates: [Date] = []
+        if sessionExhausted, let reset = snapshot.fiveHourResetsAt, reset > now { resetDates.append(reset) }
+        if weeklyExhausted, let reset = snapshot.weeklyResetsAt, reset > now { resetDates.append(reset) }
+        let exhaustedCount = (sessionExhausted ? 1 : 0) + (weeklyExhausted ? 1 : 0)
+        guard resetDates.count == exhaustedCount, let until = resetDates.max() else { return nil }
+        let reason = sessionExhausted && weeklyExhausted
+            ? "세션·주간 소진"
+            : (sessionExhausted ? "세션 소진" : "주간 소진")
+        return (reason, until)
+    }
+
+    /// Four compact peer rings directly under the Gemini title. Their fixed
+    /// order is CLI session/weekly, then online session/weekly; the canonical
+    /// blue/red/yellow/green Google palette provides a second visual key.
+    private func geminiColumn(
+        title: String,
+        from snapshot: GeminiUsageSnapshot?,
+        fetchFailureLabel: String?,
+        isStale: Bool,
+        source: DataCollectionSource,
+        colors: [NSColor]
+    ) -> UsagePanelColumn {
+        let accent = UsageBrandColors.geminiText
+        let now = Date()
+        // NAS mode never reads this Mac's web session, relay or login.
+        let isNAS = source == .nas
+        let online = isNAS ? nil : lastGeminiOnlineSnapshot
+        func makeQuota(caption: String, remaining: Double?, color: NSColor, accessibilityLabel: String) -> UsagePanelQuota {
+            UsagePanelQuota(
+                caption: caption,
+                percentText: remaining.map(Self.percentTitle(from:)) ?? "—",
+                fraction: (remaining ?? 0) / 100,
+                color: color,
+                accessibilityValue: remaining.map { "\(accessibilityLabel) \(Self.percentTitle(from: $0))" }
+                    ?? "\(accessibilityLabel) 정보 없음"
+            )
+        }
+        func onlineResetValue(_ text: String?) -> String {
+            guard var text, !text.isEmpty else { return "정보 없음" }
+            for suffix in ["에 초기화", "에 재설정", " resets"] where text.hasSuffix(suffix) {
+                text.removeLast(suffix.count)
+                break
+            }
+
+            let locale = Locale(identifier: "ko_KR")
+            let timeZone = TimeZone.autoupdatingCurrent
+            let output = DateFormatter()
+            output.locale = locale
+            output.timeZone = timeZone
+
+            func resetDateTitle(_ date: Date) -> String {
+                Self.resetDateTimeTitle(date)
+            }
+
+            let datedInput = DateFormatter()
+            datedInput.locale = locale
+            datedInput.timeZone = timeZone
+            datedInput.dateFormat = "yyyy년 M월 d일 a h:mm"
+            let currentYear = Calendar.current.component(.year, from: now)
+            if let date = datedInput.date(from: "\(currentYear)년 \(text)") {
+                return resetDateTitle(date)
+            }
+
+            for format in ["yyyy MMM d 'at' h:mm a", "yyyy MMM d, 'at' h:mm a"] {
+                let englishInput = DateFormatter()
+                englishInput.locale = Locale(identifier: "en_US_POSIX")
+                englishInput.timeZone = timeZone
+                englishInput.dateFormat = format
+                if let date = englishInput.date(from: "\(currentYear) \(text)") {
+                    return resetDateTitle(date)
+                }
+            }
+
+            let timeFormats = [
+                (locale, "a h:mm"),
+                (Locale(identifier: "en_US_POSIX"), "h:mm a")
+            ]
+            for (timeLocale, timeFormat) in timeFormats {
+                let timeInput = DateFormatter()
+                timeInput.locale = timeLocale
+                timeInput.timeZone = timeZone
+                timeInput.dateFormat = timeFormat
+                if let parsedTime = timeInput.date(from: text) {
+                    let parsedComponents = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: parsedTime)
+                    guard let hour = parsedComponents.hour, let minute = parsedComponents.minute else { continue }
+                    var dateComponents = Calendar.autoupdatingCurrent.dateComponents([.year, .month, .day], from: now)
+                    dateComponents.hour = hour
+                    dateComponents.minute = minute
+                    guard var date = Calendar.autoupdatingCurrent.date(from: dateComponents) else { continue }
+                    if date < now {
+                        date = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 1, to: date) ?? date
+                    }
+                    return resetDateTitle(date)
+                }
+            }
+            return text
+        }
+
+        let cliSessionRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.fiveHourRemainingFraction) }
+        let cliWeeklyRemaining = snapshot.flatMap { GeminiUsageCore.remainingPercent(from: $0.weeklyRemainingFraction) }
+        let onlineSessionRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.sessionUsedPercent) }
+        let onlineWeeklyRemaining = online.flatMap { GeminiOnlineUsageCore.remainingPercent(from: $0.weeklyUsedPercent) }
+        let onlineNeedsLogin = !isNAS && (online == nil || geminiOnlineNeedsConnection)
+
+        func cliSessionResetValue() -> String {
+            if let resetsAt = snapshot?.fiveHourResetsAt {
+                return Self.resetDateTimeTitle(resetsAt)
+            }
+            if let remaining = cliSessionRemaining, remaining >= 100 {
+                return "사용 시작 후 5시간"
+            }
+            return "정보 없음"
+        }
+
+        let cliSessionQuota = makeQuota(caption: "C세션", remaining: cliSessionRemaining, color: colors[0], accessibilityLabel: "남은 Gemini CLI 세션 사용량")
+        let cliWeeklyQuota = makeQuota(caption: "C주간", remaining: cliWeeklyRemaining, color: colors[1], accessibilityLabel: "남은 Gemini CLI 주간 사용량")
+        let onlineSessionQuota = makeQuota(caption: "O세션", remaining: onlineSessionRemaining, color: colors[2], accessibilityLabel: "남은 Gemini 온라인 세션 사용량")
+        let onlineWeeklyQuota = makeQuota(caption: "O주간", remaining: onlineWeeklyRemaining, color: colors[3], accessibilityLabel: "남은 Gemini 온라인 주간 사용량")
+
+        var rowGroups: [UsagePanelRowGroup] = []
+        var rows: [UsagePanelRow] = []
+        if let planTitle = snapshot?.planTitle {
+            rows.append(UsagePanelRow(label: "요금제", value: planTitle))
+        } else if isNAS {
+            rows.append(UsagePanelRow(label: "요금제", value: "NAS 미수집"))
+        }
+        rows.append(UsagePanelRow(label: "C세션 초기화", value: cliSessionResetValue()))
+        rows.append(UsagePanelRow(label: "C주간 초기화", value: snapshot?.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음"))
+        rows.append(UsagePanelRow(
+            label: "O세션 초기화",
+            value: isNAS ? "NAS 미수집" : (onlineNeedsLogin ? "" : onlineResetValue(online?.sessionResetText)),
+            action: onlineNeedsLogin ? UsagePanelRowAction(
+                title: "로그인",
+                accessibilityLabel: "Gemini 온라인 로그인",
+                handler: { [weak self] in self?.connectGeminiOnline() }
+            ) : nil
+        ))
+        rows.append(UsagePanelRow(label: "O주간 초기화", value: isNAS ? "NAS 미수집" : onlineResetValue(online?.weeklyResetText)))
+        rowGroups.append(UsagePanelRowGroup(rows: rows))
+
+        var statusLines: [String] = []
+        var statusColor = NSColor.secondaryLabelColor
+        if isNAS {
+            let status = Self.nasStatus(issue: fetchFailureLabel, isStale: isStale)
+            statusLines = status.lines
+            statusColor = status.color
+        } else if let fetchFailureLabel {
+            statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
+            statusColor = .systemRed
+        }
+        if !isNAS && geminiOnlineParseFailed {
+            statusLines.append("온라인 확인 불가")
+            statusColor = .systemOrange
+        } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
+            statusLines.append("온라인 마지막 값")
+            statusColor = .systemOrange
+        }
+
+        return UsagePanelColumn(
+            title: title,
+            accentColor: accent,
+            quota: cliSessionQuota,
+            secondaryQuota: cliWeeklyQuota,
+            tertiaryQuota: onlineSessionQuota,
+            quaternaryQuota: onlineWeeklyQuota,
+            rowGroups: rowGroups,
+            accountLines: [
+                online?.accountEmail.map { "계정 \($0)" }
+                    ?? snapshot?.accountEmail.map { "계정 \($0)" }
+                    ?? "계정 정보 없음"
+            ],
+            refreshLine: {
+                var parts: [String] = []
+                if let publishedAt = snapshot?.publishedAt {
+                    parts.append("C \(Self.relativeFormatter.localizedString(for: publishedAt, relativeTo: now))")
+                }
+                if isNAS {
+                    parts.append("O 미수집")
+                } else if let fetchedAt = online?.fetchedAt {
+                    parts.append("O \(Self.relativeFormatter.localizedString(for: fetchedAt, relativeTo: now))")
+                }
+                return parts.isEmpty ? nil : parts.joined(separator: " · ")
+            }(),
+            statusLines: statusLines,
+            statusColor: statusColor
+        )
+    }
+
+    /// Grok's weekly ring remains the primary quota. The compact detail list
+    /// deliberately uses the same four labels the other provider columns use.
+    private static func grokColumn(
+        from snapshot: GrokUsageSnapshot?,
+        fetchFailureLabel: String?
+    ) -> UsagePanelColumn {
+        let accent = GrokBrandColor.mark
+
+        guard let snapshot else {
+            var statusLines: [String] = []
+            if let fetchFailureLabel {
+                statusLines.append("갱신 실패: \(fetchFailureLabel)")
+            } else {
+                statusLines.append("사용량 정보를 불러오는 중…")
+            }
+            return UsagePanelColumn(
+                title: "Grok",
+                accentColor: accent,
+                quota: UsagePanelQuota(
+                    caption: "주간 남음",
+                    percentText: "—",
+                    fraction: 0,
+                    color: accent,
+                    accessibilityValue: "Grok 주간 사용량 정보 없음"
+                ),
+                secondaryQuota: nil,
+                rowGroups: [UsagePanelRowGroup(rows: [UsagePanelRow(label: "Grok", value: "정보 없음")])],
+                accountLines: ["계정 정보 없음"],
+                refreshLine: nil,
+                statusLines: statusLines,
+                statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+            )
+        }
+
+        var quota: UsagePanelQuota?
+        var summaryRows: [UsagePanelRow] = []
+        var estimateRows: [UsagePanelRow] = []
+        var resetCreditRows: [UsagePanelRow] = []
+
+        if let estimate = snapshot.rollingTokenUsage {
+            quota = UsagePanelQuota(
+                caption: "24시간 추정 남음",
+                percentText: percentTitle(from: estimate.remainingPercent),
+                fraction: estimate.remainingPercent / 100,
+                color: accent,
+                accessibilityValue: "이 Mac 기록으로 추정한 남은 Grok 24시간 사용량 \(percentTitle(from: estimate.remainingPercent))"
+            )
+        } else if let remaining = GrokUsageCore.remainingPercent(from: snapshot.weeklyUsedPercent) {
+            quota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: percentTitle(from: remaining),
+                fraction: remaining / 100,
+                color: accent,
+                accessibilityValue: "남은 Grok 주간 사용량 \(percentTitle(from: remaining))"
+            )
+        } else {
+            quota = UsagePanelQuota(
+                caption: "주간 남음",
+                percentText: "—",
+                fraction: 0,
+                color: accent,
+                accessibilityValue: "Grok 주간 사용량 정보 없음"
+            )
+        }
+        summaryRows.append(UsagePanelRow(label: "요금제", value: snapshot.subscriptionTier ?? "정보 없음"))
+        if let estimate = snapshot.rollingTokenUsage {
+            let used = NumberFormatter.localizedString(from: NSNumber(value: estimate.usedTokens), number: .decimal)
+            let limit = NumberFormatter.localizedString(from: NSNumber(value: estimate.limitTokens), number: .decimal)
+            estimateRows.append(UsagePanelRow(label: "토큰 추정", value: "\(used) / \(limit)"))
+            if let recoveryAt = estimate.recoveryAt {
+                estimateRows.append(UsagePanelRow(
+                    label: "회복 예상",
+                    value: Self.resetDateTimeTitle(recoveryAt),
+                    isEmphasized: true
+                ))
+            }
+        }
+        resetCreditRows.append(UsagePanelRow(
+            label: "월간",
+            value: snapshot.monthlyUsedCredits.map { "\(creditDetailTitle(from: $0)) 크레딧 사용" } ?? "정보 없음"
+        ))
+        resetCreditRows.append(UsagePanelRow(
+            label: "주간",
+            value: snapshot.weeklyResetsAt.map(Self.resetDateTimeTitle(_:)) ?? "정보 없음",
+            isEmphasized: true
+        ))
+        resetCreditRows.append(UsagePanelRow(
+            label: "크레딧",
+            value: snapshot.extraCreditBalance.map { "\(creditDetailTitle(from: $0)) 크레딧" } ?? "정보 없음"
+        ))
+
+        var rowGroups: [UsagePanelRowGroup] = [UsagePanelRowGroup(rows: summaryRows)]
+        if !estimateRows.isEmpty {
+            rowGroups.append(UsagePanelRowGroup(title: "이 Mac 추정", glyph: .gauge, rows: estimateRows))
+        }
+        rowGroups.append(UsagePanelRowGroup(title: "초기화·크레딧", glyph: .clock, rows: resetCreditRows))
+
+        var statusLines: [String] = []
+        if snapshot.weeklyUsedPercent == nil, snapshot.rollingTokenUsage != nil {
+            statusLines.append("추정 · 이 Mac의 최근 Grok 기록 기준")
+        } else if snapshot.weeklyUsedPercent == nil {
+            statusLines.append("주간 잔량: Grok에서 수치를 제공하지 않음")
+        }
+        if let fetchFailureLabel {
+            statusLines.append("갱신 실패: \(fetchFailureLabel)")
+        }
+
+        let accountLines = [snapshot.accountEmail.map { "계정 \($0)" } ?? "계정 정보 없음"]
+
+        return UsagePanelColumn(
+            title: "Grok",
+            accentColor: accent,
+            quota: quota,
+            secondaryQuota: nil,
+            rowGroups: rowGroups,
+            accountLines: accountLines,
+            refreshLine: snapshot.publishedAt.map {
+                "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
+            },
+            statusLines: statusLines,
+            statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+        )
+    }
+
+    /// `extraUsage`'s `limitCents`/`usedCents` are cents-denominated
+    /// regardless of which API field variant populated them.
+    private static func extraUsageTitle(_ extraUsage: ClaudeExtraUsage) -> String {
+        if extraUsage.isEnabled == false { return "사용 안 함" }
+        let currency = extraUsage.currency ?? "USD"
+        func amount(_ cents: Double?) -> String? {
+            guard let cents else { return nil }
+            return String(format: "%.2f", cents / 100)
+        }
+        switch (amount(extraUsage.usedCents), amount(extraUsage.limitCents)) {
+        case let (used?, limit?):
+            return "\(used) / \(limit) \(currency)"
+        case let (used?, nil):
+            return "\(used) \(currency) 사용"
+        case let (nil, limit?):
+            return "한도 \(limit) \(currency)"
+        default:
+            return "정보 없음"
+        }
+    }
+
+    private func configureShareMenu() {
+        let shareTitleStyle = NSMutableParagraphStyle()
+        shareTitleStyle.firstLineHeadIndent = 4
+        shareTitleStyle.headIndent = 4
+        shareItem.attributedTitle = NSAttributedString(
+            string: "사용량 공유",
+            attributes: [.paragraphStyle: shareTitleStyle]
+        )
+        shareItem.setAccessibilityLabel("사용량 공유")
+        shareItem.submenu = makeShareMenu()
+    }
+
+    private func makeShareMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func copyItem(_ source: NSMenuItem) -> NSMenuItem {
+            let item = NSMenuItem(title: source.title, action: source.action, keyEquivalent: source.keyEquivalent)
+            item.target = source.action == nil ? nil : self
+            item.isEnabled = source.action == nil ? false : source.isEnabled
+            item.state = source.state
+            item.toolTip = source.toolTip
+            item.setAccessibilityLabel(source.accessibilityLabel())
+            return item
+        }
+        let pathItem = NSMenuItem(title: "저장: ~/Library/Application Support/CCMB", action: nil, keyEquivalent: "")
+        let fileItem = NSMenuItem(title: "파일: usage-v1.json", action: nil, keyEquivalent: "")
+        let guideItem = NSMenuItem(title: "채팅에 “CCMB 사용량 알려줘” 입력", action: nil, keyEquivalent: "")
+        pathItem.isEnabled = false
+        fileItem.isEnabled = false
+        guideItem.isEnabled = false
+
+        menu.addItem(copyItem(shareStatusItem))
+        menu.addItem(.separator())
+        menu.addItem(pathItem)
+        menu.addItem(fileItem)
+        menu.addItem(copyItem(shareFolderItem))
+        menu.addItem(.separator())
+        menu.addItem(guideItem)
+        menu.addItem(copyItem(copySharePromptCombinedItem))
+        menu.addItem(.separator())
+        menu.addItem(copyItem(copySharePromptCodexItem))
+        menu.addItem(copyItem(copySharePromptClaudeItem))
+        menu.addItem(copyItem(copySharePromptGeminiItem))
+        menu.addItem(.separator())
+        menu.addItem(copyItem(copyShareCommandItem))
+        return menu
+    }
+
+    /// "iPhone 원격 동기화" submenu: status of the last CloudKit upload with
+    /// action-first advice, an on/off toggle for automatic uploads, and a
+    /// manual "지금 동기화". The uploaded data is the same usage-v1.json the
+    /// share menu already writes, stored only in the user's own iCloud
+    /// private database.
+    private func configureRemoteSyncMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        remoteSyncStatusItem.isEnabled = false
+        remoteSyncToggleItem.target = self
+        remoteSyncNowItem.target = self
+        let scopeItem = NSMenuItem(title: "내 iCloud 개인 영역에만 저장", action: nil, keyEquivalent: "")
+        scopeItem.isEnabled = false
+        scopeItem.toolTip = "같은 Apple ID로 로그인한 iPhone의 CCMB만 읽을 수 있습니다. 전송은 Apple이 보호합니다."
+        menu.addItem(remoteSyncStatusItem)
+        menu.addItem(.separator())
+        menu.addItem(remoteSyncToggleItem)
+        menu.addItem(remoteSyncNowItem)
+        menu.addItem(.separator())
+        remoteFolderStatusItem.isEnabled = false
+        chooseRemoteFolderItem.target = self
+        clearRemoteFolderItem.target = self
+        menu.addItem(remoteFolderStatusItem)
+        menu.addItem(chooseRemoteFolderItem)
+        menu.addItem(clearRemoteFolderItem)
+        menu.addItem(.separator())
+        menu.addItem(scopeItem)
+        remoteSyncItem.submenu = menu
+        cloudSyncUploader.onStatusChange = { [weak self] in
+            self?.updateRemoteSyncStatus()
+        }
+        remoteFolderPublisher.onStatusChange = { [weak self] in
+            self?.updateRemoteSyncStatus()
+        }
+        updateRemoteSyncStatus()
+        // The launch upload re-sends this Mac's local snapshot; NAS mode
+        // collects nothing locally, so there is nothing new to upload.
+        if DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) {
+            cloudSyncUploader.uploadIfEnabled(trigger: "launch")
+        }
+    }
+
+    private func updateRemoteSyncStatus() {
+        remoteSyncToggleItem.state = cloudSyncUploader.isEnabled ? .on : .off
+        clearRemoteFolderItem.isEnabled = remoteFolderPublisher.isConfigured
+        if let advice = remoteFolderPublisher.lastFailureAdvice {
+            setDetailTitle("클라우드 폴더 저장 실패", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = advice
+        } else if let folder = remoteFolderPublisher.selectedFolderName {
+            let suffix = remoteFolderPublisher.lastSuccessAt.map {
+                " · \(Self.timeFormatter.string(from: $0))"
+            } ?? ""
+            setDetailTitle("클라우드 폴더: \(folder)\(suffix)", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = "\(RemoteFolderPublisher.fileName)을 Files 앱에서 한 번 선택하면 iPhone이 계속 새로 읽습니다."
+        } else {
+            setDetailTitle("Dropbox·Google Drive 선택 안 됨", for: remoteFolderStatusItem)
+            remoteFolderStatusItem.toolTip = "파일 제공자 폴더를 선택하면 OAuth 없이 스냅샷 파일을 자동 갱신합니다."
+        }
+        if !cloudSyncUploader.hasCloudKitEntitlement {
+            setDetailTitle("iCloud 서명 없음 · 업로드 불가", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = "Apple Developer 계정에서 iCloud.com.armsone.ccmb 컨테이너를 등록하고 entitlement를 포함해 다시 서명해야 합니다."
+            return
+        }
+        if let failedAt = cloudSyncUploader.lastFailureAt {
+            setDetailTitle("동기화 실패 \(Self.timeFormatter.string(from: failedAt))", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = cloudSyncUploader.lastFailureAdvice
+            return
+        }
+        if let succeededAt = cloudSyncUploader.lastSuccessAt {
+            setDetailTitle("마지막 동기화 \(Self.timeFormatter.string(from: succeededAt))", for: remoteSyncStatusItem)
+            remoteSyncStatusItem.toolTip = "iPhone의 CCMB가 어디서든 이 값을 읽습니다."
+            return
+        }
+        setDetailTitle(
+            cloudSyncUploader.isEnabled ? "다음 사용량 갱신 때 업로드" : "자동 업로드 꺼짐",
+            for: remoteSyncStatusItem
+        )
+        remoteSyncStatusItem.toolTip = nil
+    }
+
+    @objc private func toggleRemoteSync() {
+        cloudSyncUploader.isEnabled.toggle()
+        if cloudSyncUploader.isEnabled {
+            cloudSyncUploader.uploadIfEnabled(trigger: "toggle-on")
+        }
+    }
+
+    @objc private func syncRemoteNow() {
+        cloudSyncUploader.uploadNow()
+        remoteFolderPublisher.publishIfConfigured()
+    }
+
+    @objc private func chooseRemoteFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "iPhone과 공유할 클라우드 폴더 선택"
+        panel.message = "Dropbox, Google Drive, iCloud Drive 또는 다른 동기화 폴더를 선택하세요. CCMB는 사용량 JSON만 저장합니다."
+        panel.prompt = "이 폴더 사용"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try remoteFolderPublisher.setFolder(url)
+        } catch {
+            remoteFolderStatusItem.toolTip = "폴더 권한을 저장하지 못했습니다. 다른 폴더를 선택해 주세요."
+        }
+        updateRemoteSyncStatus()
+    }
+
+    @objc private func clearRemoteFolder() {
+        remoteFolderPublisher.clearFolder()
+    }
+
+    private func configureDiagnosticsMenu() {
+        let menu = NSMenu()
+        let pathItem = NSMenuItem(
+            title: "저장: ~/Library/Application Support/CCMB/diagnostics",
+            action: nil,
+            keyEquivalent: ""
+        )
+        menu.addItem(pathItem)
+        menu.addItem(.separator())
+        menu.addItem(copyDiagnosticReportItem)
+        menu.addItem(openDiagnosticLogItem)
+        diagnosticsItem.submenu = menu
+    }
+
+    private func installUsageHelper() {
+        do {
+            try SharedUsageStore.installHelper()
+            helperInstallError = nil
+            copyShareCommandItem.isEnabled = true
+            appLog("usage helper installed at \(SharedUsageStore.helperURL.path)")
+        } catch {
+            helperInstallError = error.localizedDescription
+            copyShareCommandItem.isEnabled = false
+            updateShareStatus()
+            appLog("usage helper install failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func updateShareStatus() {
+        if let helperInstallError {
+            setDetailTitle("공유 명령 설치 실패", for: shareStatusItem)
+            shareStatusItem.toolTip = helperInstallError
+            return
+        }
+        if let lastShareError {
+            setDetailTitle("공유 저장 실패", for: shareStatusItem)
+            shareStatusItem.toolTip = lastShareError
+            return
+        }
+        shareStatusItem.toolTip = nil
+
+        if let feedback = shareFeedback {
+            if Date() <= feedback.expiresAt {
+                setDetailTitle(feedback.message, for: shareStatusItem)
+                return
+            }
+            shareFeedback = nil
+        }
+
+        guard let lastSharedUsageAt else {
+            setDetailTitle("공유 데이터 저장 대기 중…", for: shareStatusItem)
+            return
+        }
+
+        let age = max(0, Int(Date().timeIntervalSince(lastSharedUsageAt)))
+        let freshnessLimit = max(45, Int(refreshInterval) + 15)
+        let state = age <= freshnessLimit ? "최신" : "오래됨"
+        setDetailTitle("공유 상태 \(state) · \(Self.durationTitle(seconds: age)) 전", for: shareStatusItem)
+    }
+
+    @objc private func openSharedUsageFolder() {
+        try? FileManager.default.createDirectory(at: SharedUsageStore.directoryURL, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(SharedUsageStore.directoryURL)
+    }
+
+    @objc private func copySharePromptCombined() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 Codex·Claude·Gemini의 남은 주간 사용량과 Codex·Gemini 크레딧을 알려줘. 각각 fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "전체"
+        )
+    }
+
+    @objc private func copySharePromptCodex() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 codex 항목의 남은 주간 사용량과 크레딧을 알려줘. codex.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Codex"
+        )
+    }
+
+    @objc private func copySharePromptClaude() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 claude 항목의 남은 주간·5시간 사용량을 알려줘. claude.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Claude"
+        )
+    }
+
+    @objc private func copySharePromptGemini() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 gemini 항목의 남은 주간·5시간 사용량과 AI 크레딧을 알려줘. gemini.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Gemini"
+        )
+    }
+
+    @objc private func copySharePromptGrok() {
+        copySharePrompt(
+            "~/.codex/bin/ccmb-usage를 실행해서 grok 항목의 남은 주간·월간 사용량을 알려줘. grok.fresh가 false면 오래된 데이터라고 말해줘.",
+            label: "Grok"
+        )
+    }
+
+    private func copySharePrompt(_ prompt: String, label: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(prompt, forType: .string)
+        shareFeedback = ("\(label) 요청문을 복사했습니다", Date().addingTimeInterval(3))
+        updateShareStatus()
+    }
+
+    @objc private func copyShareCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(SharedUsageStore.helperURL.path, forType: .string)
+        shareFeedback = ("공유 명령을 복사했습니다", Date().addingTimeInterval(3))
+        updateShareStatus()
+    }
+
+    @objc private func copyLastError() {
+        guard let lastErrorMessage else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lastErrorMessage, forType: .string)
+        setDetailTitle("오류 내용을 복사했습니다", for: updatedItem)
+    }
+
+    @objc private func copyDiagnosticReport() {
+        let version = appVersion
+        setDetailTitle("진단 리포트 준비 중…", for: copyDiagnosticReportItem)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let report = self.diagnosticLog.report(appVersion: version)
+            DispatchQueue.main.async {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(report, forType: .string)
+                self.setDetailTitle("진단 리포트를 복사했습니다", for: self.copyDiagnosticReportItem)
+            }
+        }
+    }
+
+    @objc private func openDiagnosticLogFolder() {
+        try? FileManager.default.createDirectory(at: diagnosticLog.directoryURL, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(diagnosticLog.directoryURL)
+    }
+
+    @objc private func refresh() {
+        diagnosticLog.log("manual_refresh")
+        guard !isOffline else {
+            showOfflineStatus()
+            return
+        }
+        let now = Date()
+        if let lastManualRefreshAt, now.timeIntervalSince(lastManualRefreshAt) < 10 {
+            setDetailTitle("잠시 후 다시 새로고침해 주세요", for: updatedItem)
+            return
+        }
+        lastManualRefreshAt = now
+
+        restartAutoRefreshTimer()
+        resetCountdown()
+        setDetailTitle("Codex 사용량 새로고침 중...", for: usageItem)
+        setDetailTitle("수동 가져오기 중...", for: updatedItem)
+        statusItem.button?.setAccessibilityValue("사용량 새로 고침 중")
+        refreshCodexUsage(force: true)
+        refreshClaudeUsage(force: true)
+        refreshGeminiUsage(force: true)
+        refreshGrokUsage()
+    }
+
+    @objc private func beginCodexOAuthLogin() {
+        codexLoginItem.title = "Codex 로그인 브라우저 대기 중…"
+        CodexOAuthAccountClient.startLogin { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.codexLoginItem.title = "Codex 로그인 완료"
+                self.lastErrorMessage = nil
+                self.refreshCodexUsage(force: true)
+            case .failure:
+                self.codexLoginItem.title = "Codex 로그인 다시 시도"
+                self.lastErrorMessage = "Codex 로그인에 실패했습니다."
+            }
+        }
+    }
+
+    @objc private func setCodexRefreshInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        applyCodexRefreshInterval(seconds)
+    }
+
+    private func applyCodexRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
+        refreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { codexSmartRefreshPolicy.reset() }
+        CCMBPreferences.shared.defaults.set(seconds, forKey: Self.refreshIntervalDefaultsKey)
+        if let lastSnapshot, DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) {
+            do {
+                try SharedUsageStore.publish(
+                    lastSnapshot,
+                    claudeSnapshot: lastClaudeSnapshot,
+                    claudeRetryAt: lastClaudeRateLimitRetryAt,
+                    claudeFailureLabel: lastClaudeFetchFailureLabel,
+                    geminiSnapshot: lastGeminiSnapshot,
+                    geminiOnlineSnapshot: lastGeminiOnlineSnapshot,
+                    grokSnapshot: lastGrokSnapshot,
+                    consumptionHistory: UsageConsumptionHistoryStore(
+                        codex: codexConsumption,
+                        codexSpark: codexSparkConsumption,
+                        claude: claudeConsumption,
+                        claudeFable: claudeFableConsumption,
+                        gemini: geminiConsumption,
+                        grok: grokConsumption
+                    ),
+                    refreshInterval: refreshInterval
+                )
+                lastShareError = nil
+            } catch {
+                lastShareError = error.localizedDescription
+            }
+        }
+        updateRefreshIntervalMenu()
+        client.setAutoRefreshInterval(refreshInterval)
+        restartAutoRefreshTimer()
+        if refreshInterval > 0 {
+            let title = seconds == UsageCore.smartRefreshPreference
+                ? "Codex 스마트 갱신 · 현재 1분"
+                : "Codex 자동 갱신 · \(Self.durationTitle(seconds: seconds))"
+            setDetailTitle(title, for: updatedItem)
+            if isOffline {
+                showOfflineStatus()
+            } else {
+                refreshCodexUsage(force: true)
+            }
+        } else {
+            setDetailTitle("Codex 자동 갱신 꺼짐", for: updatedItem)
+        }
+        updateSplitPanel()
+    }
+
+    /// Opts existing installations into smart cadence once. A later explicit
+    /// fixed-interval choice remains untouched because this migration never
+    /// runs again.
+    private func migrateVisibleProvidersToSmartRefreshIfNeeded() {
+        let migrationKey = "visibleProviderSmartRefreshV1Migrated"
+        guard !CCMBPreferences.shared.defaults.bool(forKey: migrationKey) else { return }
+
+        refreshIntervalPreference = UsageCore.smartRefreshPreference
+        claudeRefreshIntervalPreference = UsageCore.smartRefreshPreference
+        geminiRefreshIntervalPreference = UsageCore.smartRefreshPreference
+        codexSmartRefreshPolicy.reset()
+        claudeSmartRefreshPolicy.reset()
+        geminiSmartRefreshPolicy.reset()
+        CCMBPreferences.shared.defaults.set(UsageCore.smartRefreshPreference, forKey: Self.refreshIntervalDefaultsKey)
+        CCMBPreferences.shared.defaults.set(UsageCore.smartRefreshPreference, forKey: Self.claudeRefreshIntervalDefaultsKey)
+        CCMBPreferences.shared.defaults.set(UsageCore.smartRefreshPreference, forKey: Self.geminiRefreshIntervalDefaultsKey)
+        CCMBPreferences.shared.defaults.set(true, forKey: migrationKey)
+    }
+
+    @objc private func setClaudeRefreshInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        applyClaudeRefreshInterval(seconds)
+    }
+
+    private func applyClaudeRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
+        claudeRefreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { claudeSmartRefreshPolicy.reset() }
+        CCMBPreferences.shared.defaults.set(seconds, forKey: Self.claudeRefreshIntervalDefaultsKey)
+        updateRefreshIntervalMenu()
+        restartAutoRefreshTimer()
+        let title = seconds == UsageCore.smartRefreshPreference
+            ? "Claude 스마트 갱신 · 현재 1분"
+            : (seconds > 0 ? "Claude 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Claude 자동 갱신 꺼짐")
+        setDetailTitle(title, for: updatedItem)
+        if claudeRefreshInterval > 0, !isOffline {
+            refreshClaudeUsage()
+        }
+        updateSplitPanel()
+    }
+
+    @objc private func setGeminiRefreshInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        applyGeminiRefreshInterval(seconds)
+    }
+
+    @objc private func setDataCollectionSource(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let source = DataCollectionSource(rawValue: raw) else { return }
+        applyDataCollectionSource(source)
+    }
+
+    func applyDataCollectionSource(_ source: DataCollectionSource) {
+        guard source != dataCollectionSourcePreference else {
+            updateDataCollectionSourceMenu()
+            return
+        }
+        dataCollectionSourcePreference = source
+        dataSourceGeneration += 1
+        CCMBPreferences.shared.defaults.set(source.rawValue, forKey: Self.dataCollectionSourceDefaultsKey)
+        callbacks.onDataSourceChanged?(source.rawValue)
+        updateDataCollectionSourceMenu()
+        diagnosticLog.log("data_source_changed", ["source": .string(source.rawValue)])
+
+        switch source {
+        case .nas:
+            grokLoginInProgress = false
+            grokAuthRecoveryInProgress = false
+            client.stop()
+            lastRateLimitUpdatedAt = nil
+            if !isOffline { refreshAllFromNAS(force: true) }
+        case .localMac:
+            grokLoginInProgress = false
+            grokAuthRecoveryInProgress = false
+            NASFourServiceClient.cancelInFlight()
+            NASHistoryClient.cancelInFlight()
+            nasTaskStatusStore.cancelInFlight()
+            if !isOffline {
+                client.start()
+                refreshClaudeUsage(force: true)
+                refreshGeminiUsage(force: true)
+                refreshGrokUsage(force: true)
+            }
+        }
+        restartAutoRefreshTimer()
+        refreshStatusTitle()
+        updateSplitPanel()
+    }
+
+    private func updateDataCollectionSourceMenu() {
+        for item in dataCollectionSourceItems {
+            item.state = (item.representedObject as? String) == dataCollectionSourcePreference.rawValue ? .on : .off
+        }
+        dataSourceItem.title = "수집 소스 · \(dataCollectionSourcePreference.title)"
+    }
+
+    private func applyGeminiRefreshInterval(_ seconds: Int) {
+        guard !isNASMode else {
+            updateRefreshIntervalMenu()
+            updateSplitPanel()
+            return
+        }
+        geminiRefreshIntervalPreference = seconds
+        if seconds == UsageCore.smartRefreshPreference { geminiSmartRefreshPolicy.reset() }
+        CCMBPreferences.shared.defaults.set(seconds, forKey: Self.geminiRefreshIntervalDefaultsKey)
+        updateRefreshIntervalMenu()
+        restartAutoRefreshTimer()
+        let title = seconds == UsageCore.smartRefreshPreference
+            ? "Gemini 스마트 갱신 · 현재 1분"
+            : (seconds > 0 ? "Gemini 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Gemini 자동 갱신 꺼짐")
+        setDetailTitle(title, for: updatedItem)
+        if geminiRefreshInterval > 0, !isOffline {
+            refreshGeminiUsage()
+        }
+        updateSplitPanel()
+    }
+
+    @objc private func setGrokRefreshInterval(_ sender: NSMenuItem) {
+        guard let seconds = sender.representedObject as? Int else { return }
+        applyGrokRefreshInterval(seconds)
+    }
+
+    private func applyGrokRefreshInterval(_ seconds: Int) {
+        grokRefreshInterval = TimeInterval(seconds)
+        CCMBPreferences.shared.defaults.set(seconds, forKey: Self.grokRefreshIntervalDefaultsKey)
+        updateRefreshIntervalMenu()
+        restartAutoRefreshTimer()
+        setDetailTitle(
+            seconds > 0 ? "Grok 자동 갱신 · \(Self.durationTitle(seconds: seconds))" : "Grok 자동 갱신 꺼짐",
+            for: updatedItem
+        )
+        if seconds > 0, !isOffline {
+            refreshGrokUsage()
+        }
+        updateSplitPanel()
+    }
+
+    @objc private func togglePinnedUsageWindow() {
+        if pinnedUsageWindowController?.isVisible == true {
+            pinnedUsageWindowController?.close()
+            return
+        }
+        CCMBPreferences.shared.defaults.set(true, forKey: Self.pinnedUsageWindowDefaultsKey)
+        updatePinnedUsageWindowMenu()
+        updateSplitPanel()
+    }
+
+    private func updatePinnedUsageWindow(with model: UsagePanelModel) {
+        guard CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey) else { return }
+        let controller: PinnedUsageWindowController
+        if let existing = pinnedUsageWindowController {
+            controller = existing
+        } else {
+            controller = PinnedUsageWindowController()
+            controller.onClose = { [weak self] in
+                CCMBPreferences.shared.defaults.set(false, forKey: Self.pinnedUsageWindowDefaultsKey)
+                self?.updatePinnedUsageWindowMenu()
+            }
+            controller.onCodexRefreshIntervalChange = { [weak self] in self?.applyCodexRefreshInterval($0) }
+            controller.onClaudeRefreshIntervalChange = { [weak self] in self?.applyClaudeRefreshInterval($0) }
+            controller.onGeminiRefreshIntervalChange = { [weak self] in self?.applyGeminiRefreshInterval($0) }
+            controller.onGrokRefreshIntervalChange = { [weak self] in self?.applyGrokRefreshInterval($0) }
+            controller.onGrokUsageAction = { [weak self] in self?.performGrokUsageAction() }
+            controller.onClaudeUsageAction = { [weak self] in self?.performClaudeUsageAction() }
+            controller.onOpacityChange = { [weak self] in self?.changePinnedPanelOpacity($0) }
+            controller.onRefreshAll = { [weak self] in self?.refresh() }
+            controller.onThemeChange = { [weak self] in self?.applyPanelTheme($0) }
+            controller.setShareMenu(makeShareMenu())
+            controller.onCheckForUpdates = { [weak self] in self?.checkForUpdates() }
+            controller.applyHeaderState(lastUpdatedText: "", taskStatus: currentTaskStatusDisplay())
+            controller.onOpenDiagnosticLog = { [weak self] in self?.openDiagnosticLogFolder() }
+            controller.onOpenGitHub = { [weak self] in self?.openFooterLink() }
+            controller.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
+            controller.onRestart = { [weak self] in self?.restartApp() }
+            controller.onQuit = { [weak self] in self?.quit() }
+            pinnedUsageWindowController = controller
+            controller.setOpacity(panelOpacity)
+        }
+        let strips = currentHistoryStrips()
+        controller.apply(
+            model: model,
+            codexHistory: strips.codex,
+            claudeHistory: strips.claude,
+            geminiHistory: strips.gemini,
+            grokHistory: strips.grok,
+            codexRefreshInterval: Int(refreshInterval),
+            claudeRefreshInterval: Int(claudeRefreshInterval),
+            geminiRefreshInterval: Int(geminiRefreshInterval),
+            grokRefreshInterval: Int(grokRefreshInterval)
+        )
+        controller.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeLoginRequiredForDisplay,
+            claudeLoginInProgress: claudeLoginInProgress,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+        controller.setShareMenu(makeShareMenu())
+        if !controller.isVisible {
+            controller.show()
+        }
+        updatePinnedUsageWindowMenu()
+    }
+
+    /// Keeps the status-item's own transient dropdown current even while it
+    /// isn't visible, so it never needs to rebuild `UsagePanelModel` itself
+    /// when `showStatusMenu` opens it — the same reasoning `apply(...)`
+    /// below already uses for the persistent pinned panel.
+    private func updateStatusDropdown(with model: UsagePanelModel) {
+        let strips = currentHistoryStrips()
+        statusDropdownController.apply(
+            model: model,
+            codexHistory: strips.codex,
+            claudeHistory: strips.claude,
+            geminiHistory: strips.gemini,
+            grokHistory: strips.grok,
+            codexRefreshInterval: Int(refreshInterval),
+            claudeRefreshInterval: Int(claudeRefreshInterval),
+            geminiRefreshInterval: Int(geminiRefreshInterval),
+            grokRefreshInterval: Int(grokRefreshInterval)
+        )
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeLoginRequiredForDisplay,
+            claudeLoginInProgress: claudeLoginInProgress,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+        statusDropdownController.setShareMenu(makeShareMenu())
+    }
+
+    private func updatePinnedUsageWindowMenu() {
+        let enabled = CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey)
+        pinnedUsageWindowItem.state = enabled ? .on : .off
+        updateVersionView.alwaysViewButton.title = enabled ? "✓ 항상 보기" : "항상 보기"
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: isLaunchAtLoginEnabled,
+            alwaysViewEnabled: enabled,
+            claudeLoginRequired: claudeLoginRequiredForDisplay,
+            claudeLoginInProgress: claudeLoginInProgress,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+    }
+
+    /// Applies one shared value to the status dropdown and the pinned panel
+    /// so their whole-panel background materials fade together while all
+    /// text, charts, and buttons stay fully opaque.
+    private func applyPanelOpacity() {
+        statusDropdownController.setOpacity(panelOpacity)
+        pinnedUsageWindowController?.setOpacity(panelOpacity)
+        updateVersionView.setOpacity(panelOpacity)
+    }
+
+    @objc private func changePanelOpacity(_ sender: NSSlider) {
+        setPanelOpacity(sender.doubleValue)
+    }
+
+    /// Same opacity change the status menu's own slider performs, invoked
+    /// from the pinned panel's mirrored slider via a callback rather than
+    /// duplicating the persistence/apply logic there.
+    private func changePinnedPanelOpacity(_ opacity: Double) {
+        setPanelOpacity(opacity)
+    }
+
+    private func setPanelOpacity(_ opacity: Double) {
+        panelOpacity = UsageCore.normalizedPanelOpacity(opacity)
+        CCMBPreferences.shared.defaults.set(panelOpacity, forKey: Self.panelOpacityDefaultsKey)
+        applyPanelOpacity()
+    }
+
+    @objc private func openDashboard() {
+        NSWorkspace.shared.open(UsageDashboardURLs.codex)
+    }
+
+    @objc private func performClaudeUsageAction() {
+        guard !claudeLoginInProgress else { return }
+        guard claudeLoginRequiredForDisplay else {
+            NSWorkspace.shared.open(UsageDashboardURLs.claude)
+            return
+        }
+        beginClaudeOAuthLogin()
+    }
+
+    private func beginClaudeOAuthLogin() {
+        guard !claudeLoginInProgress else { return }
+        claudeLoginInProgress = true
+        lastClaudeFetchFailureLabel = "브라우저에서 Claude 계정 연결 중"
+        updateSplitPanel()
+        ClaudeOAuthAccountClient.startLogin { [weak self] result in
+            guard let self else { return }
+            self.claudeLoginInProgress = false
+            switch result {
+            case .success:
+                ClaudeOAuthUsageClient.resetAfterAccountConnection()
+                self.lastClaudeFetchFailureLabel = nil
+                self.claudeNeedsReconnect = false
+                self.lastClaudeRateLimitRetryAt = nil
+                self.refreshClaudeUsage()
+            case .failure:
+                self.lastClaudeFetchFailureLabel = "Claude 계정 연결 실패"
+                self.claudeNeedsReconnect = true
+                self.updateSplitPanel()
+            }
+        }
+    }
+
+    @objc private func openGeminiDashboard() {
+        NSWorkspace.shared.open(UsageDashboardURLs.gemini)
+    }
+
+    @objc private func openFooterLink() {
+        guard let url = URL(string: Self.footerLinkURLString) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let next = !isLaunchAtLoginEnabled
+        CCMBPreferences.shared.defaults.set(next, forKey: "launchAtLoginEnabled")
+        callbacks.onLaunchAtLogin?(next)
+        updateLaunchAtLoginMenu()
+    }
+
+    private var isLaunchAtLoginEnabled: Bool {
+        if let getter = callbacks.isLaunchAtLoginEnabled {
+            return getter()
+        }
+        return CCMBPreferences.shared.defaults.bool(forKey: "launchAtLoginEnabled")
+    }
+
+    private func updateLaunchAtLoginMenu() {
+        let enabled = isLaunchAtLoginEnabled
+        launchAtLoginItem.state = enabled ? .on : .off
+        lifecycleActionsView.launchButton.title = enabled ? "✓ 자동 실행" : "자동 실행"
+        setDetailTitle(launchAtLoginItem.title, for: launchAtLoginItem)
+        pinnedUsageWindowController?.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: enabled,
+            alwaysViewEnabled: CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeLoginRequiredForDisplay,
+            claudeLoginInProgress: claudeLoginInProgress,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+        statusDropdownController.applyLowerControlsState(
+            versionText: "현재 버전 \(appVersion)",
+            launchAtLoginEnabled: enabled,
+            alwaysViewEnabled: CCMBPreferences.shared.defaults.bool(forKey: Self.pinnedUsageWindowDefaultsKey),
+            claudeLoginRequired: claudeLoginRequiredForDisplay,
+            claudeLoginInProgress: claudeLoginInProgress,
+            grokLoginRequired: grokLoginRequired,
+            grokLoginInProgress: grokLoginInProgress || grokAuthRecoveryInProgress
+        )
+    }
+
+    private func refreshLaunchAgentPathIfNeeded() {
+        guard isLaunchAtLoginEnabled else { return }
+        do {
+            try installLaunchAgent()
+        } catch {
+            setDetailTitle("자동 시작 경로 갱신 실패", for: updatedItem)
+        }
+    }
+
+    private func installLaunchAgent() throws {
+        try FileManager.default.createDirectory(
+            at: Self.launchAgentURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let plist: [String: Any] = [
+            "Label": Self.launchAgentLabel,
+            "ProgramArguments": [
+                "/usr/bin/open",
+                Bundle.main.bundlePath
+            ],
+            "RunAtLoad": true,
+            "KeepAlive": false,
+            "LimitLoadToSessionType": "Aqua",
+            "StandardOutPath": "/tmp/CCMB.launchd.out.log",
+            "StandardErrorPath": "/tmp/CCMB.launchd.err.log"
+        ]
+
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: Self.launchAgentURL, options: .atomic)
+    }
+
+    @objc private func quit() {
+        callbacks.onQuit?()
+    }
+
+    private func setStatusTitle(_ title: String) {
+        guard let button = statusItem.button else { return }
+        let font = button.font ?? NSFont.menuBarFont(ofSize: 0)
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: statusTitleAttributes(font: font, color: statusAdaptiveTextColor())
+        )
+        let titleWidth = (title as NSString).size(withAttributes: [.font: font]).width
+        statusItem.length = ceil(titleWidth + 8)
+    }
+
+    private func setStatusTitle(_ parts: [(text: String, color: NSColor)]) {
+        guard !parts.isEmpty else {
+            setStatusTitle("—")
+            return
+        }
+        guard let button = statusItem.button else { return }
+        let font = button.font ?? NSFont.menuBarFont(ofSize: 0)
+        let title = NSMutableAttributedString()
+        for (index, part) in parts.enumerated() {
+            if index > 0 {
+                title.append(NSAttributedString(
+                    string: "·",
+                    attributes: statusTitleAttributes(
+                        font: font,
+                        color: statusAdaptiveTextColor().withAlphaComponent(0.7)
+                    )
+                ))
+            }
+            appendStatusPart(part.text, providerColor: part.color, font: font, to: title)
+        }
+        button.attributedTitle = title
+        statusItem.length = ceil(title.size().width + 8)
+    }
+
+    /// The percent sign is dropped from the menu bar readout and the number
+    /// carries the provider accent instead. Numeric token counts without a
+    /// percent sign also carry the provider accent; nonnumeric placeholders
+    /// (e.g. "—", "!") keep the adaptive text color.
+    private func appendStatusPart(
+        _ text: String,
+        providerColor: NSColor,
+        font: NSFont,
+        to title: NSMutableAttributedString
+    ) {
+        if let percentIndex = text.lastIndex(of: "%") {
+            let number = String(text[..<percentIndex])
+            title.append(NSAttributedString(
+                string: number,
+                attributes: statusTitleAttributes(font: font, color: providerColor)
+            ))
+            return
+        }
+
+        let isNumeric = Double(text.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)) != nil
+        let color = isNumeric ? providerColor : statusAdaptiveTextColor()
+        title.append(NSAttributedString(
+            string: text,
+            attributes: statusTitleAttributes(font: font, color: color)
+        ))
+    }
+
+    private func statusAdaptiveTextColor() -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white
+                : NSColor.black
+        }
+    }
+
+    private func statusTitleAttributes(
+        font: NSFont,
+        color: NSColor
+    ) -> [NSAttributedString.Key: Any] {
+        return [
+            .font: font,
+            .foregroundColor: color
+        ]
+    }
+
+    private static let percentFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .percent
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
+
+    private static func creditDetailTitle(from balance: Double) -> String {
+        UsageCore.creditDetailTitle(from: balance)
+    }
+
+    private static func statusTitleParts(
+        from snapshot: RateLimitSnapshot?,
+        claude: ClaudeUsageSnapshot?,
+        gemini: GeminiUsageSnapshot?,
+        gemini2: GeminiUsageSnapshot?,
+        gemini3: GeminiUsageSnapshot? = nil
+    ) -> [(text: String, color: NSColor)] {
+        var parts: [(text: String, color: NSColor)] = []
+
+        if let snapshot, let codexTitle = UsageCore.menuBarCodexTitle(
+            usedPercent: snapshot.usedPercent,
+            creditBalance: snapshot.creditBalance
+        ) {
+            parts.append((codexTitle, UsageBrandColors.codex))
+        }
+
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+            parts.append((percentTitle(from: claudeRemaining), UsageBrandColors.claude))
+        }
+
+        if gemini != nil || gemini2 != nil {
+            // Missing account keeps its slot with a placeholder, never 0%.
+            parts.append((geminiRemainingValue(cli: gemini).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiMainAccount))
+            parts.append((geminiRemainingValue(cli: gemini2).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiSecondAccount))
+        }
+        // 세 번째 계정은 NAS가 값을 보낸 경우에만 덧붙인다(없으면 기존 표시 그대로).
+        if gemini3 != nil {
+            parts.append((geminiRemainingValue(cli: gemini3).map(percentTitle(from:)) ?? "—", UsageBrandColors.geminiThirdAccount))
+        }
+
+        return parts
+    }
+
+    private static func remainingUsagePercent(from usedPercent: Double) -> Double {
+        UsageCore.remainingPercent(from: usedPercent)
+    }
+
+    private static func accessibilityStatus(
+        from snapshot: RateLimitSnapshot?,
+        claude: ClaudeUsageSnapshot?,
+        gemini: GeminiUsageSnapshot?,
+        gemini2: GeminiUsageSnapshot?,
+        gemini3: GeminiUsageSnapshot? = nil
+    ) -> String {
+        var parts: [String] = []
+        if let usedPercent = snapshot?.usedPercent {
+            parts.append("남은 Codex 주간 사용량 \(percentTitle(from: remainingUsagePercent(from: usedPercent)))")
+        }
+        if let claudeRemaining = ClaudeUsageCore.remainingPercent(from: claude?.fiveHourUsedPercent) {
+            parts.append("남은 Claude 세션 \(percentTitle(from: claudeRemaining))")
+        }
+        if gemini != nil || gemini2 != nil {
+            var accounts = [("본계정", gemini), ("부계정", gemini2)]
+            if gemini3 != nil { accounts.append(("세 번째 계정", gemini3)) }
+            for (label, snap) in accounts {
+                let value = geminiRemainingValue(cli: snap).map(percentTitle(from:)) ?? "정보 없음"
+                parts.append("남은 Gemini \(label) 세션 사용량 \(value)")
+            }
+        }
+        return parts.isEmpty ? "사용량 정보 없음" : parts.joined(separator: ", ")
+    }
+
+    private static func geminiRemainingValue(
+        cli: GeminiUsageSnapshot?
+    ) -> Double? {
+        GeminiUsageCore.remainingPercent(from: cli?.fiveHourRemainingFraction)
+    }
+
+    private static func percentTitle(from percent: Double) -> String {
+        percentFormatter.string(from: NSNumber(value: percent / 100)) ?? "\(Int(percent.rounded()))%"
+    }
+
+    private static func durationTitle(seconds: Int) -> String {
+        if seconds >= 3_600 {
+            let hours = seconds / 3_600
+            let minutes = (seconds % 3_600) / 60
+            return minutes == 0 ? "\(hours)시간" : "\(hours)시간 \(minutes)분"
+        }
+        if seconds >= 60 {
+            let minutes = seconds / 60
+            let remainder = seconds % 60
+            return remainder == 0 ? "\(minutes)분" : "\(minutes)분 \(remainder)초"
+        }
+
+        return "\(seconds)초"
+    }
+
+    private static func intervalTitle(_ interval: TimeInterval) -> String {
+        interval > 0 ? durationTitle(seconds: Int(interval)) : "끔"
+    }
+
+    private static func refreshPreferenceTitle(_ seconds: Int) -> String {
+        if seconds == UsageCore.smartRefreshPreference { return "스마트 (30초→2→5분)" }
+        return seconds == 0 ? "끔" : durationTitle(seconds: seconds)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    private static let resetDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "M/d(EEEEE) HH:mm"
+        return formatter
+    }()
+
+    private static func resetDateTimeTitle(_ date: Date) -> String {
+        let calendar = Calendar.autoupdatingCurrent
+        let now = Date()
+        let dayDiff = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+        if dayDiff == 0 {
+            resetDateTimeFormatter.dateFormat = "HH:mm"
+        } else if dayDiff == 1 {
+            resetDateTimeFormatter.dateFormat = "'내일' HH:mm"
+        } else if dayDiff == 2 {
+            resetDateTimeFormatter.dateFormat = "'모레' HH:mm"
+        } else {
+            resetDateTimeFormatter.dateFormat = "MM/dd(E) HH:mm"
+        }
+        return resetDateTimeFormatter.string(from: date)
+    }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.unitsStyle = .full
+        return formatter
+    }()
+
+    private static let launchAgentLabel = "com.codex.creditmenubar"
+    private static let refreshIntervalDefaultsKey = "codexAutomaticRefreshIntervalSeconds"
+    private static let claudeRefreshIntervalDefaultsKey = "claudeAutomaticRefreshIntervalSeconds"
+    private static let geminiRefreshIntervalDefaultsKey = "geminiAutomaticRefreshIntervalSeconds"
+    private static let grokRefreshIntervalDefaultsKey = "grokAutomaticRefreshIntervalSeconds"
+    private static let dataCollectionSourceDefaultsKey = "dataCollectionSourcePreference"
+    private static let pinnedUsageWindowDefaultsKey = "pinnedUsageWindowEnabled"
+    private static let consumptionHistoryDefaultsKey = "usageConsumptionHistoryV1"
+    /// Raw bytes of the last successfully parsed NAS history v2 envelope,
+    /// cached separately from the local-tracker history above — it is never
+    /// read back through `UsageConsumptionHistoryStore`'s decoder, and a
+    /// legacy/unknown payload here simply fails `NASHistoryV2Core.parse`
+    /// silently rather than corrupting that unrelated store.
+    private static let nasHistoryV2DefaultsKey = CCMBPreferences.nasHistoryV2DefaultsKey
+    private static let nasHistoryTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+    /// Last good NAS card values (sanitized v2 service entries), separate
+    /// from every local cache.
+    private static let nasServiceCacheDefaultsKey = CCMBPreferences.nasServiceCacheDefaultsKey
+    private static let panelOpacityDefaultsKey = "usagePanelOpacity"
+    private static let footerLinkURLString = "https://github.com/armsone"
+
+    private static func savedPanelOpacity() -> Double {
+        guard CCMBPreferences.shared.defaults.object(forKey: panelOpacityDefaultsKey) != nil else { return 1.0 }
+        let saved = CCMBPreferences.shared.defaults.double(forKey: panelOpacityDefaultsKey)
+        return UsageCore.normalizedPanelOpacity(saved)
+    }
+
+    private static func savedRefreshInterval() -> TimeInterval {
+        let saved = CCMBPreferences.shared.defaults.object(forKey: refreshIntervalDefaultsKey) == nil
+            ? nil
+            : CCMBPreferences.shared.defaults.integer(forKey: refreshIntervalDefaultsKey)
+        return UsageCore.normalizedRefreshInterval(saved)
+    }
+
+    private static func savedClaudeRefreshInterval() -> TimeInterval {
+        let saved = CCMBPreferences.shared.defaults.object(forKey: claudeRefreshIntervalDefaultsKey) == nil
+            ? nil
+            : CCMBPreferences.shared.defaults.integer(forKey: claudeRefreshIntervalDefaultsKey)
+        return UsageCore.normalizedClaudeRefreshInterval(saved)
+    }
+
+    private static func savedGeminiRefreshInterval() -> TimeInterval {
+        let saved = CCMBPreferences.shared.defaults.object(forKey: geminiRefreshIntervalDefaultsKey) == nil
+            ? nil
+            : CCMBPreferences.shared.defaults.integer(forKey: geminiRefreshIntervalDefaultsKey)
+        return UsageCore.normalizedGeminiRefreshInterval(saved)
+    }
+
+    /// NAS는 기본, 이 Mac 직접 조회는 명시적으로 선택하는 보조 옵션이다. 알 수
+    /// 없는/손상된 저장값은 기본값(NAS)으로 취급한다.
+    private static func savedDataCollectionSource() -> DataCollectionSource {
+        guard let raw = CCMBPreferences.shared.defaults.string(forKey: dataCollectionSourceDefaultsKey) else { return .nas }
+        return DataCollectionSource(rawValue: raw) ?? .nas
+    }
+
+    private static func savedGrokRefreshInterval() -> TimeInterval {
+        let saved = CCMBPreferences.shared.defaults.object(forKey: grokRefreshIntervalDefaultsKey) == nil
+            ? nil
+            : CCMBPreferences.shared.defaults.integer(forKey: grokRefreshIntervalDefaultsKey)
+        return UsageCore.normalizedGrokRefreshInterval(saved)
+    }
+
+    private static let launchAgentURL: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library")
+            .appendingPathComponent("LaunchAgents")
+            .appendingPathComponent("\(launchAgentLabel).plist")
+    }()
+
+    private func appLog(_ message: String) {
+        Self.appLog(message)
+    }
+
+    private static func appLog(_ message: String) {
+        writePrivateLog("app \(message)")
+    }
+}
+
+@MainActor
+public enum HTTCCMBRuntime {
+    public struct HostCallbacks {
+        public var onCheckForUpdates: (() -> Void)?
+        public var onQuit: (() -> Void)?
+        public var onRestart: (() -> Void)?
+        public var onLaunchAtLogin: ((Bool) -> Void)?
+        public var isLaunchAtLoginEnabled: (() -> Bool)?
+        public var onDataSourceChanged: ((String) -> Void)?
+
+        public init(
+            onCheckForUpdates: (() -> Void)? = nil,
+            onQuit: (() -> Void)? = nil,
+            onRestart: (() -> Void)? = nil,
+            onLaunchAtLogin: ((Bool) -> Void)? = nil,
+            isLaunchAtLoginEnabled: (() -> Bool)? = nil,
+            onDataSourceChanged: ((String) -> Void)? = nil
+        ) {
+            self.onCheckForUpdates = onCheckForUpdates
+            self.onQuit = onQuit
+            self.onRestart = onRestart
+            self.onLaunchAtLogin = onLaunchAtLogin
+            self.isLaunchAtLoginEnabled = isLaunchAtLoginEnabled
+            self.onDataSourceChanged = onDataSourceChanged
+        }
+    }
+
+    private static var sharedController: AppDelegate?
+
+    public static var isRunning: Bool {
+        sharedController != nil
+    }
+
+    public static func start(
+        showMenuBar: Bool = true,
+        callbacks: HostCallbacks = HostCallbacks()
+    ) {
+        if let existing = sharedController {
+            existing.stop()
+            sharedController = nil
+        }
+        let controller = AppDelegate(callbacks: callbacks, showMenuBar: showMenuBar)
+        controller.start()
+        sharedController = controller
+    }
+
+    public static func stop() {
+        sharedController?.stop()
+        sharedController = nil
+    }
+
+    public static func showDashboard() {
+        sharedController?.showDashboard()
+    }
+
+    public static func setMenuBarVisible(_ visible: Bool) {
+        sharedController?.setMenuBarVisible(visible)
+    }
+
+    public static func setServerTarget(_ target: String) {
+        let old = CCMBPreferences.shared.serverTarget
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if old != trimmed {
+            CCMBPreferences.shared.clearNASCaches()
+            NASFourServiceClient.resetThrottle()
+            NASHistoryClient.resetThrottle()
+            NASFourServiceClient.cancelInFlight()
+            NASHistoryClient.cancelInFlight()
+            CCMBPreferences.shared.serverTarget = trimmed
+            sharedController?.handleServerTargetChanged(newTarget: trimmed)
+        } else {
+            sharedController?.setServerTarget(trimmed)
+        }
+    }
+
+    public static func setDataSource(_ source: String) {
+        CCMBPreferences.shared.dataCollectionSource = source
+        sharedController?.setDataSource(source)
+    }
+}

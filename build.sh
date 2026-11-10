@@ -1,11 +1,9 @@
 #!/bin/bash
 # HTT.app 빌드 스크립트
 # 사용법: ./build.sh
-#   SIGN_IDENTITY  : 서명 인증서 SHA1 (기본: 기존 Developer ID Application, 팀 T7B4EPLHPK)
-#   SIGN_TIMESTAMP : 1이면 보안 타임스탬프 포함(배포/공증용, 네트워크 필요)
-#   HTD_APP_SOURCE : HTT 안에 넣을 서명 완료된 HTD.app 경로
-#                    (기본: HTD/dist/install-*/HTD.app 중 가장 높은 버전)
-#   HTD_EXPECTED_TEAM : HTD의 개발자 서명 팀(기본: T7B4EPLHPK)
+#   SIGN_IDENTITY          : 서명 인증서 SHA1 (기본: 기존 Developer ID Application, 팀 T7B4EPLHPK)
+#   SIGN_TIMESTAMP         : 1이면 보안 타임스탬프 포함(배포/공증용, 네트워크 필요)
+#   BROWSER_RUNTIME_SOURCE : 브라우저 엔진 런타임(EngineRuntime) 경로 (기본: BrowserModule/.build/portable-engine/EngineRuntime)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +30,61 @@ if [ ! -f "$ROOT_DIR/Resources/AppIcon.icns" ] || [ "$ROOT_DIR/Resources/AppIcon
   "$ROOT_DIR/scripts/make-icon.sh"
 fi
 
+# 브라우저 엔진 런타임 사전 검증 (런타임 프리플라이트)
+# 컴파일 및 스테이징 전 필수 확인: BrowserModule/.build/portable-engine/EngineRuntime 또는 BROWSER_RUNTIME_SOURCE
+BROWSER_RUNTIME_SOURCE="${BROWSER_RUNTIME_SOURCE:-$ROOT_DIR/BrowserModule/.build/portable-engine/EngineRuntime}"
+if [ ! -d "$BROWSER_RUNTIME_SOURCE" ]; then
+  echo "오류: 브라우저 엔진 런타임을 찾을 수 없습니다: $BROWSER_RUNTIME_SOURCE" >&2
+  exit 1
+fi
+
+BUILDER_SCRIPT="$ROOT_DIR/BrowserModule/scripts/build_portable_engine.py"
+if [ ! -f "$BUILDER_SCRIPT" ]; then
+  echo "오류: portable engine builder 스크립트가 없습니다: $BUILDER_SCRIPT" >&2
+  exit 1
+fi
+
+echo "==> 브라우저 엔진 런타임 아티팩트 검증 (verify_artifact)"
+python3 - "$BUILDER_SCRIPT" "$BROWSER_RUNTIME_SOURCE" <<'PY'
+import sys, importlib.util
+builder_path, runtime_path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("build_portable_engine", builder_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+problems = mod.verify_artifact(runtime=runtime_path)
+if problems:
+    print(f"오류: EngineRuntime 아티팩트 검증 실패 ({runtime_path}):", file=sys.stderr)
+    for p in problems:
+        print(f"  - {p}", file=sys.stderr)
+    sys.exit(1)
+print(f"==> EngineRuntime 아티팩트 검증 성공 ({runtime_path})")
+PY
+
+HTD_ENGINE_BIN="$BROWSER_RUNTIME_SOURCE/htd-engine"
+if [ ! -x "$HTD_ENGINE_BIN" ]; then
+  echo "오류: EngineRuntime 실행 파일(htd-engine)이 없거나 실행 권한이 없습니다." >&2
+  exit 1
+fi
+if ! lipo -archs "$HTD_ENGINE_BIN" | tr ' ' '\n' | grep -x "$(uname -m)" >/dev/null; then
+  echo "오류: htd-engine 아키텍처가 현재 시스템($(uname -m))과 일치하지 않습니다." >&2
+  exit 1
+fi
+if ! codesign --verify --strict "$HTD_ENGINE_BIN" 2>/dev/null; then
+  echo "오류: htd-engine 코드 서명이 올바르지 않습니다." >&2
+  exit 1
+fi
+
+BROWSER_EXPECTED_TEAM="${BROWSER_EXPECTED_TEAM:-T7B4EPLHPK}"
+HTD_ENGINE_TEAM="$(codesign -dv "$HTD_ENGINE_BIN" 2>&1 | awk -F'=' '/^TeamIdentifier=/ {print $2}')"
+if [ -z "$HTD_ENGINE_TEAM" ]; then
+  echo "오류: htd-engine 코드 서명에서 TeamIdentifier를 확인할 수 없습니다." >&2
+  exit 1
+fi
+if [ "$HTD_ENGINE_TEAM" != "$BROWSER_EXPECTED_TEAM" ]; then
+  echo "오류: htd-engine TeamIdentifier 불일치 (기대값: $BROWSER_EXPECTED_TEAM, 실제값: $HTD_ENGINE_TEAM)" >&2
+  exit 1
+fi
+
 echo "==> 빌드 디렉터리 정리"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$APP_BUNDLE/Contents/Frameworks"
@@ -52,6 +105,64 @@ SWIFT_SOURCES=(
   "$ROOT_DIR"/Sources/CleanUSB/*.swift
 )
 
+CCMB_MODULE_DIR="$BUILD_DIR/Modules"
+mkdir -p "$CCMB_MODULE_DIR"
+if compgen -G "$ROOT_DIR/CCMBModule/*.swift" > /dev/null; then
+  echo "==> HTTCCMB 정적 모듈 컴파일 (target: $SWIFT_TARGET)"
+  xcrun swiftc \
+    -O \
+    -swift-version 5 \
+    -target "$SWIFT_TARGET" \
+    -sdk "$SDK_PATH" \
+    -module-name HTTCCMB \
+    -emit-module \
+    -emit-module-path "$CCMB_MODULE_DIR/HTTCCMB.swiftmodule" \
+    -emit-library \
+    -static \
+    -o "$CCMB_MODULE_DIR/libHTTCCMB.a" \
+    -F "$SPARKLE_DIR" \
+    -framework Sparkle \
+    -framework AppKit \
+    -framework SwiftUI \
+    -framework WebKit \
+    -framework CloudKit \
+    -framework ServiceManagement \
+    -framework Network \
+    -framework Security \
+    "$ROOT_DIR"/CCMBModule/*.swift
+fi
+
+HTD_MODULE_DIR="$BUILD_DIR/Modules"
+if ! compgen -G "$ROOT_DIR/BrowserModule/Sources/*.swift" > /dev/null; then
+  echo "오류: BrowserModule/Sources 소스 파일을 찾을 수 없습니다." >&2
+  exit 1
+fi
+HTD_SOURCES=("$ROOT_DIR"/BrowserModule/Sources/*.swift)
+
+echo "==> HTTHTDCore 정적 모듈 컴파일 (target: $SWIFT_TARGET)"
+xcrun swiftc \
+  -O \
+  -swift-version 5 \
+  -target "$SWIFT_TARGET" \
+  -sdk "$SDK_PATH" \
+  -module-name HTTHTDCore \
+  -D HTT_HOST \
+  -parse-as-library \
+  -emit-module \
+  -emit-module-path "$HTD_MODULE_DIR/HTTHTDCore.swiftmodule" \
+  -emit-library \
+  -static \
+  -o "$HTD_MODULE_DIR/libHTTHTDCore.a" \
+  -framework AppKit \
+  -framework SwiftUI \
+  -framework WebKit \
+  -framework AVKit \
+  -framework AVFoundation \
+  -framework Security \
+  -framework Network \
+  -framework UniformTypeIdentifiers \
+  "${HTD_SOURCES[@]}"
+
 echo "==> Swift 소스 컴파일 (target: $SWIFT_TARGET)"
 xcrun swiftc \
   -O \
@@ -59,6 +170,12 @@ xcrun swiftc \
   -target "$SWIFT_TARGET" \
   -sdk "$SDK_PATH" \
   -F "$SPARKLE_DIR" \
+  -I "$CCMB_MODULE_DIR" \
+  -L "$CCMB_MODULE_DIR" \
+  -lHTTCCMB \
+  -I "$HTD_MODULE_DIR" \
+  -L "$HTD_MODULE_DIR" \
+  -lHTTHTDCore \
   -framework Sparkle \
   -framework AppKit \
   -framework SwiftUI \
@@ -68,10 +185,15 @@ xcrun swiftc \
   -framework ServiceManagement \
   -framework Carbon \
   -framework WebKit \
+  -framework CloudKit \
   -framework NaturalLanguage \
   -framework UniformTypeIdentifiers \
   -framework ApplicationServices \
   -framework SafariServices \
+  -framework Network \
+  -framework Security \
+  -framework AVKit \
+  -framework AVFoundation \
   -Xlinker -weak_framework -Xlinker FoundationModels \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
   -o "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME" \
@@ -196,41 +318,36 @@ if [ -d "$ROOT_DIR/Resources/InterfaceIcons" ]; then
   mkdir -p "$APP_BUNDLE/Contents/Resources/InterfaceIcons"
   cp -R "$ROOT_DIR/Resources/InterfaceIcons/"* "$APP_BUNDLE/Contents/Resources/InterfaceIcons/"
 fi
+if [ -f "$ROOT_DIR/Resources/GeminiLogo.png" ]; then
+  cp "$ROOT_DIR/Resources/GeminiLogo.png" "$APP_BUNDLE/Contents/Resources/GeminiLogo.png"
+fi
 ditto "$SPARKLE_DIR/Sparkle.framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 
-# 번역 브라우저(HTD): 이미 서명된 HTD.app을 그대로(서명·공증 티켓 변경 없이) Contents/Helpers에 넣는다.
-# 바깥 HTT 서명 전에 넣으며, 올바른 HTD가 없으면 빌드를 멈춘다.
-HTD_EXPECTED_ID="com.hanstree.HttpsDown"
-HTD_EXPECTED_TEAM="${HTD_EXPECTED_TEAM:-T7B4EPLHPK}"
-if [ -z "${HTD_APP_SOURCE:-}" ]; then
-  HTD_APP_SOURCE="$(ls -d "$ROOT_DIR"/HTD/dist/install-*/HTD.app 2>/dev/null | sort -V | tail -1 || true)"
+# 브라우저 엔진 런타임 및 에셋 복사
+# 사전 검증된 EngineRuntime을 서명 상태 유지하며 루트 Resources로 복사
+echo "==> 검증된 브라우저 엔진 런타임(EngineRuntime) 복사"
+ditto "$BROWSER_RUNTIME_SOURCE" "$APP_BUNDLE/Contents/Resources/EngineRuntime"
+
+# BrowserModule/Engine의 모든 *.py 및 *.mjs 복사 (폴백 및 진단용)
+if [ -d "$ROOT_DIR/BrowserModule/Engine" ]; then
+  echo "==> BrowserModule/Engine 스크립트 복사 (*.py, *.mjs)"
+  for item in "$ROOT_DIR/BrowserModule/Engine"/*.py "$ROOT_DIR/BrowserModule/Engine"/*.mjs; do
+    [ -e "$item" ] || continue
+    cp "$item" "$APP_BUNDLE/Contents/Resources/"
+  done
 fi
-if [ -z "$HTD_APP_SOURCE" ] || [ ! -d "$HTD_APP_SOURCE" ]; then
-  echo "오류: 포함할 HTD.app을 찾지 못했습니다. HTD_APP_SOURCE=<서명된 HTD.app 경로>를 지정하세요." >&2
-  exit 1
+
+# BrowserModule/Resources의 큐레이션된 브라우저 에셋 복사 (Root Info/icons/entitlements 덮어쓰기 금지)
+if [ -d "$ROOT_DIR/BrowserModule/Resources" ]; then
+  echo "==> BrowserModule/Resources 브라우저 에셋 복사"
+  for f in "$ROOT_DIR/BrowserModule/Resources"/*; do
+    [ -e "$f" ] || continue
+    fname="$(basename "$f")"
+    if [ "$fname" != "Info.plist" ] && [ "$fname" != "AppIcon.icns" ] && [ "$fname" != "SMTranslator.entitlements" ]; then
+      cp -R "$f" "$APP_BUNDLE/Contents/Resources/"
+    fi
+  done
 fi
-HTD_PLIST="$HTD_APP_SOURCE/Contents/Info.plist"
-htd_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$HTD_PLIST" 2>/dev/null || true; }
-HTD_EXEC="$HTD_APP_SOURCE/Contents/MacOS/$(htd_value CFBundleExecutable)"
-if [ "$(htd_value CFBundleIdentifier)" != "$HTD_EXPECTED_ID" ] || [ ! -x "$HTD_EXEC" ] \
-   || [ -z "$(htd_value CFBundleShortVersionString)" ] || [ -z "$(htd_value CFBundleVersion)" ] \
-   || [ -z "$(htd_value LSMinimumSystemVersion)" ]; then
-  echo "오류: $HTD_APP_SOURCE 는 올바른 HTD 앱이 아닙니다 (식별자·실행 파일·버전·최소 macOS 확인)." >&2
-  exit 1
-fi
-if ! lipo -archs "$HTD_EXEC" | tr ' ' '\n' | grep -x "$(uname -m)" >/dev/null; then
-  echo "오류: HTD 실행 파일이 이 빌드의 아키텍처($(uname -m))를 지원하지 않습니다." >&2
-  exit 1
-fi
-if ! codesign --verify --strict "$HTD_APP_SOURCE" 2>/dev/null \
-   || ! codesign -dv "$HTD_APP_SOURCE" 2>&1 | grep -x "TeamIdentifier=$HTD_EXPECTED_TEAM" >/dev/null; then
-  echo "오류: HTD.app 서명이 올바르지 않거나 팀($HTD_EXPECTED_TEAM)이 다릅니다." >&2
-  exit 1
-fi
-echo "==> HTD 포함: $HTD_APP_SOURCE (버전 $(htd_value CFBundleShortVersionString), 빌드 $(htd_value CFBundleVersion))"
-mkdir -p "$APP_BUNDLE/Contents/Helpers"
-ditto "$HTD_APP_SOURCE" "$APP_BUNDLE/Contents/Helpers/HTD.app"
-HTD_CDHASH_BEFORE="$(codesign -dvvv "$APP_BUNDLE/Contents/Helpers/HTD.app" 2>&1 | grep '^CDHash=')"
 
 PLIST="$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$PLIST"
@@ -286,9 +403,4 @@ plutil -lint "$ENTITLEMENTS" >/dev/null
 codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" --identifier "$BUNDLE_ID" "$APP_BUNDLE"
 
 codesign --verify --deep --strict "$APP_BUNDLE"
-# 포함한 HTD는 바깥 서명 과정에서 바뀌지 않아야 한다.
-if [ "$(codesign -dvvv "$APP_BUNDLE/Contents/Helpers/HTD.app" 2>&1 | grep '^CDHash=')" != "$HTD_CDHASH_BEFORE" ]; then
-  echo "오류: 포함한 HTD.app의 서명이 빌드 중 바뀌었습니다." >&2
-  exit 1
-fi
 echo "==> 빌드 완료: $APP_BUNDLE"

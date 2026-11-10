@@ -11,6 +11,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
     case macManagement
     case macManagementSettings
     case cleanUSB
+    case serverStatus
     case help
     case general
 
@@ -26,6 +27,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .macManagement: return "Mac 상태·정리"
         case .macManagementSettings: return "Mac 관리 설정"
         case .cleanUSB: return "USB 정리·추출"
+        case .serverStatus: return "서버 현황"
         case .help: return "사용 방법"
         case .general: return "앱 설정"
         }
@@ -38,7 +40,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .screen: return "screen"
         case .browser: return "browser"
         case .input: return "edit"
-        case .macManagement, .cleanUSB: return "device_files"
+        case .macManagement, .cleanUSB, .serverStatus: return "device_files"
         case .macManagementSettings: return "settings"
         case .help: return "help"
         case .general: return "settings"
@@ -128,11 +130,13 @@ public final class SettingsSectionStore: ObservableObject {
 /// 지속되는 사이드바와 선택한 작업의 상세 영역으로 구성된다. 메일 번역(ContentView)은 섹션을 바꿔도 사라지지 않는다.
 public struct SettingsView: View {
     @ObservedObject public var store: SettingsSectionStore
+    public var showsSidebar: Bool = true
     @ObservedObject private var appearance = HTTAppearanceStore.shared
     @Environment(\.colorScheme) private var systemColorScheme
 
-    public init(store: SettingsSectionStore) {
+    public init(store: SettingsSectionStore, showsSidebar: Bool = true) {
         self.store = store
+        self.showsSidebar = showsSidebar
     }
 
     private var palette: HTTThemePalette {
@@ -143,14 +147,22 @@ public struct SettingsView: View {
         // NavigationSplitView의 상세 열은 창의 연결된 도구 막대(sceneBridgingOptions = [.toolbars])와 겹쳐
         // 자체 탐색 막대 영역(약 52pt 흐림 띠)을 상세 위쪽에 따로 만들었다. 탐색 컨테이너가 필요 없는 구성이므로
         // 항상 보이는 사이드바와 상세 영역을 HSplitView로 나란히 두고, 창 도구 막대는 AppKit 쪽 하나만 쓴다.
-        HSplitView {
-            sidebarView
-                .frame(minWidth: 190, idealWidth: 210, maxWidth: 250, maxHeight: .infinity)
-            detailView
-                .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // showsSidebar가 false인 호스트 도구 모드에서는 바깥 모듈 사이드바를 쓰고 두 번째 사이드바 없이 상세 영역만 렌더링한다.
+        Group {
+            if showsSidebar {
+                HSplitView {
+                    sidebarView
+                        .frame(minWidth: 190, idealWidth: 210, maxWidth: 250, maxHeight: .infinity)
+                    detailView
+                        .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
+                .frame(minWidth: 780, idealWidth: 1040, maxWidth: .infinity,
+                       minHeight: 560, idealHeight: 760, maxHeight: .infinity)
+            } else {
+                detailView
+                    .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
         }
-        .frame(minWidth: 780, idealWidth: 1040, maxWidth: .infinity,
-               minHeight: 560, idealHeight: 760, maxHeight: .infinity)
         .preferredColorScheme(appearance.effectiveColorScheme(for: systemColorScheme))
     }
 
@@ -192,6 +204,7 @@ public struct SettingsView: View {
                     sidebarRow(.macManagement)
                     sidebarRow(.macManagementSettings)
                     sidebarRow(.cleanUSB)
+                    sidebarRow(.serverStatus)
                 }
                 Section("지원 및 설정") {
                     ForEach(SettingsSection.supportSections) { sidebarRow($0) }
@@ -323,6 +336,8 @@ public struct SettingsView: View {
         case .cleanUSB:
             CleanUSBPane()
                 .environmentObject(store.cleanUSBState)
+        case .serverStatus:
+            CCMBSettingsView()
         case .help:
             HTTGuideView(settingsStore: store)
         case .general:

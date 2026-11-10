@@ -1,12 +1,22 @@
-# HTT (Hanstree Translation & Touch Tools) v1.1.4
+# HTT (Hanstree Translation & Touch Tools)
 
+- **소스 버전**: 1.24.0 (빌드 202611101350, 설치본 검증 완료)
 - **소스**: [github.com/armsone/HTT-MacOS](https://github.com/armsone/HTT-MacOS) (공개)
-- **다운로드(DMG)**: [최신 릴리스](https://github.com/armsone/HTT-MacOS/releases/latest)
-  — Developer ID 서명 및 Apple 공증(notarization)을 거친 Apple Silicon(arm64) 전용 빌드입니다.
-- **요구 사항**: macOS 15 이상, Apple Silicon(arm64) Mac. Intel(x86_64)은 지원하지 않습니다.
+- **공개 최신 릴리스(DMG)**: [최신 릴리스](https://github.com/armsone/HTT-MacOS/releases/latest)
+  — 기존 배포된 서명 및 Apple 공증(notarization) 완료 빌드입니다. 현재 소스 버전과 공개 최신 릴리스는 다를 수 있으며, 신규 1.24.0 바이너리는 아직 별도 릴리스/공증되지 않았습니다.
+- **요구 사항**: macOS 15.4 이상, Apple Silicon(arm64) Mac. Intel(x86_64)은 지원하지 않습니다.
 
-macOS 15 이상용 네이티브 생산성 앱입니다. 하나의 앱 안에 다섯 가지 통합 기능이 있습니다.
+macOS 15.4 이상용 네이티브 생산성 앱입니다. 단일 사용자 제품은 **HTT** 하나이며, 기존 HTD(단독 브라우저 앱)는 독립 제품에서 은퇴하고 HTT 내부의 통합 `BrowserModule`로 완전히 단일 소스화되었습니다.
 
+메인 앱 창의 기본 첫 화면은 **브라우저(Browser)**이며, 브라우저와 번역·도구 기능이 단일 통합 창 안의 사이드바를 통해 유기적으로 연결됩니다.
+
+- **브라우저 & 통합 사이드바 (주 화면)**:
+  - 주 작업 영역은 웹 브라우징 화면이며, 통합 사이드바를 통해 AI 어시스턴트, 플래너(프로젝트), 다운로드·완료기록, 페이지 내 동영상, 주소창/검색, 속도 측정, 브라우저 환경설정에 접근합니다.
+  - 브라우저 화면 안에서 기존 번역 기능(화면 번역·메일·브라우저 번역), InputMate(입력 도우미 & 트랙패드 보호), Mac 관리, USB 장치, 서버 상태, 전체 앱 설정 및 도움말을 별도 분리된 창 없이 동일한 메인 창에서 매끄럽게 전환하여 사용합니다.
+- **서버 상태 & AI 잔여 한도 (선택형 옵트인)**:
+  - 서버 상태 기능은 기본 꺼짐(비활성/대상 없음) 상태의 완전한 선택형(opt-in) 기능입니다.
+  - 기존 CCMB 고유의 메뉴/팝업/카드/그래프 디자인을 온전히 보존한 채 사용자의 SSH 별칭(alias)/호스트 및 기존 SSH 인증 체계를 활용해 AI 사용량 및 잔여 한도(remaining limits)를 직접 확인합니다.
+  - 메뉴 막대 표시는 사용자가 원할 때만 켤 수 있는 선택 사항입니다.
 - **화면 번역**: 화면 위에 투명한 사각형 창 하나를 띄워 두고, 주 버튼을 누를 때마다 **한 번** 그 안을
   캡처해 텍스트를 인식(Vision OCR)하고 번역한 뒤, **번역문을 원문 줄이 있던 바로 그 위치에** 겹쳐 보여줍니다.
 - **메일 번역**: Apple Mail에서 선택한 메시지를 읽어
@@ -32,6 +42,15 @@ macOS 15 이상용 네이티브 생산성 앱입니다. 하나의 앱 안에 다
 온디바이스 Apple Intelligence가 뜻을 바꾸지 않고 표현만 다시 다듬습니다(선택 UI 없이 자동, 아래 [번역 방식](#번역-방식) 참고).
 이 기본 경로는 외부로 아무것도 보내지 않습니다. 외부 AI(ChatGPT·Claude·Gemini)나 웹 번역기(DeepL·Google
 번역·Papago)를 직접 고르고 전송에 동의한 뒤 번역을 실행할 때만 **텍스트**가 해당 서비스로 전송됩니다.
+
+## 통합 소스 아키텍처 및 이전 (Migration)
+
+- **단일 소스화**: 독립 제품이던 HTD는 은퇴하였으며, 모든 브라우저 구현은 `BrowserModule/{Sources,Resources,Engine,scripts,tools}`로 단일 소스 트리에 통합되었습니다. 빌드 시 외부 HTD 앱이나 외부 폴더 의존성은 전혀 없습니다.
+- **데이터 보존 및 마이그레이션**:
+  - 기존 HTD 사용자의 웹 브라우징 연속성을 보장하기 위해 기존 명명된 WebKit 스토어(쿠키·캐시·데이터)를 복사하여 안전하게 이전합니다.
+  - 이 과정에서 Root 번역기 데이터는 절대 덮어쓰지 않으며 완벽히 분리 보존됩니다.
+  - 기존 레거시 환경설정 도메인(preferences domains)을 보존하여 사용자 설정이 끊김 없이 유지됩니다.
+- **기존 소스 정리 정책**: 기존 독립 제품 소스 폴더는 런타임 검증이 완전히 완료된 이후에만 안전하게 제거되며, 현재 시점에는 임의로 미리 삭제하지 않습니다.
 
 ### 1.1.4 변경 사항
 
@@ -445,7 +464,17 @@ Apple Intelligence 다듬기)만 씁니다. 외부 AI나 웹 번역기로는 보
 
 ## 빌드
 
-요구 사항: Xcode 커맨드라인 도구, macOS 15 이상 SDK, 키체인의 Developer ID Application 인증서.
+요구 사항: Xcode 커맨드라인 도구, macOS 15.4 이상 SDK, Apple Silicon(arm64) Mac, 키체인의 Developer ID Application 인증서.
+
+### 엔진 런타임(EngineRuntime) 요구 사항
+통합된 `BrowserModule` 빌드를 위해 사전 빌드 및 검증·서명된 `EngineRuntime` 바이너리가 필수입니다.
+- **기본 위치**: `BrowserModule/.build/portable-engine/EngineRuntime`
+- **사용자 지정 경로 지정**:
+  ```bash
+  BROWSER_RUNTIME_SOURCE=/absolute/path/EngineRuntime ./build.sh
+  ```
+- **Fail-closed 정책**: 필수 `EngineRuntime`이 누락되었거나 오래되었거나(stale) 팀 식별자(Developer ID 팀 서명)가 불일치하는 경우 빌드는 안전하게 즉시 실패(fails closed)합니다.
+- 기존 휴대용 빌더 스크립트(portable builder scripts)는 온전히 유지됩니다(별도의 임의 venv/설치/서명 가이드를 요구하지 않으며, 클린 머신 빌드 검증을 사칭하지 않습니다).
 
 ```bash
 ./build.sh            # → build/HTT.app
@@ -455,36 +484,26 @@ Apple Intelligence 다듬기)만 씁니다. 외부 AI나 웹 번역기로는 보
 1. `Vendor/Sparkle`이 없으면 `scripts/bootstrap-sparkle.sh`로 고정 URL의 Sparkle 2.10.0을 받아 SHA256 검증 후 풉니다
    (`SPARKLE_TARBALL=<로컬 tar.xz>`로 오프라인 사용 가능).
 2. `Resources/AppIcon-source.png`가 바뀌었으면 `scripts/make-icon.sh`(sips + iconutil)로 `Resources/AppIcon.icns` 생성.
-3. `swiftc`로 컴파일(`-F Vendor/Sparkle -framework Sparkle`, rpath `@executable_path/../Frameworks`).
-4. Info.plist·아이콘 복사, Sparkle.framework를 `ditto`로 심볼릭 링크 보존 복사, 피드 URL·공개키 주입.
-5. 외부 AI 공통 런타임·제공사 레지스트리(`Resources/aibi-browser-runtime.js`, `Resources/aibi-providers.json`, AIBI 0.5.3)를
+3. 사전 빌드 및 서명된 `EngineRuntime`의 유효성(존재, 서명 팀) 검증 및 포함.
+4. `swiftc`로 컴파일(`-F Vendor/Sparkle -framework Sparkle`, rpath `@executable_path/../Frameworks`).
+5. Info.plist·아이콘 복사, Sparkle.framework를 `ditto`로 심볼릭 링크 보존 복사, 피드 URL·공개키 주입.
+6. 외부 AI 공통 런타임·제공사 레지스트리(`Resources/aibi-browser-runtime.js`, `Resources/aibi-providers.json`, AIBI 0.5.3)를
    `Contents/Resources`에 복사.
-6. Sparkle 내부(XPC → Autoupdate → Updater.app → 프레임워크) 후 앱 순으로 Developer ID + Hardened Runtime 서명
+7. Sparkle 내부(XPC → Autoupdate → Updater.app → 프레임워크) 후 앱 순으로 Developer ID + Hardened Runtime 서명
    (앱 본체에는 `Resources/SMTranslator.entitlements`의 Apple Events 항목만), `codesign --verify --deep --strict` 확인.
 
 의존성 정보와 라이선스: `ThirdParty/DEPENDENCIES.md`, `ThirdParty/Sparkle-LICENSE`.
-
-## 제한 사항
-
-- 캡처 영역은 하나의 디스플레이 안에 있어야 합니다.
-- 세로쓰기 텍스트는 특별히 처리하지 않습니다(위→아래 줄 순서).
-- 원문 `자동 인식`의 언어 판별은 줄(문단) 단위 추정이라 아주 짧은 줄·한자만 있는 줄·한 줄 안의 여러 언어는 틀릴 수 있습니다.
-  여러 언어가 섞인 화면에서 실제 번역 품질과 속도는 아직 측정하지 않았습니다.
-- 번역문이 원문보다 훨씬 길면 최소 글꼴 크기에서 잘릴 수 있습니다.
-- 메일 번역: 이미지가 아닌 첨부 파일은 열거나 번역하지 않습니다(첨부된 .eml은 본문에 펼침). 일부 인라인 서식·CSS 배경
-  이미지·복잡한 이미지 글자 배치는 원본과 다를 수 있습니다. 외부 AI 한 번 요청 상한(9,000자)을 넘는 단락은 보내지 않습니다.
-- 외부 AI 자동 입력은 제공사 웹 화면 변화에 영향을 받을 수 있습니다. 이 경우 보이는 브라우저의 수동 진행을 씁니다.
-- 브라우저 번역: Chrome·Whale 확장은 스토어에 올리지 않아 압축 해제된 확장을 직접 로드해야 합니다(설치 준비 단계는
-  [브라우저 번역](#브라우저-번역) 참고). Safari 확장은 macOS 26 이상과 설치된 번역 언어 팩이 필요하며, 그보다 낮은
-  macOS에서는 동작하지 않습니다. 한 페이지당 텍스트 단위 600개·이미지 8개 상한이 있고, 그 이상은 보이는 부분만
-  다룹니다. 외부 AI로는 보낼 수 없습니다(항상 Mac 기본 번역만 사용).
-- 진단 로그(비밀 정보 없음: 버전, 경로, 로그인 항목/단축키/업데이터 상태, 번역 방식 이름): `~/Library/Logs/ScreenTranslator/diagnostics.log`.
-  외부 AI 진단(단계 이름·시간·개수만): `~/Library/Application Support/com.local.screentranslator/AIBIDiagnostics/`.
 
 ## 프로젝트 구조
 
 ```
 Info.plist, build.sh, update-config.env, .gitignore
+BrowserModule/
+  Sources/                     통합 브라우저 화면·사이드바·서버 상태 UI
+  Resources/                   브라우저 리소스
+  Engine/                      브라우저 코어 엔진 연동
+  scripts/                     휴대용 빌더 스크립트
+  tools/                       도구 및 유틸리티
 Resources/  AppIcon-source.png, AppIcon.icns, UpdatePublicKey.txt(공개키), UpdateSigningAccount.txt(계정명),
             SMTranslator.entitlements(Apple Events), aibi-browser-runtime.js, aibi-providers.json(AIBI 0.5.3)
 scripts/    bootstrap-sparkle.sh, make-icon.sh, package-update.sh

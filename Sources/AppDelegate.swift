@@ -91,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         loginItem.applyInitialDefaultIfNeeded()
         WakeLaunchManager().applyInitialDefaultIfNeeded()
         updater.start()
+        // 서버 현황(CCMB) 모듈 초기화 및 활성화 시 시작
+        CCMBIntegration.shared.setup(updater: updater, loginItem: loginItem)
+        CCMBIntegration.shared.startIfEnabled()
         // 브라우저 번역 엔진 연결(허용했거나 브라우저 도우미가 실행한 경우에만 연다)
         BrowserIntegration.shared.applicationDidLaunch()
         writeDiagnostics()
@@ -99,14 +102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 메뉴·단축키에서만 화면 번역 창을 연다. Dock/Finder 재실행도 숨김 상태를 유지한다.
     }
 
-    /// 업데이트 설치가 예약된 상태에서 HTT 안의 번역 브라우저(HTD)가 실행 중이면 종료를 멈춘다.
+    /// 업데이트 설치가 예약된 상태에서 HTT 안의 브라우저 다운로드나 작업이 진행 중이면 종료를 멈춘다.
     /// Sparkle은 앱이 종료되는 순간(applicationWillTerminate 이후) 설치를 시작하므로, 그 전인 이 단계에서만 막을 수 있다.
-    /// HTD나 받는 중인 파일은 건드리지 않는다. 사용자가 HTD를 직접 종료한 뒤 다시 종료하면 정상 종료·설치된다.
+    /// 진행 중인 작업은 자동으로 종료하지 않으며, 작업이 끝나면 정상 종료·설치된다.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard updater.hasPendingInstall, EmbeddedBrowser.isEmbeddedRunning() else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "HTT 브라우저를 먼저 종료해 주세요"
-        alert.informativeText = "업데이트 설치가 예약되어 있어, HTT를 종료하면 실행 중인 HTT 브라우저의 다운로드가 끊길 수 있습니다. 받는 중인 파일이 끝나면 브라우저를 종료한 뒤 HTT를 다시 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
+        alert.messageText = "HTT 브라우저 작업을 먼저 완료해 주세요"
+        alert.informativeText = "업데이트 설치가 예약되어 있어, HTT를 종료하면 실행 중인 브라우저 다운로드나 작업이 중단될 수 있습니다. 진행 중인 작업이 끝나면 HTT를 다시 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
         alert.addButton(withTitle: "확인")
         alert.runModal()
         return .terminateCancel
@@ -117,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Finder/Dock 실행도 reopen으로 전달되므로 화면 번역 창을 자동으로 열지 않는다.
+        MailWindowCoordinator.shared.openBrowserMain()
         return true
     }
 
@@ -136,7 +139,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MailWindowCoordinator.shared.prepareForTermination()
         InputMateCoordinator.shared.stop()
         BTNIntegration.shared.stop()
+        CCMBIntegration.shared.stop()
         BrowserIntegration.shared.applicationWillTerminate()
+        UnifiedBrowserManager.shared.shutdown()
         viewModel.stop()
         AppModel.shared.closeDocument()
         hotKey?.unregister()
@@ -220,7 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         menu.addItem(headerItem())
-        menu.addItem(item("HTT 열기", #selector(showHome), symbol: "house"))
+        menu.addItem(item("HTT 열기", #selector(showHome), symbol: "globe"))
+        menu.addItem(item("앱 상태 개요", #selector(showOverview), symbol: "house"))
         menu.addItem(.separator())
 
         // MARK: 번역
@@ -419,6 +425,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // 아래 메뉴 동작은 모두 HTT 메인 창(하나뿐인 일반 창)의 해당 섹션을 연다. 별도 창을 만들지 않는다.
 
     @objc private func showHome() {
+        MailWindowCoordinator.shared.openBrowserMain()
+    }
+
+    @objc private func showOverview() {
         MailWindowCoordinator.shared.showWorkbench(section: .home)
     }
 
@@ -499,7 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(item("HTT 열기", #selector(showHome), symbol: "house"))
+        appMenu.addItem(item("HTT 열기", #selector(showHome), symbol: "globe"))
+        appMenu.addItem(item("앱 상태 개요", #selector(showOverview), symbol: "house"))
         appMenu.addItem(item("HTT 정보", #selector(showAbout)))
         appMenu.addItem(item("업데이트 확인…", #selector(checkForUpdates)))
         appMenu.addItem(.separator())
