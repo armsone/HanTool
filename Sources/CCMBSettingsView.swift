@@ -92,7 +92,7 @@ public struct CCMBSettingsView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!integration.isEnabled)
-            .help("CCMB 원본 모니터링 창을 엽니다. 메뉴 막대 아이콘이 숨겨져 있어도 열 수 있습니다.")
+            .help("서버 현황 모니터링 창을 엽니다. 메뉴 막대 아이콘이 숨겨져 있어도 열 수 있습니다.")
         }
         .padding(16)
         .background(palette.card)
@@ -238,7 +238,7 @@ public struct CCMBSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("서버 현황 창 동작 안내")
                     .font(.subheadline.weight(.medium))
-                Text("CCMB 창의 종료·다시 시작은 이 기능만 제어하며, HTT 앱과 플래너 작업은 중단 없이 계속 실행됩니다.")
+                Text("서버 현황 창의 종료·다시 시작은 이 기능만 제어하며, HTT 앱과 플래너 작업은 중단 없이 계속 실행됩니다.")
                     .font(.caption)
                     .foregroundStyle(palette.muted)
             }

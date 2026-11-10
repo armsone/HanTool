@@ -586,7 +586,7 @@ struct CompactSidebarRail: View {
                     railHostToolButton(id: "input.general", title: "입력 도우미", icon: "keyboard")
                     railHostToolButton(id: "macManagement", title: "Mac 관리", icon: "desktopcomputer")
                     railHostToolButton(id: "cleanUSB", title: "USB 정리", icon: "externaldrive")
-                    railHostToolButton(id: "serverStatus", title: "서버 현황 (CCMB)", icon: "chart.bar.xaxis")
+                    railHostToolButton(id: "serverStatus", title: "서버 현황", icon: "chart.bar.xaxis")
 
                     railDivider
 
@@ -1028,7 +1028,7 @@ struct SidebarView: View {
                 hostToolRow(id: "macManagement", title: "Mac 관리", icon: "desktopcomputer")
                 hostToolRow(id: "macManagementSettings", title: "Mac 관리 설정", icon: "slider.horizontal.3")
                 hostToolRow(id: "cleanUSB", title: "USB 드라이브 정리", icon: "externaldrive")
-                hostToolRow(id: "serverStatus", title: "서버 현황 (CCMB)", icon: "chart.bar.xaxis")
+                hostToolRow(id: "serverStatus", title: "서버 현황", icon: "chart.bar.xaxis")
             }
 
             Section(header: Text("설정 및 지원").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {

@@ -1,12 +1,12 @@
 # HTT (Hanstree Translation & Touch Tools)
 
-- **소스 버전**: 1.24.0 (빌드 202611101350, 설치본 검증 완료)
+- **소스 버전**: 1.24.1 (빌드 202611101629)
 - **소스**: [github.com/armsone/HTT-MacOS](https://github.com/armsone/HTT-MacOS) (공개)
 - **공개 최신 릴리스(DMG)**: [최신 릴리스](https://github.com/armsone/HTT-MacOS/releases/latest)
-  — 기존 배포된 서명 및 Apple 공증(notarization) 완료 빌드입니다. 현재 소스 버전과 공개 최신 릴리스는 다를 수 있으며, 신규 1.24.0 바이너리는 아직 별도 릴리스/공증되지 않았습니다.
+  — 기존 배포된 서명 및 Apple 공증(notarization) 완료 빌드입니다. 현재 소스 버전과 공개 최신 릴리스는 다를 수 있으며, 신규 1.24.1 바이너리는 아직 별도 릴리스/공증되지 않았습니다 (공개 릴리스 없음).
 - **요구 사항**: macOS 15.4 이상, Apple Silicon(arm64) Mac. Intel(x86_64)은 지원하지 않습니다.
 
-macOS 15.4 이상용 네이티브 생산성 앱입니다. 단일 사용자 제품은 **HTT** 하나이며, 기존 HTD(단독 브라우저 앱)는 독립 제품에서 은퇴하고 HTT 내부의 통합 `BrowserModule`로 완전히 단일 소스화되었습니다.
+macOS 15.4 이상용 네이티브 생산성 앱입니다. 단일 사용자 제품은 **HTT** 하나이며, 브라우저 및 서버 현황(구 Mac 서버 현황/CCMB)은 HTT 내부의 기능으로 완전히 통합되어 단독 HTD나 CCMB Mac 앱은 존재하지 않습니다. 기존 HTD(단독 브라우저 앱)는 독립 제품에서 은퇴하고 HTT 내부의 통합 `BrowserModule`로 완전히 단일 소스화되었습니다.
 
 메인 앱 창의 기본 첫 화면은 **브라우저(Browser)**이며, 브라우저와 번역·도구 기능이 단일 통합 창 안의 사이드바를 통해 유기적으로 연결됩니다.
 
