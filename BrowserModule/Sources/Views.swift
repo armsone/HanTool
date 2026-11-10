@@ -2356,9 +2356,17 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         let shortVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.9.1"
                         let buildNum = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "20"
+                        let buildStamp = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)
+                            ?? (Bundle.main.infoDictionary?["HTDBuildStamp"] as? String)
+                            ?? (Bundle.main.infoDictionary?["BarobogiBuildStamp"] as? String)
+                            ?? buildNum
                         LabeledContent("버전", value: "\(shortVer) (\(buildNum))")
-                        LabeledContent("빌드", value: (Bundle.main.infoDictionary?["HTDBuildStamp"] as? String) ?? "202611030706")
-                        LabeledContent("배포 형태", value: "로컬 개발용 (Local Development Non-Sandbox)")
+                        LabeledContent("빌드", value: buildStamp)
+#if HTT_HOST
+                        LabeledContent("배포 형태", value: "HTT 통합 기능")
+#else
+                        LabeledContent("배포 형태", value: "HTT 통합 브라우저")
+#endif
                         LabeledContent("저작권", value: "Copyright © 2026 Hanstree")
                     }
                     .padding(8)

@@ -351,6 +351,8 @@ fi
 
 PLIST="$APP_BUNDLE/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :BarobogiBuildStamp $APP_BUILD" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :BarobogiBuildStamp string $APP_BUILD" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :HTDBuildStamp $APP_BUILD" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :HTDBuildStamp string $APP_BUILD" "$PLIST"
 PUBLIC_KEY_FILE="$ROOT_DIR/Resources/UpdatePublicKey.txt"
 if [ -f "$PUBLIC_KEY_FILE" ]; then
   PUBLIC_KEY="$(tr -d '[:space:]' < "$PUBLIC_KEY_FILE")"

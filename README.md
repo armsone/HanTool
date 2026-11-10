@@ -1,6 +1,6 @@
 # HTT (Hanstree Translation & Touch Tools)
 
-- **소스 버전**: 1.24.1 (빌드 202611101629)
+- **소스 버전**: 1.24.2 (빌드 202611101733)
 - **소스**: [github.com/armsone/HTT-MacOS](https://github.com/armsone/HTT-MacOS) (공개)
 - **공개 최신 릴리스(DMG)**: [최신 릴리스](https://github.com/armsone/HTT-MacOS/releases/latest) 링크에서 현재 내려받을 수 있는 공개 배포본을 확인할 수 있습니다.
 - **요구 사항**: macOS 15.4 이상, Apple Silicon(arm64) Mac. Intel(x86_64)은 지원하지 않습니다.
