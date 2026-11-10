@@ -295,7 +295,8 @@ struct BrowserPane: View {
         if let ps = plannerSession {
             return appModel.selectedTab == .saw && ps.workspace.selectedProjectID == ps.projectID && ps.selectedTabID == model.tabID
         }
-        return appModel.selectedTab == .browser && appModel.browser === model
+        let isBrowserContext = appModel.selectedTab == .browser || appModel.selectedTab == .speed || appModel.selectedTab == .pageVideos
+        return isBrowserContext && appModel.browser === model
     }
 
     private var sessionModeMismatch: Bool {
@@ -1052,7 +1053,7 @@ struct BrowserPane: View {
             appModel.temporaryShowHanaPanel = false
             if appModel.aiServices.enabledServices.isEmpty {
                 appModel.selectedTab = .ai
-                model.notice = "인공지능 메뉴에서 사용할 AI를 켜 주세요."
+                model.notice = "설정 > AI 연결에서 사용할 AI를 켜 주세요."
             } else {
                 appModel.setAIPanelOpen(true)
             }
@@ -1247,19 +1248,35 @@ struct BrowserPane: View {
                 .fixedSize()
                 .foregroundStyle(palette.textColor)
 
-            Button(action: { model.analyzePage() }) {
+            Button(action: {
+                appModel.isMediaCandidatePresented.toggle()
+            }) {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.circle")
-                    Text("다운로드")
+                    Text("페이지 영상")
+                    if !model.candidates.isEmpty {
+                        Text("\(model.candidates.count)")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(palette.accentSoftColor))
+                            .foregroundColor(palette.accentColor)
+                    }
                 }
                 .foregroundStyle(palette.textColor)
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
-            .disabled(model.isShowingHome || model.currentURL == nil || !["http", "https"].contains(model.currentURL?.scheme?.lowercased() ?? ""))
-            .help("현재 페이지의 영상을 분석한 뒤 바로 다운로드하거나, 링크를 끌어다 놓아 분석 후 바로 다운로드합니다.")
-            .accessibilityLabel("다운로드 (클릭 시 현재 페이지 분석, 링크 끌어다 놓기 지원)")
+            .help("현재 페이지의 영상 후보 목록을 확인합니다. 링크를 끌어다 놓아 바로 다운로드할 수도 있습니다.")
+            .accessibilityLabel("현재 페이지의 영상 목록 확인 (링크 끌어다 놓기 지원)")
             .urlDropTarget(appModel: appModel)
+            .popover(isPresented: $appModel.isMediaCandidatePresented, arrowEdge: .bottom) {
+                MediaCandidatePanel(appModel: appModel, model: appModel.browser) {
+                    appModel.isMediaCandidatePresented = false
+                }
+                .frame(width: 350, height: 460)
+                .id(appModel.browser.tabID)
+            }
         }
     }
 
@@ -1658,10 +1675,24 @@ struct MediaCandidatePanel: View {
     @ObservedObject var appModel: AppModel
     @ObservedObject var model: LoginBrowserModel
     @Environment(\.bkPalette) var palette
-    let onReturnToBrowser: () -> Void
+    let onClose: () -> Void
 
     private var ordered: [MediaCandidate] {
         model.candidates.filter { $0.supported } + model.candidates.filter { !$0.supported }
+    }
+
+    private var activePageTitle: String {
+        if model.isShowingHome || model.webView == nil {
+            return "시작 화면 (웹페이지 없음)"
+        }
+        return model.pageTitle.isEmpty ? (model.currentURL?.host ?? "웹 페이지") : model.pageTitle
+    }
+
+    private var activePageURLString: String {
+        if model.isShowingHome || model.webView == nil {
+            return "한툴 시작 화면"
+        }
+        return model.currentURL?.absoluteString ?? ""
     }
 
     /// Shown while the only clue is a player hint (no address yet): searching vs. manual next step, never a failure.
@@ -1675,7 +1706,7 @@ struct MediaCandidatePanel: View {
             }
             Text(searching
                  ? "플레이어를 재생하면 목록이 자동으로 갱신됩니다. 준비에 시간이 걸릴 수 있습니다."
-                 : "재생 후 '다시 찾기'(위 버튼)를 누르거나 위 '현재 페이지 분석'을 눌러 보세요. 재생하면 목록은 계속 자동 갱신됩니다.")
+                 : "재생 후 '다시 찾기'(위 버튼)를 누르거나 위 '영상 찾아받기'를 눌러 보세요. 재생하면 목록은 계속 자동 갱신됩니다.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1684,81 +1715,146 @@ struct MediaCandidatePanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Header: Title, URL, and Close Button
             HStack(spacing: 8) {
-                Button("브라우저로 돌아가기", action: onReturnToBrowser)
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("브라우저로 돌아가기")
-                Spacer()
-                Button("현재 페이지 분석") { model.analyzePage() }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isShowingHome || model.currentURL == nil || !["http", "https"].contains(model.currentURL?.scheme?.lowercased() ?? ""))
-                    .help("이 페이지 전체를 분석한 뒤 기본 화질로 바로 다운로드합니다. 목록에 영상이 없을 때 써 보세요. 진행은 '대기열'에서 봅니다.")
-                    .accessibilityLabel("현재 페이지를 분석해 대기열에 추가")
-            }
-            .padding(10)
-            Divider()
-            HStack {
-                Text("이 페이지의 영상").font(.subheadline.bold())
-                if !model.candidates.isEmpty {
-                    Text("\(model.candidates.count)").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(activePageTitle)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(palette.textColor)
+                        .lineLimit(1)
+                    Text(activePageURLString)
+                        .font(.system(size: 11))
+                        .foregroundColor(palette.mutedColor)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(palette.mutedColor)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .help("닫기 (Esc)")
+                .accessibilityLabel("후보 패널 닫기")
+            }
+            .padding(10)
+
+            Divider()
+
+            // Actions row: analyze, save all, rescan
+            HStack(spacing: 6) {
+                Button("영상 찾아받기") { model.analyzePage() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.isShowingHome || model.currentURL == nil || !["http", "https"].contains(model.currentURL?.scheme?.lowercased() ?? ""))
+                    .help("이 페이지 전체를 분석한 뒤 기본 화질로 바로 다운로드합니다. 목록에 영상이 없을 때 써 보세요. 진행은 다운로드 > 진행 중 화면에서 봅니다.")
+                    .accessibilityLabel("현재 페이지를 분석해 즉시 다운로드 시작")
+
+                Spacer()
+
                 Button("전체를 다운로드로 보내기") { model.saveAllCandidates() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(model.webView == nil || model.bulkSendableCandidates.isEmpty)
+                    .disabled(model.webView == nil || model.isShowingHome || model.bulkSendableCandidates.isEmpty)
                     .help("지원되는 현재 목록의 영상을 하나씩 '대기열'로 보냅니다. 이미 추가한 영상과 받을 수 없는 항목은 제외됩니다.")
                     .accessibilityLabel("현재 목록의 영상을 모두 다운로드로 보내기")
+
                 Button { model.rescan() } label: { Image(systemName: "arrow.triangle.2.circlepath") }
                     .buttonStyle(.borderless)
-                    .disabled(model.webView == nil)
+                    .disabled(model.webView == nil || model.isShowingHome)
                     .help("목록을 비우고 다시 찾기")
                     .accessibilityLabel("영상 목록 다시 찾기")
             }
-            .padding(10)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+
             Divider()
-            if let problem = model.discoveryProblem {
-                Text(problem).font(.caption).foregroundColor(palette.warnColor).padding(10)
-            }
-            if model.candidates.isEmpty {
-                VStack(spacing: 8) {
-                    if model.isLoading {
-                        ProgressView().controlSize(.small)
-                        Text("페이지를 불러오는 중입니다...").font(.caption).foregroundStyle(.secondary)
-                    } else if model.discoveryPhase == .searching {
-                        ProgressView().controlSize(.small)
-                        Text("영상 주소를 찾는 중입니다...").font(.caption).foregroundStyle(.secondary)
-                        Text("플레이어를 재생하면 목록이 자동으로 갱신됩니다. 준비에 시간이 걸릴 수 있습니다.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    } else {
-                        Image(systemName: "film").font(.system(size: 26)).foregroundStyle(.secondary)
-                        Text("아직 받을 수 있는 영상 주소를 찾지 못했습니다.")
-                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        Text("영상을 재생하면 목록이 자동으로 갱신됩니다. 재생 후 '다시 찾기'(위 버튼)를 누르거나 위 '현재 페이지 분석'을 눌러 보세요.")
-                            .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+
+            if model.isShowingHome || model.webView == nil || model.currentURL == nil {
+                VStack(spacing: 10) {
+                    Image(systemName: "house")
+                        .font(.system(size: 28))
+                        .foregroundColor(palette.mutedColor)
+                    Text("현재 화면은 웹페이지가 아닙니다.")
+                        .font(.subheadline.bold())
+                        .foregroundColor(palette.textColor)
+                    Text("웹페이지를 탐색 중일 때 이 화면에서 영상 후보를 확인하고 다운로드할 수 있습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+
+                    HStack(spacing: 8) {
+                        Button("주소창으로 이동") {
+                            onClose()
+                            appModel.requestAddressFocus(for: model, isExplicit: true)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button("다운로드 관리 이동") {
+                            onClose()
+                            UnifiedNavigationModel.shared.navigateTo(
+                                destination: .downloads,
+                                appModel: appModel,
+                                selectTool: { _ in },
+                                clearTool: {}
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
+                    .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(10)
+                .padding(16)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        if !model.candidates.contains(where: { $0.supported }) {
-                            waitingNote
-                        }
-                        ForEach(ordered) { c in
-                            MediaCandidateRow(candidate: c, appModel: appModel, model: model)
+                if let problem = model.discoveryProblem {
+                    Text(problem).font(.caption).foregroundColor(palette.warnColor).padding(10)
+                }
+                if model.candidates.isEmpty {
+                    VStack(spacing: 8) {
+                        if model.isLoading {
+                            ProgressView().controlSize(.small)
+                            Text("페이지를 불러오는 중입니다...").font(.caption).foregroundStyle(.secondary)
+                        } else if model.discoveryPhase == .searching {
+                            ProgressView().controlSize(.small)
+                            Text("영상 주소를 찾는 중입니다...").font(.caption).foregroundStyle(.secondary)
+                            Text("플레이어를 재생하면 목록이 자동으로 갱신됩니다. 준비에 시간이 걸릴 수 있습니다.")
+                                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        } else {
+                            Image(systemName: "film").font(.system(size: 26)).foregroundStyle(.secondary)
+                            Text("아직 받을 수 있는 영상 주소를 찾지 못했습니다.")
+                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            Text("영상을 재생하면 목록이 자동으로 갱신됩니다. 재생 후 '다시 찾기'(위 버튼)를 누르거나 위 '영상 찾아받기'를 눌러 보세요.")
+                                .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(10)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            if !model.candidates.contains(where: { $0.supported }) {
+                                waitingNote
+                            }
+                            ForEach(ordered) { c in
+                                MediaCandidateRow(candidate: c, appModel: appModel, model: model)
+                            }
+                        }
+                        .padding(10)
+                    }
                 }
             }
+
             Divider()
             Text("목록은 페이지에서 찾은 영상 주소 '후보'입니다. 실제로 받을 수 있는지는 받은 뒤 파일을 검사해 확인하고, 항상 MP4로 저장합니다. DRM으로 보호된 영상은 받을 수 없습니다.")
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(10)
         }
+        .frame(minWidth: 340, maxWidth: 360)
     }
 }
 

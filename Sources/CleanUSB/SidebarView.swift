@@ -60,7 +60,6 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("CleanUSB")
     }
 }
 

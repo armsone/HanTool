@@ -230,6 +230,11 @@ public struct MainView: View {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
             }
         }
+        .sheet(isPresented: $navModel.isSpeedTestPresented) {
+            SpeedTestView(appModel: appModel, connection: appModel.connection) {
+                navModel.isSpeedTestPresented = false
+            }
+        }
         .alert(isPresented: $appModel.showingAlert) {
             Alert(
                 title: Text("안내"),
@@ -247,13 +252,29 @@ public struct MainView: View {
         .onReceive(appModel.$selectedTab.dropFirst()) { newTab in
             if newTab == .saw {
                 hasOpenedSAW = true
+            } else if newTab == .speed {
+                navModel.isSpeedTestPresented = true
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
+                return
+            } else if newTab == .pageVideos {
+                appModel.isMediaCandidatePresented = true
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
+                return
+            } else if newTab == .ai {
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .ai)
+                return
             }
             navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: newTab)
         }
-        .onChange(of: hostExport.hostedToolID) { newID in
-            if newID == nil && navModel.destination == .tools && navModel.isToolsHubRoot {
-                return
+        .onChange(of: appModel.selectedTab) { currentTab in
+            if currentTab == .speed || currentTab == .pageVideos {
+                appModel.selectedTab = .browser
             }
+        }
+        .onChange(of: hostExport.hostedToolID) { newID in
             navModel.syncFromExternal(hostedToolID: newID, selectedTab: appModel.selectedTab)
         }
         #else
@@ -272,6 +293,11 @@ public struct MainView: View {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
             }
         }
+        .sheet(isPresented: $navModel.isSpeedTestPresented) {
+            SpeedTestView(appModel: appModel, connection: appModel.connection) {
+                navModel.isSpeedTestPresented = false
+            }
+        }
         .alert(isPresented: $appModel.showingAlert) {
             Alert(
                 title: Text("안내"),
@@ -289,8 +315,27 @@ public struct MainView: View {
         .onReceive(appModel.$selectedTab.dropFirst()) { newTab in
             if newTab == .saw {
                 hasOpenedSAW = true
+            } else if newTab == .speed {
+                navModel.isSpeedTestPresented = true
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
+                return
+            } else if newTab == .pageVideos {
+                appModel.isMediaCandidatePresented = true
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
+                return
+            } else if newTab == .ai {
+                clearHostedTool()
+                navModel.syncFromExternal(hostedToolID: nil, selectedTab: .ai)
+                return
             }
             navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: newTab)
+        }
+        .onChange(of: appModel.selectedTab) { currentTab in
+            if currentTab == .speed || currentTab == .pageVideos {
+                appModel.selectedTab = .browser
+            }
         }
         #endif
     }
@@ -327,38 +372,49 @@ public struct MainView: View {
                             navModel.selectSettingsTab(tab, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
                         },
                         onOpenInputTool: { toolID in
-                            if let tool = ToolCatalog.item(for: toolID) {
-                                navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            }
+                            selectTool(toolID)
                         },
                         onOpenMacManagement: {
-                            if let tool = ToolCatalog.item(for: "macManagement") {
-                                navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            }
+                            selectTool("macManagement")
                         },
                         onOpenBrowser: {
                             navModel.navigateTo(destination: .browser, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        },
+                        onOpenBrowserSetup: {
+                            selectTool("browser")
                         }
                     )
                     Divider()
-                } else if navModel.destination == .tools && !navModel.isToolsHubRoot, let leafID = navModel.activeToolLeafID {
-                    let leafTitle = leafID == "home" ? "홈 요약" : (ToolCatalog.item(for: leafID)?.title ?? leafID)
-                    ToolLeafBreadcrumbBar(
-                        leafTitle: leafTitle,
-                        leafID: leafID,
-                        onBack: {
-                            navModel.backToToolsHub(clearTool: clearHostedTool)
+                } else if navModel.destination == .translation {
+                    TranslationHeaderView(
+                        activeChild: $navModel.activeTranslationChild,
+                        onSelectChild: { childID in
+                            navModel.selectTranslationChild(childID, selectTool: selectTool)
                         },
-                        onOpenSettings: {
-                            if leafID.hasPrefix("input.") {
-                                navModel.selectSettingsTab(.inputSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            } else if leafID == "macManagement" || leafID == "cleanUSB" {
-                                navModel.selectSettingsTab(.macSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            } else if leafID == "browser" {
-                                navModel.selectSettingsTab(.webSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            } else {
-                                navModel.selectSettingsTab(.general, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            }
+                        onOpenWebSettings: {
+                            navModel.selectSettingsTab(.webSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        }
+                    )
+                    Divider()
+                } else if navModel.destination == .inputHelper {
+                    InputHelperHeaderView(
+                        activeChild: $navModel.activeInputChild,
+                        onSelectChild: { childID in
+                            navModel.selectInputChild(childID, selectTool: selectTool)
+                        },
+                        onOpenInputSettings: {
+                            navModel.selectSettingsTab(.inputSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        }
+                    )
+                    Divider()
+                } else if navModel.destination == .macManagement {
+                    MacManagementHeaderView(
+                        activeChild: $navModel.activeMacManagementChild,
+                        onSelectChild: { childID in
+                            navModel.selectMacManagementChild(childID, selectTool: selectTool)
+                        },
+                        onOpenMacSettings: {
+                            navModel.selectSettingsTab(.macSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
                         }
                     )
                     Divider()
@@ -423,7 +479,7 @@ public struct MainView: View {
                         .accessibilityHidden(!isSawActive)
                     }
 
-                    let isAIActive = navModel.destination == .ai && hostedToolID == nil
+                    let isAIActive = navModel.destination == .settings && navModel.settingsTab == .aiConnections && hostedToolID == nil
                     AIServiceSettingsView(appModel: appModel)
                         .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
                         .opacity(isAIActive ? 1 : 0)
@@ -442,51 +498,6 @@ public struct MainView: View {
                     .opacity(isDownloadsActive ? 1 : 0)
                     .allowsHitTesting(isDownloadsActive)
                     .accessibilityHidden(!isDownloadsActive)
-
-                    let isToolsHubActive = navModel.destination == .tools && navModel.isToolsHubRoot && hostedToolID == nil
-                    ToolsHubView(
-                        onSelectTool: { tool in
-                            navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                        },
-                        onOpenHome: {
-                            selectTool("home")
-                            navModel.destination = .tools
-                            navModel.isToolsHubRoot = false
-                            navModel.activeToolLeafID = "home"
-                        },
-                        onOpenSettings: {
-                            navModel.selectSettingsTab(.general, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                        },
-                        onOpenServer: {
-                            navModel.navigateTo(destination: .server, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                        }
-                    )
-                    .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
-                    .opacity(isToolsHubActive ? 1 : 0)
-                    .allowsHitTesting(isToolsHubActive)
-                    .accessibilityHidden(!isToolsHubActive)
-
-                    let isNativeToolLeafActive = navModel.destination == .tools && !navModel.isToolsHubRoot && hostedToolID == nil
-                    Group {
-                        switch appModel.selectedTab {
-                        case .pageVideos:
-                            MediaCandidatePanel(appModel: appModel, model: appModel.browser) {
-                                navModel.backToToolsHub(clearTool: clearHostedTool)
-                            }
-                        case .addressSearch:
-                            AddressSearchSettingsView(store: appModel.preferences.addressSearch)
-                        case .speed:
-                            SpeedTestView(appModel: appModel, connection: appModel.connection) {
-                                navModel.backToToolsHub(clearTool: clearHostedTool)
-                            }
-                        default:
-                            EmptyView()
-                        }
-                    }
-                    .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
-                    .opacity(isNativeToolLeafActive ? 1 : 0)
-                    .allowsHitTesting(isNativeToolLeafActive)
-                    .accessibilityHidden(!isNativeToolLeafActive)
 
                     let isWebSettingsActive = navModel.destination == .settings && navModel.settingsTab == .webSettings && hostedToolID == nil
                     SettingsView(appModel: appModel)
@@ -522,7 +533,7 @@ public struct MainView: View {
             PageAudioControls(appModel: appModel)
                 .fixedSize()
             Button {
-                appModel.selectedTab = .speed
+                navModel.isSpeedTestPresented = true
             } label: {
                 NetworkRateIndicator()
             }
@@ -633,7 +644,7 @@ struct CompactSidebarRail: View {
     #endif
 
     private static let topDestinations: [MainNavDestination] = [
-        .browser, .downloads, .planner, .ai, .tools, .server
+        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .server
     ]
     private static let bottomDestinations: [MainNavDestination] = [
         .settings, .help
@@ -882,7 +893,7 @@ struct SidebarView: View {
     #endif
 
     private static let topDestinations: [MainNavDestination] = [
-        .browser, .downloads, .planner, .ai, .tools, .server
+        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .server
     ]
     private static let bottomDestinations: [MainNavDestination] = [
         .settings, .help
@@ -1153,7 +1164,16 @@ struct BrowserPopupSwitch: View {
 struct AIPanelSwitch: View {
     @ObservedObject var appModel: AppModel
     @ObservedObject var aiStore: AIServiceStore
+    @ObservedObject private var navModel = UnifiedNavigationModel.shared
     @Environment(\.bkPalette) var palette
+
+    #if HTT_HOST
+    private func selectTool(_ id: String) { HTDHostExport.shared.selectToolFromSidebar(id) }
+    private func clearHostedTool() { HTDHostExport.shared.clearHostedTool() }
+    #else
+    private func selectTool(_ id: String) {}
+    private func clearHostedTool() {}
+    #endif
 
     init(appModel: AppModel) {
         self.appModel = appModel
@@ -1172,7 +1192,7 @@ struct AIPanelSwitch: View {
         HStack(spacing: 6) {
             Menu {
                 if aiStore.enabledServices.isEmpty {
-                    Text("인공지능 메뉴에서 사용할 AI를 켜 주세요")
+                    Text("설정 > AI 연결에서 사용할 AI를 켜 주세요")
                         .font(.caption)
 
                     Divider()
@@ -1193,9 +1213,9 @@ struct AIPanelSwitch: View {
                 }
 
                 Button {
-                    appModel.selectedTab = .ai
+                    navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
                 } label: {
-                    Label("비서 설정…", systemImage: "gearshape")
+                    Label("AI 연결 설정…", systemImage: "gearshape")
                 }
             } label: {
                 Text("비서").fixedSize()
@@ -1211,7 +1231,7 @@ struct AIPanelSwitch: View {
                 get: { appModel.isAIPanelOpen },
                 set: { val in
                     if val && !hasAnyEnabled {
-                        appModel.selectedTab = .ai
+                        navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
                     } else {
                         appModel.setAIPanelOpen(val)
                     }
@@ -1227,7 +1247,7 @@ struct AIPanelSwitch: View {
         .background(Capsule().fill(palette.surfaceColor))
         .help(hasAnyEnabled
               ? "비서 대화창을 열거나 닫습니다 (\(selectedName)). 닫아도 대화 내용은 유지됩니다."
-              : "켜져 있는 AI 서비스가 없습니다. 클릭하면 AI 설정으로 이동합니다.")
+              : "켜져 있는 AI 서비스가 없습니다. 클릭하면 설정 > AI 연결로 이동합니다.")
         .accessibilityLabel("비서 대화창 토글 (\(selectedName))")
     }
 
@@ -1507,7 +1527,7 @@ struct QueueListView: View {
                         Text("대기 중인 다운로드가 없습니다.")
                             .font(.headline)
                             .foregroundStyle(.secondary)
-                        Text("상단 주소 입력창에 영상 주소를 입력하고 '분석'을 누르면 분석 후 바로 다운로드합니다.")
+                        Text("상단 주소 입력창에 영상 주소를 입력하고 '다운로드'를 누르면 분석 후 바로 다운로드합니다.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -2147,6 +2167,36 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // Section: Address search & shortcuts
+                GroupBox("주소창·검색") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("브라우저 주소창에서 사이트 이름·단축어·검색어를 통한 빠른 탐색 및 길찾기 설정을 관리합니다.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        AddressSearchSettingsView(store: appModel.preferences.addressSearch)
+                            .frame(minHeight: 280, maxHeight: 420)
+                    }
+                    .padding(8)
+                }
+
+                // Section: Browser translation extension
+                GroupBox("번역 확장 연동") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Safari, Chrome, Whale 등 외부 브라우저와 한툴 번역 엔진을 연결하는 확장 프로그램 연동 설정입니다.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Button("번역 확장 프로그램 설정 열기 ↗") {
+                            #if HTT_HOST
+                            HTDHostExport.shared.showTool("browser")
+                            #endif
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("브라우저 번역 확장 프로그램 연동 화면을 엽니다.")
+                    }
+                    .padding(8)
+                }
+
                 // Section 1b: Video queue concurrency & fragment concurrency
                 GroupBox("다운로드") {
                     VStack(alignment: .leading, spacing: 10) {

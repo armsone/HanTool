@@ -1553,17 +1553,17 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             return nil
         }
         guard latest.supported, let url = latest.url else {
-            lastError = "이 영상은 페이지 안에서 조각을 이어 붙여 재생하는 방식이라 주소로 바로 받을 수 없습니다. 목록에 HLS/DASH 후보가 있으면 그것을 고르거나 '현재 페이지 분석'을 눌러 보세요."
+            lastError = "이 영상은 페이지 안에서 조각을 이어 붙여 재생하는 방식이라 주소로 바로 받을 수 없습니다. 목록에 HLS/DASH 후보가 있으면 그것을 고르거나 '영상 찾아받기'를 눌러 보세요."
             return nil
         }
         if let existing = queuedJobs[latest.id], appModel?.jobs.contains(where: { $0.id == existing }) == true {
-            notice = "이미 대기열에 추가한 영상입니다. 진행 상황은 왼쪽 '대기열'에서 볼 수 있습니다."
+            notice = "이미 대기열에 추가한 영상입니다. 진행 상황은 '다운로드 > 진행 중'에서 볼 수 있습니다."
             return existing
         }
         guard let app = appModel, let jobId = app.addJobFromBrowserMedia(url, pageURL: latest.pageURL, refererURL: latest.frameURL, title: latest.title, route: viewRoute) else { return nil }
         queuedJobs[latest.id] = jobId
         lastError = nil
-        notice = "대기열에 추가했습니다. 진행 상황은 왼쪽 '대기열'에서 볼 수 있습니다."
+        notice = "대기열에 추가했습니다. 진행 상황은 '다운로드 > 진행 중'에서 볼 수 있습니다."
         return jobId
     }
 

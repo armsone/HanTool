@@ -238,6 +238,8 @@ public final class AppModel: ObservableObject {
     public let thirdPartyAIHost: ThirdPartyAIPanelHost
     /// Whether the embedded AI side-panel is currently open.
     @Published public var isAIPanelOpen: Bool = false
+    /// Whether the passive video candidates popover in the browser toolbar is currently open.
+    @Published public var isMediaCandidatePresented: Bool = false
     /// Set when a specific '하나' command routed explicitly to Hana while a non-Hana provider is selected.
     @Published public var temporaryShowHanaPanel: Bool = false
     /// Sanitized diagnostic trace (memory ring + `<storeDirectory>/Diagnostics`), see Diagnostics.swift.

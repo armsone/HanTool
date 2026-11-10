@@ -5,11 +5,12 @@ import AppKit
 
 public enum MainNavDestination: String, CaseIterable, Identifiable {
     case browser = "브라우저"
-    case ai = "비서"
-    case planner = "플래너"
     case downloads = "다운로드"
+    case planner = "플래너"
+    case translation = "번역"
+    case inputHelper = "입력 도우미"
+    case macManagement = "Mac 관리"
     case server = "서버 현황"
-    case tools = "도구"
     case settings = "설정"
     case help = "사용 안내"
 
@@ -18,11 +19,12 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
     public var iconName: String {
         switch self {
         case .browser: return "globe"
-        case .ai: return "sparkles"
-        case .planner: return "checklist"
         case .downloads: return "arrow.down.circle"
+        case .planner: return "checklist"
+        case .translation: return "character.book.closed"
+        case .inputHelper: return "keyboard"
+        case .macManagement: return "desktopcomputer"
         case .server: return "chart.bar.xaxis"
-        case .tools: return "wrench.and.screwdriver"
         case .settings: return "gearshape"
         case .help: return "questionmark.circle"
         }
@@ -32,6 +34,7 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
 public enum SettingsHubTab: String, CaseIterable, Identifiable {
     case general = "일반 설정"
     case webSettings = "웹 설정"
+    case aiConnections = "AI 연결"
     case inputSettings = "입력 설정"
     case macSettings = "Mac 관리 설정"
 
@@ -215,7 +218,13 @@ public final class UnifiedNavigationModel: ObservableObject {
     @Published public var destination: MainNavDestination = .browser
     @Published public var settingsTab: SettingsHubTab = .general
     @Published public var downloadTab: DownloadHubTab = .queue
-    @Published public var isToolsHubRoot: Bool = true
+    @Published public var activeTranslationChild: String = "mail"
+    @Published public var activeInputChild: String = "input.appLanguage"
+    @Published public var activeMacManagementChild: String = "macManagement"
+    @Published public var isSpeedTestPresented: Bool = false
+
+    // Compatibility shims for legacy calls
+    @Published public var isToolsHubRoot: Bool = false
     @Published public var activeToolLeafID: String? = nil
 
     public init() {}
@@ -225,73 +234,58 @@ public final class UnifiedNavigationModel: ObservableObject {
             switch toolID {
             case "serverStatus":
                 destination = .server
-                isToolsHubRoot = false
-                activeToolLeafID = nil
-            case "help":
+            case "help", "home":
                 destination = .help
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case "general":
                 destination = .settings
                 settingsTab = .general
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case "input.general":
                 destination = .settings
                 settingsTab = .inputSettings
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case "macManagementSettings":
                 destination = .settings
                 settingsTab = .macSettings
-                isToolsHubRoot = false
-                activeToolLeafID = nil
+            case "browser":
+                destination = .settings
+                settingsTab = .webSettings
+            case "mail", "screen":
+                destination = .translation
+                activeTranslationChild = toolID
+            case "input.appLanguage", "input.koreanTypo", "input.personalDictionary", "input.trackpad":
+                destination = .inputHelper
+                activeInputChild = toolID
+            case "macManagement", "cleanUSB":
+                destination = .macManagement
+                activeMacManagementChild = toolID
             default:
-                destination = .tools
-                isToolsHubRoot = false
-                activeToolLeafID = toolID
+                destination = .browser
             }
         } else {
             switch selectedTab {
             case .browser:
                 destination = .browser
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case .ai:
-                destination = .ai
-                isToolsHubRoot = false
-                activeToolLeafID = nil
+                destination = .settings
+                settingsTab = .aiConnections
             case .saw:
                 destination = .planner
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case .queue:
                 destination = .downloads
                 downloadTab = .queue
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case .history:
                 destination = .downloads
                 downloadTab = .history
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case .settings:
                 destination = .settings
                 settingsTab = .webSettings
-                isToolsHubRoot = false
-                activeToolLeafID = nil
             case .pageVideos:
-                destination = .tools
-                isToolsHubRoot = false
-                activeToolLeafID = "pageVideos"
+                destination = .browser
             case .addressSearch:
-                destination = .tools
-                isToolsHubRoot = false
-                activeToolLeafID = "addressSearch"
+                destination = .settings
+                settingsTab = .webSettings
             case .speed:
-                destination = .tools
-                isToolsHubRoot = false
-                activeToolLeafID = "speed"
+                destination = .browser
+                isSpeedTestPresented = true
             }
         }
     }
@@ -307,47 +301,60 @@ public final class UnifiedNavigationModel: ObservableObject {
         case .browser:
             clearTool()
             appModel.selectedTab = .browser
-            isToolsHubRoot = false
-            activeToolLeafID = nil
-
-        case .ai:
-            clearTool()
-            appModel.selectedTab = .ai
-            isToolsHubRoot = false
-            activeToolLeafID = nil
-
-        case .planner:
-            clearTool()
-            appModel.selectedTab = .saw
-            isToolsHubRoot = false
-            activeToolLeafID = nil
 
         case .downloads:
             clearTool()
             appModel.selectedTab = (downloadTab == .history ? .history : .queue)
-            isToolsHubRoot = false
-            activeToolLeafID = nil
+
+        case .planner:
+            clearTool()
+            appModel.selectedTab = .saw
+
+        case .translation:
+            selectTool(activeTranslationChild)
+
+        case .inputHelper:
+            selectTool(activeInputChild)
+
+        case .macManagement:
+            selectTool(activeMacManagementChild)
 
         case .server:
             selectTool("serverStatus")
-            isToolsHubRoot = false
-            activeToolLeafID = nil
-
-        case .tools:
-            isToolsHubRoot = true
-            activeToolLeafID = nil
-            clearTool()
 
         case .settings:
-            isToolsHubRoot = false
-            activeToolLeafID = nil
             applySettingsTab(settingsTab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
 
         case .help:
             selectTool("help")
-            isToolsHubRoot = false
-            activeToolLeafID = nil
         }
+    }
+
+    public func selectTranslationChild(
+        _ childID: String,
+        selectTool: (String) -> Void
+    ) {
+        self.activeTranslationChild = childID
+        self.destination = .translation
+        selectTool(childID)
+    }
+
+    public func selectInputChild(
+        _ childID: String,
+        selectTool: (String) -> Void
+    ) {
+        self.activeInputChild = childID
+        self.destination = .inputHelper
+        selectTool(childID)
+    }
+
+    public func selectMacManagementChild(
+        _ childID: String,
+        selectTool: (String) -> Void
+    ) {
+        self.activeMacManagementChild = childID
+        self.destination = .macManagement
+        selectTool(childID)
     }
 
     public func selectSettingsTab(
@@ -358,8 +365,6 @@ public final class UnifiedNavigationModel: ObservableObject {
     ) {
         self.settingsTab = tab
         self.destination = .settings
-        self.isToolsHubRoot = false
-        self.activeToolLeafID = nil
         applySettingsTab(tab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
     }
 
@@ -375,6 +380,11 @@ public final class UnifiedNavigationModel: ObservableObject {
         case .webSettings:
             clearTool()
             appModel.selectedTab = .settings
+        case .aiConnections:
+            clearTool()
+            if appModel.selectedTab != .ai {
+                appModel.selectedTab = .ai
+            }
         case .inputSettings:
             selectTool("input.general")
         case .macSettings:
@@ -400,22 +410,28 @@ public final class UnifiedNavigationModel: ObservableObject {
         selectTool: (String) -> Void,
         clearTool: () -> Void
     ) {
-        self.destination = .tools
-        self.isToolsHubRoot = false
-        self.activeToolLeafID = item.id
-
-        if item.isNativeTab, let native = item.nativeTab {
-            clearTool()
-            appModel.selectedTab = native
+        if item.category == .translation {
+            selectTranslationChild(item.id, selectTool: selectTool)
+        } else if item.category == .inputHelper {
+            selectInputChild(item.id, selectTool: selectTool)
+        } else if item.category == .macManagement {
+            selectMacManagementChild(item.id, selectTool: selectTool)
+        } else if item.id == "speed" {
+            destination = .browser
+            appModel.selectedTab = .browser
+            isSpeedTestPresented = true
+        } else if item.id == "pageVideos" {
+            destination = .browser
+            appModel.selectedTab = .browser
+            appModel.isMediaCandidatePresented = true
+        } else if item.id == "addressSearch" {
+            selectSettingsTab(.webSettings, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
         } else if let toolID = item.hostedToolID {
             selectTool(toolID)
         }
     }
 
     public func backToToolsHub(clearTool: () -> Void) {
-        self.destination = .tools
-        self.isToolsHubRoot = true
-        self.activeToolLeafID = nil
         clearTool()
     }
 }
@@ -652,6 +668,238 @@ private struct ToolCardButton: View {
     }
 }
 
+// MARK: - Purpose Workspace Header Views
+
+public struct TranslationHeaderView: View {
+    @Binding public var activeChild: String
+    @Environment(\.bkPalette) private var palette
+    public var onSelectChild: (String) -> Void
+    public var onOpenWebSettings: () -> Void
+
+    public init(
+        activeChild: Binding<String>,
+        onSelectChild: @escaping (String) -> Void,
+        onOpenWebSettings: @escaping () -> Void
+    ) {
+        self._activeChild = activeChild
+        self.onSelectChild = onSelectChild
+        self.onOpenWebSettings = onOpenWebSettings
+    }
+
+    public var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("번역")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(palette.textColor)
+                Text("메일·이미지 번역과 화면 번역을 바로 실행합니다.")
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.mutedColor)
+            }
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                let options: [(id: String, title: String)] = [
+                    ("mail", "메일·이미지 번역"),
+                    ("screen", "화면 번역")
+                ]
+                ForEach(options, id: \.id) { opt in
+                    let isSelected = activeChild == opt.id
+                    Button {
+                        activeChild = opt.id
+                        onSelectChild(opt.id)
+                    } label: {
+                        Text(opt.title)
+                            .font(.system(size: 12, weight: isSelected ? .bold : .regular))
+                            .foregroundColor(isSelected ? palette.onAccentColor : palette.textColor)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(isSelected ? palette.accentColor : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(opt.title)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+            .padding(3)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(palette.surface2Color)
+            )
+
+            Button("번역 확장 연동 설정 ↗") {
+                onOpenWebSettings()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("설정 > 웹 설정에서 브라우저 번역 확장 프로그램을 연동합니다.")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(palette.cardColor)
+    }
+}
+
+public struct InputHelperHeaderView: View {
+    @Binding public var activeChild: String
+    @Environment(\.bkPalette) private var palette
+    public var onSelectChild: (String) -> Void
+    public var onOpenInputSettings: () -> Void
+
+    public init(
+        activeChild: Binding<String>,
+        onSelectChild: @escaping (String) -> Void,
+        onOpenInputSettings: @escaping () -> Void
+    ) {
+        self._activeChild = activeChild
+        self.onSelectChild = onSelectChild
+        self.onOpenInputSettings = onOpenInputSettings
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Upper row: Title & description
+            VStack(alignment: .leading, spacing: 2) {
+                Text("입력 도우미")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(palette.textColor)
+                Text("앱별 언어 전환, 오타 교정, 사전, 트랙패드 잠금을 관리합니다.")
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.mutedColor)
+            }
+
+            // Lower row: Four function tabs + input settings button
+            HStack(alignment: .center, spacing: 12) {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(spacing: 4) {
+                        let options: [(id: String, title: String)] = [
+                            ("input.appLanguage", "앱별 언어 전환"),
+                            ("input.koreanTypo", "한글 오타 교정"),
+                            ("input.personalDictionary", "개인 사전"),
+                            ("input.trackpad", "트랙패드 잠금")
+                        ]
+                        ForEach(options, id: \.id) { opt in
+                            let isSelected = activeChild == opt.id
+                            Button {
+                                activeChild = opt.id
+                                onSelectChild(opt.id)
+                            } label: {
+                                Text(opt.title)
+                                    .font(.system(size: 12, weight: isSelected ? .bold : .regular))
+                                    .foregroundColor(isSelected ? palette.onAccentColor : palette.textColor)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(isSelected ? palette.accentColor : Color.clear)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(opt.title)
+                            .accessibilityAddTraits(isSelected ? .isSelected : [])
+                        }
+                    }
+                    .padding(3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(palette.surface2Color)
+                    )
+                }
+
+                Spacer()
+
+                Button("입력 설정 ↗") {
+                    onOpenInputSettings()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("설정 > 입력 설정으로 이동합니다.")
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(palette.cardColor)
+    }
+}
+
+public struct MacManagementHeaderView: View {
+    @Binding public var activeChild: String
+    @Environment(\.bkPalette) private var palette
+    public var onSelectChild: (String) -> Void
+    public var onOpenMacSettings: () -> Void
+
+    public init(
+        activeChild: Binding<String>,
+        onSelectChild: @escaping (String) -> Void,
+        onOpenMacSettings: @escaping () -> Void
+    ) {
+        self._activeChild = activeChild
+        self.onSelectChild = onSelectChild
+        self.onOpenMacSettings = onOpenMacSettings
+    }
+
+    public var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mac 관리")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(palette.textColor)
+                Text("시스템 상태 확인, 개발 캐시 정리 및 외장 USB 정리를 수행합니다.")
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.mutedColor)
+            }
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                let options: [(id: String, title: String)] = [
+                    ("macManagement", "Mac 관리"),
+                    ("cleanUSB", "USB 드라이브 정리")
+                ]
+                ForEach(options, id: \.id) { opt in
+                    let isSelected = activeChild == opt.id
+                    Button {
+                        activeChild = opt.id
+                        onSelectChild(opt.id)
+                    } label: {
+                        Text(opt.title)
+                            .font(.system(size: 12, weight: isSelected ? .bold : .regular))
+                            .foregroundColor(isSelected ? palette.onAccentColor : palette.textColor)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(isSelected ? palette.accentColor : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(opt.title)
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                }
+            }
+            .padding(3)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(palette.surface2Color)
+            )
+
+            Button("Mac 관리 설정 ↗") {
+                onOpenMacSettings()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("설정 > Mac 관리 설정으로 이동합니다.")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(palette.cardColor)
+    }
+}
+
 // MARK: - Settings Hub Header View
 
 public struct SettingsHubHeaderView: View {
@@ -662,19 +910,22 @@ public struct SettingsHubHeaderView: View {
     public var onOpenInputTool: (String) -> Void
     public var onOpenMacManagement: () -> Void
     public var onOpenBrowser: () -> Void
+    public var onOpenBrowserSetup: () -> Void
 
     public init(
         activeTab: Binding<SettingsHubTab>,
         onTabChanged: @escaping (SettingsHubTab) -> Void,
         onOpenInputTool: @escaping (String) -> Void,
         onOpenMacManagement: @escaping () -> Void,
-        onOpenBrowser: @escaping () -> Void
+        onOpenBrowser: @escaping () -> Void,
+        onOpenBrowserSetup: @escaping () -> Void = {}
     ) {
         self._activeTab = activeTab
         self.onTabChanged = onTabChanged
         self.onOpenInputTool = onOpenInputTool
         self.onOpenMacManagement = onOpenMacManagement
         self.onOpenBrowser = onOpenBrowser
+        self.onOpenBrowserSetup = onOpenBrowserSetup
     }
 
     public var body: some View {
@@ -692,33 +943,36 @@ public struct SettingsHubHeaderView: View {
                 Spacer()
             }
 
-            // 4 Segmented Tabs
-            HStack(spacing: 4) {
-                ForEach(SettingsHubTab.allCases) { tab in
-                    let isSelected = activeTab == tab
-                    Button {
-                        activeTab = tab
-                        onTabChanged(tab)
-                    } label: {
-                        Text(tab.rawValue)
-                            .font(.system(size: 12, weight: isSelected ? .bold : .regular))
-                            .foregroundColor(isSelected ? palette.onAccentColor : palette.textColor)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(isSelected ? palette.accentColor : Color.clear)
-                            )
+            // 5 Segmented Tabs
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(SettingsHubTab.allCases) { tab in
+                        let isSelected = activeTab == tab
+                        Button {
+                            activeTab = tab
+                            onTabChanged(tab)
+                        } label: {
+                            Text(tab.rawValue)
+                                .font(.system(size: 12, weight: isSelected ? .bold : .regular))
+                                .foregroundColor(isSelected ? palette.onAccentColor : palette.textColor)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(isSelected ? palette.accentColor : Color.clear)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(tab.rawValue)
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(tab.rawValue)
                 }
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(palette.surface2Color)
+                )
             }
-            .padding(3)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(palette.surface2Color)
-            )
 
             // Contextual quick jump buttons
             if activeTab == .inputSettings {
@@ -746,6 +1000,15 @@ public struct SettingsHubHeaderView: View {
                 HStack(spacing: 6) {
                     Button("브라우저 열기 ↗") { onOpenBrowser() }
                         .buttonStyle(.bordered).controlSize(.small)
+                    Button("번역 확장 프로그램 설정 ↗") { onOpenBrowserSetup() }
+                        .buttonStyle(.bordered).controlSize(.small)
+                }
+                .padding(.top, 2)
+            } else if activeTab == .aiConnections {
+                HStack(spacing: 6) {
+                    Text("브라우저 상단 비서 대화창에서 사용할 AI 서비스를 설정합니다.")
+                        .font(.system(size: 11))
+                        .foregroundColor(palette.mutedColor)
                 }
                 .padding(.top, 2)
             }

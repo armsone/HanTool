@@ -113,7 +113,7 @@ public struct AIServiceSettingsView: View {
                     .font(.title2.bold())
                     .foregroundColor(palette.textColor)
             }
-            Text("브라우저 상단 ‘AI’ 스위치를 켤 때 열리는 기본 AI 대화창 서비스를 선택합니다. 제목 ‘AI’를 클릭하면 켜져 있는 서비스만 빠른 선택 메뉴에 표시되며, 각 행의 ‘사용’ 스위치로 메뉴 표시 여부를 지정할 수 있습니다 (스위치 상태는 로그인 여부와 무관한 메뉴 표시 설정입니다).")
+            Text("브라우저 상단 ‘비서’ 대화창을 켤 때 열리는 기본 AI 서비스를 선택합니다. 브라우저 툴바 ‘비서’를 클릭하면 켜져 있는 서비스만 빠른 선택 메뉴에 표시되며, 각 행의 ‘사용’ 스위치로 메뉴 표시 여부를 지정할 수 있습니다 (스위치 상태는 로그인 여부와 무관한 메뉴 표시 설정입니다).")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -129,7 +129,7 @@ public struct AIServiceSettingsView: View {
                     .foregroundColor(palette.accentColor)
                 Spacer()
                 if hasAnyEnabled {
-                    Text("상단 AI 스위치로 바로 열림")
+                    Text("상단 비서 대화창으로 바로 열림")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
