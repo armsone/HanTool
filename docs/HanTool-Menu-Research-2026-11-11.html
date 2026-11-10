@@ -172,8 +172,8 @@
   <div class="container">
     <header>
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-        <span class="badge badge-status">구현·설치 확인 완료 · Claude 최종 2차 검토 1건 대기 중 (미완료)</span>
-        <span style="font-size:13px; color:var(--muted);">확인 기준일: 2026-11-11 02:23 (KST) · 대상: /Users/armsone/git/HanTool</span>
+        <span class="badge badge-fact">구현·설치·전원 2차 검토 완료</span>
+        <span style="font-size:13px; color:var(--muted);">확인 기준일: 2026-11-11 02:51 (KST) · 대상: /Users/armsone/git/HanTool</span>
       </div>
       <h1 style="margin-top:10px;">한툴(HanTool) 메뉴 및 업무 흐름 개편 결과 보고서</h1>
       <p style="margin:0; color:var(--muted);">
@@ -209,7 +209,7 @@
         </div>
       </div>
       <div class="callout">
-        <strong>현재 검토 진행 현황:</strong> 기획 검토(Claude 2회, Gemini 2회, TM 2회) 및 코드 구현이 완료되었습니다. 최종 검토 단계에서는 Gemini(1·2·3계정 각 2회)와 TM(2회) 검토를 마쳤으며, Claude 최종 2차 검토 1건이 승인된 기본 작업 진행으로 대기 중입니다.
+        <strong>현재 검토 진행 현황:</strong> 기획 검토(Claude 2회, Gemini 2회, TM 2회) 및 코드 구현이 완료되었습니다. 최종 검토는 Gemini 1·2·3계정, Claude, 팀장이 각각 2회씩 마쳤습니다. 발견된 필수 문제를 수정했고, 마지막 검토에서 남은 필수 결함은 0건입니다.
       </div>
     </section>
 
@@ -796,7 +796,7 @@
     <!-- 6. 구현 슬라이스 및 관찰 가능한 완료 기준 -->
     <section class="section-card">
       <h2>6. 구현 결과 및 검증 완료 판정 기준</h2>
-      <h3>6.1 구현 결과 및 빌드·설치 현황 (2026-11-11 02:23 KST 기준)</h3>
+      <h3>6.1 구현 결과 및 빌드·설치 현황 (2026-11-11 02:51 KST 기준)</h3>
       <ul>
         <li><strong>브라우저 내 수동 영상 후보 패널 연결 완료:</strong> <code>BrowserView.swift</code>의 툴바에 수동 후보 목록 패널 팝오버(폭 340~360pt, <code>Esc</code> 닫기)를 여는 단일 <code>페이지 영상</code> 버튼을 연결했습니다. 패널 오픈 시 자동 분석을 호출하지 않고, 패널 상단에 활성 탭 제목과 URL을 표시하며, 즉시 다운로드는 <code>영상 찾아받기</code>, 개별 항목은 <code>MP4로 저장</code>으로 명확히 구분했습니다. 다운로드 화면의 URL 처리 액션은 <code>다운로드</code>로 정직하게 노출됩니다.</li>
         <li><strong>사이드바 7+2 직행 개편 및 호스트 라우팅 동기화 완료:</strong> <code>UnifiedNavigation.swift</code>와 <code>Views.swift</code>(<code>SidebarView</code> 및 <code>CompactSidebarRail</code>)를 상단 7개(브라우저, 다운로드, 플래너, 번역, 입력 도우미, Mac 관리, 서버 현황) + 하단 2개(설정, 사용 안내) 총 9개로 개편했습니다. 비서는 브라우저 툴바 대화창 토글 및 <code>설정 &gt; AI 연결</code>(<code>AIServiceSettingsView</code>)로 단일화하고, <code>syncFromExternal</code>과 <code>navigateTo</code>의 모든 분기를 새 목적지로 연결했습니다.</li>
@@ -812,7 +812,7 @@
             <th style="width:20%;">검토 구분</th>
             <th style="width:30%;">참여 에이전트 및 회차</th>
             <th style="width:25%;">주요 지적 및 조치 결과</th>
-            <th style="width:25%;">현재 상태 (2026-11-11 02:23)</th>
+            <th style="width:25%;">현재 상태 (2026-11-11 02:51)</th>
           </tr>
         </thead>
         <tbody>
@@ -824,14 +824,14 @@
           </tr>
           <tr>
             <td><strong>최종 단계 검토</strong></td>
-            <td>Gemini 제1·2·3계정 각 2회 완료<br/>루트 TM 소스+설치 UI 2회 완료<br/>Claude 최종 1회 완료 / 2차 대기</td>
+            <td>Gemini 제1·2·3계정 각 2회 완료<br/>루트 TM 소스+설치 UI 2회 완료<br/>Claude 최종 2회 완료</td>
             <td>AI 라우팅/Published 재진입 수정, 헤더 선택 접근성 특성 반영, 정직한 다운로드 액션 라벨 노출, 좁은 입력창 헤더 및 USB 창 제목 보정 완료</td>
-            <td><span class="badge badge-status">Claude 최종 2차 1건 대기 중</span><br/>(Gemini·TM 잔여 결함 0건)</td>
+            <td><span class="badge badge-fact">전원 2차 검토 완료</span><br/>(검토 범위 내 필수 잔여 결함 0건)</td>
           </tr>
         </tbody>
       </table>
       <p style="font-size:13px; color:var(--muted); margin-top:8px;">
-        ※ Claude의 최종 2차 검토는 해당 기본 작업자가 승인된 다른 선행 업무를 진행 중이어서 대기 상태입니다. 불필요한 결함 수치 부풀림이나 100% 무결점 보증 표현을 배제하고 확인된 사실만 기록합니다.
+        ※ Claude의 2차 정적 검토는 2026-11-11 02:50 KST에 정상 종료되었습니다. 호스트·비호스트 구독자의 재진입 방지와 AI 연결 화면 전이를 대조했습니다. 실제 설치본 화면 확인은 팀장이 별도로 2회 수행했습니다. 이 결과는 확인한 범위의 판정이며 모든 상황에 대한 무결점 보증은 아닙니다.
       </p>
 
       <h3>6.3 관찰 가능한 완료 판정 기준 및 TM 점검 결과</h3>
