@@ -2,6 +2,7 @@ import Foundation
 import Network
 import WebKit
 import Security
+import LocalAuthentication
 
 /// The app's own login session ("전용 로그인").
 ///
@@ -92,6 +93,7 @@ public final class SessionManager: ObservableObject {
     private var activeObserverStore: WKWebsiteDataStore?
     private var observerGeneration: UInt64 = 0
     private var observerReadRevision: UInt64 = 0
+    private var isKeychainAccessBlocked = false
 
     public init(persistent: Bool = true) {
         self.persistent = persistent
@@ -375,8 +377,21 @@ public final class SessionManager: ObservableObject {
         let cookies: [CookieRecord]
     }
 
+    private static func makeNoUIAuthenticationContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+
+    private static func isInteractionOrAccessDenied(_ status: OSStatus) -> Bool {
+        status == errSecInteractionNotAllowed ||
+        status == errSecAuthFailed ||
+        status == errSecInteractionRequired ||
+        status == errSecNotAvailable
+    }
+
     private func saveKeychainSnapshot(cookies: [HTTPCookie], forHost host: String) {
-        guard persistent, !isClearing, !optOutHosts.contains(host) else { return }
+        guard persistent, !isClearing, !isKeychainAccessBlocked, !optOutHosts.contains(host) else { return }
         var records: [CookieRecord] = []
         for c in cookies.prefix(Self.maxSnapshotsPerHost) {
             let sameSiteStr: String? = c.sameSitePolicy?.rawValue
@@ -415,20 +430,23 @@ public final class SessionManager: ObservableObject {
             if existing.cookies == records {
                 creationDate = existing.createdAt
             }
+        } else if isKeychainAccessBlocked {
+            return
         }
 
         let snapshot = SnapshotData(host: host, createdAt: creationDate, cookies: records)
         guard let encoded = try? JSONEncoder().encode(snapshot),
               encoded.count <= Self.maxSnapshotBytes else {
-            // On write failure invalidate old backup
-            deleteKeychainSnapshot(forHost: host)
+            // Metadata cutoff preserves encrypted backup but prevents automatic stale restore.
+            invalidateSnapshot(forHost: host)
             return
         }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: host
+            kSecAttrAccount as String: host,
+            kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
 
         let updateAttributes: [String: Any] = [
@@ -439,15 +457,24 @@ public final class SessionManager: ObservableObject {
         let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
         if updateStatus == errSecItemNotFound {
             var addQuery = query
+            addQuery[kSecUseAuthenticationContext as String] = Self.makeNoUIAuthenticationContext()
             addQuery[kSecValueData as String] = encoded
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
             if addStatus != errSecSuccess {
-                // On write failure invalidate old backup
-                deleteKeychainSnapshot(forHost: host)
+                if Self.isInteractionOrAccessDenied(addStatus) {
+                    isKeychainAccessBlocked = true
+                    return
+                }
+                // Metadata cutoff preserves encrypted backup but prevents automatic stale restore.
+                invalidateSnapshot(forHost: host)
             }
         } else if updateStatus != errSecSuccess {
-            // On write failure invalidate old backup
-            deleteKeychainSnapshot(forHost: host)
+            if Self.isInteractionOrAccessDenied(updateStatus) {
+                isKeychainAccessBlocked = true
+                return
+            }
+            // Metadata cutoff preserves encrypted backup but prevents automatic stale restore.
+            invalidateSnapshot(forHost: host)
         }
     }
 
@@ -459,16 +486,21 @@ public final class SessionManager: ObservableObject {
     }
 
     private func loadKeychainSnapshot(forHost host: String) -> SnapshotData? {
-        guard persistent else { return nil }
+        guard persistent, !isKeychainAccessBlocked else { return nil }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: host,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if Self.isInteractionOrAccessDenied(status) {
+            isKeychainAccessBlocked = true
+            return nil
+        }
         guard status == errSecSuccess, let data = item as? Data else { return nil }
         guard let snapshot = try? JSONDecoder().decode(SnapshotData.self, from: data),
               snapshot.host == host else { return nil }
@@ -480,21 +512,31 @@ public final class SessionManager: ObservableObject {
 
     private func deleteKeychainSnapshot(forHost host: String) {
         guard persistent else { return }
+        invalidateSnapshot(forHost: host)
+        guard !isKeychainAccessBlocked else { return }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: host
+            kSecAttrAccount as String: host,
+            kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        if Self.isInteractionOrAccessDenied(status) {
+            isKeychainAccessBlocked = true
+        }
     }
 
     private func deleteAllKeychainSnapshots() {
-        guard persistent else { return }
+        guard persistent, !isKeychainAccessBlocked else { return }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService
+            kSecAttrService as String: Self.keychainService,
+            kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        if Self.isInteractionOrAccessDenied(status) {
+            isKeychainAccessBlocked = true
+        }
     }
 
     private func makeStore() -> WKWebsiteDataStore {

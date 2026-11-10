@@ -3070,14 +3070,14 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func openGeminiUsagePage() {
-        NSWorkspace.shared.open(UsageDashboardURLs.gemini)
+        ProviderUsageWindow.show(url: UsageDashboardURLs.gemini, title: "Gemini · 제공사 화면에서 확인")
     }
 
     @objc private func openGrokUsagePage() {
         if let onGrokUsageAction {
             onGrokUsageAction()
         } else {
-            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            ProviderUsageWindow.show(url: UsageDashboardURLs.grok, title: "Grok · 제공사 화면에서 확인")
         }
     }
 

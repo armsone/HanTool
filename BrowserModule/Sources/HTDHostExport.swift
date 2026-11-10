@@ -58,8 +58,7 @@ public final class HTDHostExport: ObservableObject {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             )
-            .environmentObject(appearance)
-            .byungkiThemed(appearance.palette)
+            .modifier(AppearanceThemingModifier(appearance: appearance))
             .onAppear { [weak appearance] in
                 appearance?.startObservingSystem()
             }
@@ -77,6 +76,7 @@ public final class HTDHostExport: ObservableObject {
         }
         self.hostedToolID = nil
         self.appModel.selectedTab = .browser
+        UnifiedNavigationModel.shared.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
         if !urls.isEmpty {
             ExternalURLCoordinator.shared.receive(urls)
         }
@@ -89,6 +89,7 @@ public final class HTDHostExport: ObservableObject {
             cachedController?.view.window?.makeFirstResponder(nil)
         }
         self.hostedToolID = id
+        UnifiedNavigationModel.shared.syncFromExternal(hostedToolID: id, selectedTab: appModel.selectedTab)
     }
 
     /// 사이드바에서 사용자가 호스트 도구를 클릭했을 때 호출됩니다.
@@ -138,5 +139,17 @@ public final class HTDHostExport: ObservableObject {
             choice = .auto
         }
         appearance.select(choice)
+    }
+}
+
+/// AppearanceStore 관찰을 통해 테마 및 시스템 외형 변경을 뷰 트리에 반응형으로 전파하는 모디파이어
+@MainActor
+private struct AppearanceThemingModifier: ViewModifier {
+    @ObservedObject var appearance: AppearanceStore
+
+    func body(content: Content) -> some View {
+        content
+            .environmentObject(appearance)
+            .byungkiThemed(appearance.palette)
     }
 }

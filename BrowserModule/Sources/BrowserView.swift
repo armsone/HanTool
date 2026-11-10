@@ -115,38 +115,127 @@ private struct AssistantPlannerEntryBar: View {
     let onManual: () -> Void
     @Environment(\.bkPalette) private var palette
 
-    private var text: String {
-        if case .unsupported(let reason) = session.capability {
-            return "이 페이지는 플래너 연결을 지원하지 않습니다: \(reason)"
-        }
+    private var activeFeedback: String? {
         let status = session.status
-        if status.kind == .accepted || status.kind == .refused || status.kind == .pending { return status.message }
-        if case .unknown(let reason) = session.capability, status.kind != .unavailable { return "플래너 연결 확인 중: \(reason)" }
-        return status.message
+        if status.kind == .accepted || status.kind == .refused || status.kind == .pending {
+            return status.message
+        }
+        return nil
     }
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "checklist").font(.caption)
-            Text(text)
-                .font(.caption)
-                .lineLimit(2)
-                .help(text)
+            if let feedback = activeFeedback {
+                Text(feedback)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .help(feedback)
+            }
             Spacer(minLength: 4)
-            Button("플래너에게 넘기기", action: onManual)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(session.binding == nil || session.status.kind == .pending)
-                .help("지금 열린 대화를 읽어 새 플래너 프로젝트로 넘깁니다. 입력창 내용은 바꾸지 않습니다.")
+            Menu {
+                Button("플래너에게 넘기기", action: onManual)
+                    .disabled(session.binding == nil || session.status.kind == .pending)
+                    .help("지금 열린 대화를 읽어 새 플래너 프로젝트로 넘깁니다. 입력창 내용은 바꾸지 않습니다.")
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel("대화 도구")
+            .help("대화 도구")
         }
         .foregroundColor(palette.textColor)
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
-        .background(palette.accentSoftColor)
+        .background(activeFeedback != nil ? palette.accentSoftColor : palette.cardColor)
         .task(id: refreshToken) { await session.refreshCapability() }
     }
 }
 
+private struct BrowserHomeQuickActionRow: View {
+    @ObservedObject var appModel: AppModel
+    @ObservedObject var model: LoginBrowserModel
+    @Environment(\.bkPalette) private var palette
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                appModel.requestAddressFocus(for: model, isExplicit: true)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                    Text("주소창·검색")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(palette.textColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(palette.surface2Color))
+            }
+            .buttonStyle(.plain)
+            .help("주소 입력창으로 바로 이동합니다")
+            .accessibilityLabel("주소창·검색")
+
+            #if HTT_HOST
+            Button {
+                HTDHostExport.shared.selectToolFromSidebar("screen")
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "viewfinder")
+                        .font(.system(size: 11))
+                    Text("화면 번역")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(palette.textColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(palette.surface2Color))
+            }
+            .buttonStyle(.plain)
+            .help("화면 번역 도구를 엽니다")
+            .accessibilityLabel("화면 번역")
+            #endif
+
+            Button {
+                #if HTT_HOST
+                HTDHostExport.shared.clearHostedTool()
+                #endif
+                UnifiedNavigationModel.shared.navigateTo(
+                    destination: .planner,
+                    appModel: appModel,
+                    selectTool: { _ in },
+                    clearTool: {
+                        #if HTT_HOST
+                        HTDHostExport.shared.clearHostedTool()
+                        #endif
+                    }
+                )
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 11))
+                    Text("플래너")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(palette.textColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(palette.surface2Color))
+            }
+            .buttonStyle(.plain)
+            .help("플래너를 엽니다")
+            .accessibilityLabel("플래너")
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(palette.cardColor)
+        .overlay(Divider(), alignment: .bottom)
+    }
+}
 /// The active tab's page: address bar, status, banners, home or WebView, bottom bar (the former whole browser screen).
 struct BrowserPane: View {
     @ObservedObject var appModel: AppModel
@@ -512,19 +601,22 @@ struct BrowserPane: View {
                 HStack(spacing: 0) {
                     Group {
                         if model.isShowingHome {
-                            BrowserHomeView(appModel: appModel, model: model, preferences: preferences, onOpenNewTab: { target in
-                                guard let validated = BrowserPreferences.validateWebURL(target),
-                                      let url = URL(string: validated) else { return }
-                                if let ps = plannerSession {
-                                    ps.newTab(url: url)
-                                } else {
-                                    if appModel.tabs.count >= AppModel.maxTabs {
-                                        appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
-                                        return
+                            VStack(spacing: 0) {
+                                BrowserHomeQuickActionRow(appModel: appModel, model: model)
+                                BrowserHomeView(appModel: appModel, model: model, preferences: preferences, onOpenNewTab: { target in
+                                    guard let validated = BrowserPreferences.validateWebURL(target),
+                                          let url = URL(string: validated) else { return }
+                                    if let ps = plannerSession {
+                                        ps.newTab(url: url)
+                                    } else {
+                                        if appModel.tabs.count >= AppModel.maxTabs {
+                                            appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
+                                            return
+                                        }
+                                        appModel.newTab()?.open(validated)
                                     }
-                                    appModel.newTab()?.open(validated)
-                                }
-                            })
+                                })
+                            }
                         } else {
                             pageArea
                         }
@@ -554,8 +646,7 @@ struct BrowserPane: View {
                                 HanaPanelView(
                                     host: hanaHost,
                                     availableWidth: geo.size.width,
-                                    nativeInputAllowed: { appModel.selectedTab == .browser },
-                                    onHandoffToPlanner: { startManualAssistantHandoff(hanaHost.plannerSession, isHana: true) }
+                                    nativeInputAllowed: { appModel.selectedTab == .browser }
                                 )
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                             } else {

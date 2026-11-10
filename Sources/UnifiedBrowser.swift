@@ -153,10 +153,14 @@ public final class UnifiedBrowserManager {
 
     /// 현재 호스트 테마를 모듈에 동기화
     public func syncTheme() {
+        syncTheme(HTTAppearanceStore.shared.theme)
+    }
+
+    private func syncTheme(_ theme: HTTTheme) {
         guard isInitialized, !isSyncingTheme else { return }
         isSyncingTheme = true
         defer { isSyncingTheme = false }
-        let rawTheme = HTTAppearanceStore.shared.theme.rawValue
+        let rawTheme = theme.rawValue
         HTDHostExport.shared.setTheme(rawTheme)
     }
 
@@ -176,8 +180,8 @@ public final class UnifiedBrowserManager {
         themeCancellable = HTTAppearanceStore.shared.$theme
             .dropFirst()
             .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.syncTheme()
+            .sink { [weak self] theme in
+                self?.syncTheme(theme)
             }
     }
 

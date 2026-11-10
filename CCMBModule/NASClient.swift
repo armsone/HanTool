@@ -35,17 +35,7 @@ enum NASConfig {
     ]
 
     static func isValidTarget(_ target: String) -> Bool {
-        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.count <= 253 else { return false }
-        guard let first = trimmed.first, first.isASCII, (first.isLetter || first.isNumber) else {
-            return false
-        }
-        for char in trimmed {
-            guard char.isASCII, (char.isLetter || char.isNumber || char == "." || char == "-" || char == "_") else {
-                return false
-            }
-        }
-        return true
+        NASHTTPClient.isValidTarget(target)
     }
 
     static func sshArguments(remoteCommand: String) -> [String] {
@@ -54,7 +44,7 @@ enum NASConfig {
     }
 }
 
-enum NASFetchError: Error, Equatable {
+public enum NASFetchError: Error, Equatable {
     case unconfigured
     /// `/usr/bin/ssh` could not be launched at all.
     case sshUnavailable
@@ -71,19 +61,27 @@ enum NASFetchError: Error, Equatable {
     case remoteExit(Int32)
     case emptyResponse
     case unreadableResponse
+    case invalidURL
+    case loginRequired
+    case permissionDenied
+    case httpError(Int)
 
-    var label: String {
+    public var label: String {
         switch self {
-        case .unconfigured: return "NAS 서버 미설정"
-        case .sshUnavailable: return "SSH 사용 불가"
-        case .connectionFailed: return "NAS SSH 연결 실패"
-        case .timeout: return "NAS 응답 시간 초과"
-        case .cancelled: return "NAS 조회 취소됨"
-        case .outputTooLarge: return "NAS 응답 크기 초과"
-        case .incompleteOutput: return "NAS 응답 불완전"
-        case .remoteExit(let status): return "NAS 도구 종료 코드 \(status)"
-        case .emptyResponse: return "NAS 빈 응답"
-        case .unreadableResponse: return "NAS 응답 해석 실패"
+        case .unconfigured: return "놀이터 주소 미설정"
+        case .sshUnavailable: return "연결 사용 불가"
+        case .connectionFailed: return "놀이터 연결 실패"
+        case .timeout: return "놀이터 응답 시간 초과"
+        case .cancelled: return "놀이터 조회 취소됨"
+        case .outputTooLarge: return "놀이터 응답 크기 초과"
+        case .incompleteOutput: return "놀이터 응답 불완전"
+        case .remoteExit(let status): return "놀이터 도구 종료 코드 \(status)"
+        case .emptyResponse: return "놀이터 빈 응답"
+        case .unreadableResponse: return "놀이터 응답 해석 실패"
+        case .invalidURL: return "올바른 놀이터 URL 필요"
+        case .loginRequired: return "놀이터 로그인 필요"
+        case .permissionDenied: return "조회 권한 없음"
+        case .httpError(let code): return "놀이터 서버 오류 (HTTP \(code))"
         }
     }
 }
@@ -419,48 +417,48 @@ private final class NASProcessRun: @unchecked Sendable {
 struct NASSnapshotClient {
     typealias Runner = (String) async throws -> NASProcessOutput
 
-    private let runner: Runner
+    private let runner: Runner?
 
-    init(runner: @escaping Runner = { try await NASSSHTransport.run(command: $0) }) {
+    init(runner: Runner? = nil) {
         self.runner = runner
     }
 
-    /// Returns raw bytes of the remote `--snapshot-json` output. The helper
-    /// always exits 0 with a v2 envelope (an "unavailable" one when nothing
-    /// is stored); any non-zero exit is a transport/helper failure.
+    /// Returns raw bytes of the snapshot output.
+    /// In production (runner == nil), uses the safe HTTP transport and never invokes SSH.
     func fetchSnapshot() async throws -> Data {
-        let output = try await runChecked(NASConfig.remoteCommand)
-        guard output.exitStatus == 0 else {
-            throw output.exitStatus == 255 ? NASFetchError.connectionFailed : NASFetchError.remoteExit(output.exitStatus)
+        if let runner {
+            let output = try await runChecked(NASConfig.remoteCommand, runner: runner)
+            guard output.exitStatus == 0 else {
+                throw output.exitStatus == 255 ? NASFetchError.connectionFailed : NASFetchError.remoteExit(output.exitStatus)
+            }
+            guard !output.stdout.isEmpty else { throw NASFetchError.emptyResponse }
+            return output.stdout
         }
-        guard !output.stdout.isEmpty else { throw NASFetchError.emptyResponse }
-        return output.stdout
+
+        return try await NASHTTPClient.shared.fetchSnapshot()
     }
 
-    /// Runs the history helper and classifies the result. A structured
-    /// `{ok:false,error:{code,message}}` body (the helper exits 1 for it) is
-    /// reported as that error — never as an empty history.
-    ///
-    /// The 24-hour (v3) helper is asked first. When the NAS does not have it
-    /// or it reports anything but a history, the strict v2 helper (newest 40
-    /// points, about two hours) answers instead — shown as partial coverage,
-    /// never padded. A failed SSH connection is not retried on the second
-    /// command.
+    /// Runs the history helper and classifies the result.
+    /// In production (runner == nil), queries the safe HTTP files endpoint and never invokes SSH.
     func fetchHistory() async throws -> NASHistoryReadResult {
-        if let wide = try await fetchHistory(command: NASConfig.remoteHistory24hCommand),
-           case .history = wide {
-            return wide
+        if let runner {
+            if let wide = try await fetchHistory(command: NASConfig.remoteHistory24hCommand, runner: runner),
+               case .history = wide {
+                return wide
+            }
+            guard let narrow = try await fetchHistory(command: NASConfig.remoteHistoryCommand, runner: runner) else {
+                throw NASFetchError.emptyResponse
+            }
+            return narrow
         }
-        guard let narrow = try await fetchHistory(command: NASConfig.remoteHistoryCommand) else {
-            throw NASFetchError.emptyResponse
-        }
-        return narrow
+
+        return try await NASHTTPClient.shared.fetchHistory()
     }
 
     /// `nil` only when a non-255 failure left nothing to classify, which the
     /// 24-hour attempt treats as "try the v2 helper".
-    private func fetchHistory(command: String) async throws -> NASHistoryReadResult? {
-        let output = try await runChecked(command)
+    private func fetchHistory(command: String, runner: Runner) async throws -> NASHistoryReadResult? {
+        let output = try await runChecked(command, runner: runner)
         if output.exitStatus == 255 { throw NASFetchError.connectionFailed }
         if output.exitStatus != 0, output.stdout.isEmpty {
             if command == NASConfig.remoteHistory24hCommand { return nil }
@@ -469,7 +467,7 @@ struct NASSnapshotClient {
         return NASHistoryV2Core.interpret(stdout: output.stdout, exitStatus: output.exitStatus)
     }
 
-    private func runChecked(_ command: String) async throws -> NASProcessOutput {
+    private func runChecked(_ command: String, runner: Runner) async throws -> NASProcessOutput {
         do {
             return try await runner(command)
         } catch let error as NASFetchError {

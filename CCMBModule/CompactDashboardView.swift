@@ -10,9 +10,14 @@ enum CCMBDashPalette {
     static var track: NSColor { UsagePanelThemeStore.current.palette.surface2 }
     static var divider: NSColor { UsagePanelThemeStore.current.palette.border }
     static var codexIconBg: NSColor {
-        UsagePanelThemeStore.current.isDark
-            ? NSColor(srgbRed: 0x16 / 255.0, green: 0x23 / 255.0, blue: 0x37 / 255.0, alpha: 1.0)
-            : NSColor(srgbRed: 2 / 255.0, green: 23 / 255.0, blue: 44 / 255.0, alpha: 1.0)
+        switch UsagePanelThemeStore.current {
+        case .ultron:
+            return UsagePanelThemeStore.current.palette.surface2
+        case .jarvis:
+            return NSColor(srgbRed: 0x16 / 255.0, green: 0x23 / 255.0, blue: 0x37 / 255.0, alpha: 1.0)
+        case .light, .friday:
+            return NSColor(srgbRed: 2 / 255.0, green: 23 / 255.0, blue: 44 / 255.0, alpha: 1.0)
+        }
     }
 
     static let codex = NSColor(srgbRed: 16 / 255.0, green: 163 / 255.0, blue: 127 / 255.0, alpha: 1.0)
@@ -23,7 +28,6 @@ enum CCMBDashPalette {
     static let geminiThird = NSColor(srgbRed: 251 / 255.0, green: 188 / 255.0, blue: 5 / 255.0, alpha: 1.0)
     static let cardRadius: CGFloat = 16.0
 }
-
 /// Thin horizontal remaining fill bar (height 7pt, rounded capsule).
 @MainActor
 final class CompactQuotaFillBar: NSView {

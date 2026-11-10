@@ -501,6 +501,7 @@ struct SAWView: View {
     @Environment(\.bkPalette) private var palette
 
     @State private var isTaskPanelFolded: Bool = false
+    @State private var isProjectPickerPresented: Bool = false
     @AppStorage("sawPlannerPanelWidth.v2") private var rememberedPlannerWidth: Double = 429
     @State private var plannerDragStartWidth: CGFloat?
     @State private var plannerDragTranslation: CGFloat = 0
@@ -599,7 +600,7 @@ struct SAWView: View {
     private var headerView: some View {
         HStack(spacing: 12) {
             Button {
-                onOpenSidebar?()
+                isProjectPickerPresented.toggle()
             } label: {
                 HStack(spacing: 8) {
                     SAWTelescopeIcon()
@@ -609,11 +610,18 @@ struct SAWView: View {
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(palette.textColor)
                         .lineLimit(1)
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(palette.textColor.opacity(0.7))
                 }
             }
             .buttonStyle(.plain)
-            .help("사이드바 열기")
-            .accessibilityLabel("사이드바 열기")
+            .help("프로젝트 목록")
+            .accessibilityLabel("프로젝트 목록")
+            .popover(isPresented: $isProjectPickerPresented, arrowEdge: .bottom) {
+                projectPickerPopover
+            }
 
             Spacer()
 
@@ -632,6 +640,78 @@ struct SAWView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+        .background(palette.cardColor)
+    }
+
+    private var projectPickerPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("프로젝트 목록")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(palette.textColor)
+
+                Spacer()
+
+                Button {
+                    let p = workspace.createProject(title: "새 프로젝트", goal: "")
+                    let sess = workspace.session(for: p.id)
+                    if sess.tabs.isEmpty { sess.newTab() }
+                    isProjectPickerPresented = false
+                    isTaskPanelFolded = false
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("새 프로젝트")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("새 프로젝트 생성")
+                .accessibilityLabel("새 프로젝트")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+
+            Divider()
+
+            ScrollView(.vertical, showsIndicators: true) {
+                let activeProjects = workspace.store.projects.filter { !$0.archived }
+                if activeProjects.isEmpty {
+                    Text("진행 중인 프로젝트가 없습니다.")
+                        .font(.system(size: 12))
+                        .foregroundColor(palette.textColor.opacity(0.6))
+                        .padding(16)
+                } else {
+                    VStack(spacing: 4) {
+                        ForEach(activeProjects) { proj in
+                            let isSelected = (proj.id == workspace.selectedProjectID)
+                            SAWProjectRowView(
+                                project: proj,
+                                workspace: workspace,
+                                isSelected: isSelected,
+                                isExpanded: false,
+                                onToggle: {
+                                    workspace.selectProject(proj.id)
+                                    let targetSess = workspace.session(for: proj.id)
+                                    if targetSess.tabs.isEmpty {
+                                        targetSess.newTab()
+                                    }
+                                    isProjectPickerPresented = false
+                                    isTaskPanelFolded = false
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+            }
+            .frame(maxHeight: 320)
+        }
+        .frame(width: 280)
+        .padding(.bottom, 8)
         .background(palette.cardColor)
     }
 

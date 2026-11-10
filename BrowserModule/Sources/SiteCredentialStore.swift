@@ -5,11 +5,11 @@ import Security
 /// Site-specific credential storage reusing GoogleAutofill patterns.
 ///
 /// Security constraints:
-/// - Exact committed HTTPS origin including port (e.g. "https://example.com:443" or "https://example.com").
+/// - Exact committed HTTP or HTTPS origin including port (e.g. "https://example.com:443", "https://example.com", "http://example.com:8080", or "http://example.com").
 /// - User credentials are saved ONLY through explicit native UI actions (never scraped or auto-saved from DOM).
 /// - Secrets stored in macOS Keychain with kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
 /// - Keychain service: "com.hanstree.HttpsDown.site-autofill".
-/// - Account key: canonical exact HTTPS origin + "\0" + username.
+/// - Account key: canonical exact HTTP or HTTPS origin + "\0" + username.
 /// - Non-secret account list mirrored in UserDefaults for UI and pre-fill probe, avoiding premature Keychain prompts.
 /// - Deliberate user action ("지금 채우기") fills visible empty username and password fields in the main frame.
 /// - Passwords stored solely in Keychain (never in UserDefaults or logs).
@@ -30,17 +30,26 @@ public enum SiteCredentialStore {
         }
     }
 
-    /// Exact HTTPS origin including port normalization: scheme://host[:port]. Rejects userinfo, paths, non-HTTPS.
+    /// Exact HTTP or HTTPS origin including port normalization: scheme://host[:port]. Rejects userinfo, paths, non-HTTP(S).
     public static func canonicalOrigin(for url: URL?) -> String? {
         guard let url = url, let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        guard comps.scheme?.lowercased() == "https",
+        guard let rawScheme = comps.scheme?.lowercased(),
+              (rawScheme == "https" || rawScheme == "http"),
               let host = comps.host?.lowercased(), !host.isEmpty,
               comps.user == nil, comps.password == nil else { return nil }
         let port = comps.port
-        if let p = port, p != 443 {
-            return "https://\(host):\(p)"
+        if rawScheme == "https" {
+            if let p = port, p != 443 {
+                return "https://\(host):\(p)"
+            } else {
+                return "https://\(host)"
+            }
         } else {
-            return "https://\(host)"
+            if let p = port, p != 80 {
+                return "http://\(host):\(p)"
+            } else {
+                return "http://\(host)"
+            }
         }
     }
 
@@ -104,7 +113,7 @@ public enum SiteCredentialStore {
             status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: passwordData] as CFDictionary)
         } else {
             q[kSecValueData as String] = passwordData
-            q[kSecAttrLabel as String] = "HTD 사이트 계정"
+            q[kSecAttrLabel as String] = "HTT 사이트 계정"
             q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             status = SecItemAdd(q as CFDictionary, nil)
         }
@@ -270,7 +279,7 @@ public final class SiteAutofill {
                     }
                     if (effectiveTarget !== '' && effectiveTarget !== '_self') return null;
 
-                    // Validate form action: must resolve to valid same-origin HTTPS
+                    // Validate form action: must resolve to valid same-origin HTTP or HTTPS
                     // Account for document.baseURI and form.action
                     var rawAction = form.getAttribute('action');
                     var baseForAction = document.baseURI || window.location.href;
@@ -280,7 +289,7 @@ public final class SiteAutofill {
                     } catch(e) {
                         return null;
                     }
-                    if (resolvedActionUrl.protocol !== 'https:' || resolvedActionUrl.origin !== expectedOrigin) {
+                    if ((resolvedActionUrl.protocol !== 'https:' && resolvedActionUrl.protocol !== 'http:') || resolvedActionUrl.origin !== expectedOrigin) {
                         return null;
                     }
 
@@ -301,7 +310,7 @@ public final class SiteAutofill {
                             var bAction = btn.getAttribute('formaction');
                             try {
                                 var resolvedBtnAction = new URL(bAction !== null ? bAction : '', baseForAction);
-                                if (resolvedBtnAction.protocol !== 'https:' || resolvedBtnAction.origin !== expectedOrigin) {
+                                if ((resolvedBtnAction.protocol !== 'https:' && resolvedBtnAction.protocol !== 'http:') || resolvedBtnAction.origin !== expectedOrigin) {
                                     return null;
                                 }
                             } catch(e) {
@@ -560,7 +569,7 @@ struct SiteCredentialManagementSheet: View {
                 .foregroundColor(palette.textColor)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("• HTTPS 보안 주소(포트 포함)별로 계정을 macOS 키체인에 안전하게 저장합니다.")
+                Text("• HTTP·HTTPS 사이트 주소(포트 포함)별로 계정을 macOS 키체인에 안전하게 저장합니다.")
                 Text("• 지원되는 양식에서 사용자가 로그인/제출한 후 저장을 제안할 수 있으며, 사용자 동의 없이 임의로 저장하지 않습니다.")
                 Text("• 저장된 비밀번호는 암호화되어 보호되며 화면이나 로그에 노출되지 않습니다.")
             }
@@ -672,7 +681,7 @@ struct SiteCredentialManagementSheet: View {
                 .background(palette.surfaceColor)
                 .cornerRadius(8)
             } else {
-                Text("HTTPS 페이지가 열려 있을 때 현재 사이트 계정을 저장할 수 있습니다.")
+                Text("HTTP·HTTPS 페이지가 열려 있을 때 현재 사이트 계정을 저장할 수 있습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

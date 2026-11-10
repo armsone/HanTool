@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
     func makeNSView(context: Context) -> StyleInspectorView {
@@ -173,10 +174,19 @@ public struct MainView: View {
     #if HTT_HOST
     @ObservedObject private var hostExport = HTDHostExport.shared
     private var hostedToolID: String? { hostExport.hostedToolID }
+    private func selectTool(_ id: String) { hostExport.selectToolFromSidebar(id) }
+    private func clearHostedTool() { hostExport.clearHostedTool() }
     #else
     private var hostedToolID: String? { nil }
+    private func selectTool(_ id: String) {}
+    private func clearHostedTool() {}
     #endif
     var toolView: AnyView? = nil
+    @ObservedObject private var navModel = UnifiedNavigationModel.shared
+
+    private var activeQueueCount: Int {
+        appModel.jobs.filter { !$0.state.isTerminal || $0.state == .interrupted || $0.state == .selectionChanged }.count
+    }
 
     public init(appModel: AppModel, toolView: AnyView? = nil) {
         self.appModel = appModel
@@ -187,9 +197,7 @@ public struct MainView: View {
         #if HTT_HOST
         let isExpanded = (columnVisibility != .detailOnly)
         HSplitView {
-            SidebarView(appModel: appModel) {
-                projectRevealToken += 1
-            }
+            SidebarView(appModel: appModel, navModel: navModel)
             .frame(minWidth: isExpanded ? 200 : 0,
                    idealWidth: isExpanded ? 220 : 0,
                    maxWidth: isExpanded ? 260 : 0,
@@ -234,17 +242,23 @@ public struct MainView: View {
             if appModel.selectedTab == .saw {
                 hasOpenedSAW = true
             }
+            navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: appModel.selectedTab)
         }
-        .onChange(of: appModel.selectedTab) { newTab in
+        .onReceive(appModel.$selectedTab.dropFirst()) { newTab in
             if newTab == .saw {
                 hasOpenedSAW = true
             }
+            navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: newTab)
+        }
+        .onChange(of: hostExport.hostedToolID) { newID in
+            if newID == nil && navModel.destination == .tools && navModel.isToolsHubRoot {
+                return
+            }
+            navModel.syncFromExternal(hostedToolID: newID, selectedTab: appModel.selectedTab)
         }
         #else
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(appModel: appModel) {
-                projectRevealToken += 1
-            }
+            SidebarView(appModel: appModel, navModel: navModel)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
         } detail: {
             detailContentView
@@ -270,11 +284,13 @@ public struct MainView: View {
             if appModel.selectedTab == .saw {
                 hasOpenedSAW = true
             }
+            navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: appModel.selectedTab)
         }
-        .onChange(of: appModel.selectedTab) { newTab in
+        .onReceive(appModel.$selectedTab.dropFirst()) { newTab in
             if newTab == .saw {
                 hasOpenedSAW = true
             }
+            navModel.syncFromExternal(hostedToolID: hostedToolID, selectedTab: newTab)
         }
         #endif
     }
@@ -282,20 +298,72 @@ public struct MainView: View {
     private var detailContentView: some View {
         HStack(spacing: 0) {
             if columnVisibility == .detailOnly {
-                CompactSidebarRail(appModel: appModel, expand: {
+                CompactSidebarRail(appModel: appModel, navModel: navModel, expand: {
                     columnVisibility = .all
-                }, onRevealProject: {
-                    columnVisibility = .all
-                    projectRevealToken += 1
                 })
                 Divider()
             }
             GeometryReader { proxy in
             VStack(spacing: 0) {
-                if appModel.selectedTab != .browser && appModel.selectedTab != .pageVideos && appModel.selectedTab != .addressSearch && appModel.selectedTab != .ai && appModel.selectedTab != .saw && hostedToolID == nil {
+                if navModel.destination == .downloads {
+                    DownloadsHubHeaderView(
+                        activeTab: $navModel.downloadTab,
+                        activeQueueCount: activeQueueCount,
+                        onTabChanged: { tab in
+                            navModel.selectDownloadTab(tab, appModel: appModel, clearTool: clearHostedTool)
+                        },
+                        onStartWithURL: {
+                            navModel.navigateTo(destination: .browser, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            appModel.requestAddressFocus(for: appModel.browser, isExplicit: true)
+                        }
+                    )
+                    Divider()
                     HeaderAddressBar(appModel: appModel)
-                    Rectangle().fill(palette.borderColor).frame(height: 1)
+                    Divider()
+                } else if navModel.destination == .settings {
+                    SettingsHubHeaderView(
+                        activeTab: $navModel.settingsTab,
+                        onTabChanged: { tab in
+                            navModel.selectSettingsTab(tab, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        },
+                        onOpenInputTool: { toolID in
+                            if let tool = ToolCatalog.item(for: toolID) {
+                                navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            }
+                        },
+                        onOpenMacManagement: {
+                            if let tool = ToolCatalog.item(for: "macManagement") {
+                                navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            }
+                        },
+                        onOpenBrowser: {
+                            navModel.navigateTo(destination: .browser, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        }
+                    )
+                    Divider()
+                } else if navModel.destination == .tools && !navModel.isToolsHubRoot, let leafID = navModel.activeToolLeafID {
+                    let leafTitle = leafID == "home" ? "홈 요약" : (ToolCatalog.item(for: leafID)?.title ?? leafID)
+                    ToolLeafBreadcrumbBar(
+                        leafTitle: leafTitle,
+                        leafID: leafID,
+                        onBack: {
+                            navModel.backToToolsHub(clearTool: clearHostedTool)
+                        },
+                        onOpenSettings: {
+                            if leafID.hasPrefix("input.") {
+                                navModel.selectSettingsTab(.inputSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            } else if leafID == "macManagement" || leafID == "cleanUSB" {
+                                navModel.selectSettingsTab(.macSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            } else if leafID == "browser" {
+                                navModel.selectSettingsTab(.webSettings, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            } else {
+                                navModel.selectSettingsTab(.general, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                            }
+                        }
+                    )
+                    Divider()
                 }
+
                 if let feedback = appModel.dropFeedback {
                     HStack(spacing: 8) {
                         Image(systemName: "info.circle.fill")
@@ -330,66 +398,112 @@ public struct MainView: View {
                     .padding(.vertical, 8)
                     .background(palette.warnSoftColor)
                 }
+
                 ZStack(alignment: .topLeading) {
-                    SAWTeamBackgroundHosts(workspace: appModel.sawWorkspace, plannerHostMounted: hasOpenedSAW || appModel.selectedTab == .saw)
+                    SAWTeamBackgroundHosts(workspace: appModel.sawWorkspace, plannerHostMounted: hasOpenedSAW || navModel.destination == .planner)
                         .allowsHitTesting(false)
                     Rectangle().fill(palette.bgColor)
                         .allowsHitTesting(false)
 
-                    let isBrowserActive = appModel.selectedTab == .browser && hostedToolID == nil
+                    let isBrowserActive = navModel.destination == .browser && hostedToolID == nil
                     BrowserView(appModel: appModel)
                         .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
-                        .opacity(appModel.selectedTab == .browser ? 1 : 0)
+                        .opacity(isBrowserActive ? 1 : 0)
                         .allowsHitTesting(isBrowserActive)
                         .accessibilityHidden(!isBrowserActive)
 
-                    let isSawActive = appModel.selectedTab == .saw && hostedToolID == nil
-                    if hasOpenedSAW || appModel.selectedTab == .saw {
+                    let isSawActive = navModel.destination == .planner && hostedToolID == nil
+                    if hasOpenedSAW || navModel.destination == .planner {
                         SAWView(workspace: appModel.sawWorkspace, projectRevealToken: projectRevealToken) {
                             columnVisibility = .all
                         }
-                            .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
-                            .opacity(appModel.selectedTab == .saw ? 1 : 0)
-                            .allowsHitTesting(isSawActive)
-                            .accessibilityHidden(!isSawActive)
+                        .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                        .opacity(isSawActive ? 1 : 0)
+                        .allowsHitTesting(isSawActive)
+                        .accessibilityHidden(!isSawActive)
                     }
 
+                    let isAIActive = navModel.destination == .ai && hostedToolID == nil
+                    AIServiceSettingsView(appModel: appModel)
+                        .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                        .opacity(isAIActive ? 1 : 0)
+                        .allowsHitTesting(isAIActive)
+                        .accessibilityHidden(!isAIActive)
+
+                    let isDownloadsActive = navModel.destination == .downloads && hostedToolID == nil
+                    Group {
+                        if navModel.downloadTab == .queue {
+                            QueueListView(appModel: appModel)
+                        } else {
+                            HistoryListView(appModel: appModel)
+                        }
+                    }
+                    .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                    .opacity(isDownloadsActive ? 1 : 0)
+                    .allowsHitTesting(isDownloadsActive)
+                    .accessibilityHidden(!isDownloadsActive)
+
+                    let isToolsHubActive = navModel.destination == .tools && navModel.isToolsHubRoot && hostedToolID == nil
+                    ToolsHubView(
+                        onSelectTool: { tool in
+                            navModel.openToolItem(tool, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        },
+                        onOpenHome: {
+                            selectTool("home")
+                            navModel.destination = .tools
+                            navModel.isToolsHubRoot = false
+                            navModel.activeToolLeafID = "home"
+                        },
+                        onOpenSettings: {
+                            navModel.selectSettingsTab(.general, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        },
+                        onOpenServer: {
+                            navModel.navigateTo(destination: .server, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                        }
+                    )
+                    .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                    .opacity(isToolsHubActive ? 1 : 0)
+                    .allowsHitTesting(isToolsHubActive)
+                    .accessibilityHidden(!isToolsHubActive)
+
+                    let isNativeToolLeafActive = navModel.destination == .tools && !navModel.isToolsHubRoot && hostedToolID == nil
                     Group {
                         switch appModel.selectedTab {
-                        case .browser:
-                            EmptyView()
-                        case .queue:
-                            QueueListView(appModel: appModel)
-                        case .history:
-                            HistoryListView(appModel: appModel)
-                        case .settings:
-                            SettingsView(appModel: appModel)
-                        case .speed:
-                            SpeedTestView(appModel: appModel, connection: appModel.connection) {
-                                appModel.selectedTab = .browser
-                            }
                         case .pageVideos:
                             MediaCandidatePanel(appModel: appModel, model: appModel.browser) {
-                                appModel.selectedTab = .browser
+                                navModel.backToToolsHub(clearTool: clearHostedTool)
                             }
                         case .addressSearch:
                             AddressSearchSettingsView(store: appModel.preferences.addressSearch)
-                        case .ai:
-                            AIServiceSettingsView(appModel: appModel)
-                        case .saw:
+                        case .speed:
+                            SpeedTestView(appModel: appModel, connection: appModel.connection) {
+                                navModel.backToToolsHub(clearTool: clearHostedTool)
+                            }
+                        default:
                             EmptyView()
                         }
                     }
-                    .allowsHitTesting(hostedToolID == nil)
-                    .accessibilityHidden(hostedToolID != nil)
+                    .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                    .opacity(isNativeToolLeafActive ? 1 : 0)
+                    .allowsHitTesting(isNativeToolLeafActive)
+                    .accessibilityHidden(!isNativeToolLeafActive)
 
+                    let isWebSettingsActive = navModel.destination == .settings && navModel.settingsTab == .webSettings && hostedToolID == nil
+                    SettingsView(appModel: appModel)
+                        .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                        .opacity(isWebSettingsActive ? 1 : 0)
+                        .allowsHitTesting(isWebSettingsActive)
+                        .accessibilityHidden(!isWebSettingsActive)
+
+                    let isHostToolActive = hostedToolID != nil
                     if let hostTool = toolView {
                         hostTool
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(palette.bgColor)
-                            .zIndex(hostedToolID != nil ? 100 : -1)
-                            .allowsHitTesting(hostedToolID != nil)
-                            .accessibilityHidden(hostedToolID == nil)
+                            .zIndex(isHostToolActive ? 100 : -1)
+                            .opacity(isHostToolActive ? 1 : 0)
+                            .allowsHitTesting(isHostToolActive)
+                            .accessibilityHidden(!isHostToolActive)
                     }
                 }
                 .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
@@ -399,24 +513,6 @@ public struct MainView: View {
             .frame(width: max(proxy.size.width, 0), height: max(proxy.size.height, 0), alignment: .topLeading)
             .background(palette.bgColor)
             .clipped()
-            }
-        }
-        .alert(isPresented: $appModel.showingAlert) {
-            Alert(
-                title: Text("안내"),
-                message: Text(appModel.alertMessage ?? ""),
-                dismissButton: .default(Text("확인"))
-            )
-        }
-        .onAppear {
-            _ = appModel.sawWorkspace
-            if appModel.selectedTab == .saw {
-                hasOpenedSAW = true
-            }
-        }
-        .onChange(of: appModel.selectedTab) { newTab in
-            if newTab == .saw {
-                hasOpenedSAW = true
             }
         }
     }
@@ -517,9 +613,10 @@ public struct MainView: View {
 
 // MARK: - Compact sidebar rail
 
-/// Icon-only rail shown when the native sidebar is collapsed (`.detailOnly`). Same tabs and order as SidebarView.
+/// Icon-only rail shown when the native sidebar is collapsed (`.detailOnly`). Native 6+2 navigation.
 struct CompactSidebarRail: View {
     @ObservedObject var appModel: AppModel
+    @ObservedObject var navModel: UnifiedNavigationModel
     var expand: () -> Void
     var onRevealProject: (() -> Void)? = nil
     @Environment(\.bkPalette) private var palette
@@ -535,16 +632,15 @@ struct CompactSidebarRail: View {
     private func clearHostedTool() {}
     #endif
 
-    private static let primaryTabs: [TabSelection] = [.browser, .ai, .saw, .queue, .history]
-    private static let webToolsTabs: [TabSelection] = [.pageVideos, .addressSearch, .speed, .settings]
+    private static let topDestinations: [MainNavDestination] = [
+        .browser, .downloads, .planner, .ai, .tools, .server
+    ]
+    private static let bottomDestinations: [MainNavDestination] = [
+        .settings, .help
+    ]
 
     private var activeQueueCount: Int {
         appModel.jobs.filter { !$0.state.isTerminal || $0.state == .interrupted || $0.state == .selectionChanged }.count
-    }
-
-    private func title(_ tab: TabSelection) -> String {
-        if tab == .saw { return "플래너" }
-        return tab == .queue ? "다운로드" : tab.rawValue
     }
 
     var body: some View {
@@ -554,47 +650,30 @@ struct CompactSidebarRail: View {
                     .frame(width: 36, height: 32)
             }
             .buttonStyle(.plain)
+            .contentShape(Rectangle())
             .help("사이드바 펼치기")
             .accessibilityLabel("사이드바 펼치기")
             .padding(.top, 8)
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 6) {
-                    ForEach(Self.primaryTabs) { tab in
-                        railButton(tab)
-                        if tab == .saw {
-                            CompactProjectRailSection(workspace: appModel.sawWorkspace, appModel: appModel, onRevealProject: onRevealProject)
-                            railDivider
-                        } else if tab == .history {
-                            railDivider
-                        }
-                    }
-
-                    ForEach(Self.webToolsTabs) { tab in
-                        railButton(tab)
-                    }
-
-                    railDivider
-
-                    railHostToolButton(id: "home", title: "홈 요약", icon: "house")
-                    railHostToolButton(id: "mail", title: "메일·이미지 번역", icon: "envelope")
-                    railHostToolButton(id: "screen", title: "화면 번역", icon: "viewfinder")
-                    railHostToolButton(id: "browser", title: "번역 확장 연동", icon: "puzzlepiece.extension")
-
-                    railDivider
-
-                    railHostToolButton(id: "input.general", title: "입력 도우미", icon: "keyboard")
-                    railHostToolButton(id: "macManagement", title: "Mac 관리", icon: "desktopcomputer")
-                    railHostToolButton(id: "cleanUSB", title: "USB 정리", icon: "externaldrive")
-                    railHostToolButton(id: "serverStatus", title: "서버 현황", icon: "chart.bar.xaxis")
-
-                    railDivider
-
-                    railHostToolButton(id: "general", title: "일반 설정", icon: "gearshape.2")
-                    railHostToolButton(id: "help", title: "사용 안내", icon: "questionmark.circle")
+            VStack(spacing: 6) {
+                ForEach(Self.topDestinations) { dest in
+                    railButton(dest)
                 }
-                .padding(.vertical, 8)
             }
+            .padding(.top, 6)
+
+            Spacer()
+
+            Divider()
+                .frame(width: 28)
+                .padding(.vertical, 4)
+
+            VStack(spacing: 6) {
+                ForEach(Self.bottomDestinations) { dest in
+                    railButton(dest)
+                }
+            }
+            .padding(.bottom, 10)
         }
         .frame(width: 56)
         .frame(maxHeight: .infinity)
@@ -603,74 +682,42 @@ struct CompactSidebarRail: View {
         .urlDropTarget(appModel: appModel)
     }
 
-    private var railDivider: some View {
-        Divider()
-            .frame(width: 28)
-            .padding(.vertical, 2)
-    }
-
     @ViewBuilder
-    private func railButton(_ tab: TabSelection) -> some View {
-        let selected = appModel.selectedTab == tab && hostedToolID == nil
+    private func railButton(_ dest: MainNavDestination) -> some View {
+        let isSelected = navModel.destination == dest
         Button {
-            expand()
-            clearHostedTool()
-            appModel.selectedTab = tab
-        } label: {
-            Group {
-                if tab == .saw {
-                    SAWTelescopeIcon()
-                        .frame(width: 18, height: 18)
-                } else {
-                    Image(systemName: tab.iconName)
-                        .font(.system(size: 17))
-                }
-            }
-            .foregroundColor(selected ? palette.accentColor : palette.textColor.opacity(0.8))
-            .frame(width: 40, height: 36)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(selected ? palette.accentSoftColor : Color.clear)
+            navModel.navigateTo(
+                destination: dest,
+                appModel: appModel,
+                selectTool: selectTool,
+                clearTool: clearHostedTool
             )
-            .overlay(alignment: .topTrailing) {
-                if tab == .queue && activeQueueCount > 0 {
-                    Text("\(activeQueueCount)")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(palette.accentColor)
-                        .padding(.horizontal, 4)
-                        .background(Capsule().fill(palette.accentSoftColor))
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .help(tab == .queue ? "다운로드 — 웹 주소를 끌어다 놓으면 분석 후 바로 다운로드합니다" : title(tab))
-        .accessibilityLabel(tab == .queue && activeQueueCount > 0 ? "\(title(tab)), 진행 중 \(activeQueueCount)개" : title(tab))
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    @ViewBuilder
-    private func railHostToolButton(id: String, title: String, icon: String) -> some View {
-        let selected = hostedToolID == id
-        Button {
-            expand()
-            selectTool(id)
         } label: {
-            Image(systemName: icon)
+            Image(systemName: dest.iconName)
                 .font(.system(size: 16))
-                .foregroundColor(selected ? palette.accentColor : palette.textColor.opacity(0.8))
+                .foregroundColor(isSelected ? palette.accentColor : palette.textColor.opacity(0.8))
                 .frame(width: 40, height: 36)
+                .contentShape(Rectangle())
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(selected ? palette.accentSoftColor : Color.clear)
+                        .fill(isSelected ? palette.accentSoftColor : Color.clear)
                 )
+                .overlay(alignment: .topTrailing) {
+                    if dest == .downloads && activeQueueCount > 0 {
+                        Text("\(activeQueueCount)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(palette.accentColor)
+                            .padding(.horizontal, 4)
+                            .background(Capsule().fill(palette.accentSoftColor))
+                    }
+                }
         }
         .buttonStyle(.plain)
-        .help(title)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(dest == .downloads && activeQueueCount > 0 ? "다운로드 (\(activeQueueCount)개 진행 중)" : dest.rawValue)
+        .accessibilityLabel(dest == .downloads && activeQueueCount > 0 ? "\(dest.rawValue), 진행 중 \(activeQueueCount)개" : dest.rawValue)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 }
-
 private struct CompactProjectRailSection: View {
     @ObservedObject var workspace: SAWWorkspace
     @ObservedObject var appModel: AppModel
@@ -820,10 +867,8 @@ private struct CompactProjectSessionRow: View {
 
 struct SidebarView: View {
     @ObservedObject var appModel: AppModel
-    @ObservedObject private var workspace: SAWWorkspace
+    @ObservedObject var navModel: UnifiedNavigationModel
     @Environment(\.bkPalette) var palette
-    var onRevealProject: (() -> Void)? = nil
-    @State private var isProjectsExpanded: Bool = true
 
     #if HTT_HOST
     @ObservedObject private var hostExport = HTDHostExport.shared
@@ -836,238 +881,97 @@ struct SidebarView: View {
     private func clearHostedTool() {}
     #endif
 
-    init(appModel: AppModel, onRevealProject: (() -> Void)? = nil) {
-        self.appModel = appModel
-        self._workspace = ObservedObject(wrappedValue: appModel.sawWorkspace)
-        self.onRevealProject = onRevealProject
-    }
+    private static let topDestinations: [MainNavDestination] = [
+        .browser, .downloads, .planner, .ai, .tools, .server
+    ]
+    private static let bottomDestinations: [MainNavDestination] = [
+        .settings, .help
+    ]
 
-    var activeQueueCount: Int {
+    private var activeQueueCount: Int {
         appModel.jobs.filter { !$0.state.isTerminal || $0.state == .interrupted || $0.state == .selectionChanged }.count
     }
 
-    var historyCount: Int {
-        appModel.jobs.filter { $0.state == .completed || $0.state == .completedWithSubtitleFailure }.count
-    }
-
-    private var tabSelectionBinding: Binding<TabSelection?> {
-        Binding<TabSelection?>(
-            get: {
-                hostedToolID != nil ? nil : appModel.selectedTab
-            },
-            set: { newTab in
-                guard let tab = newTab else { return }
-                clearHostedTool()
-                appModel.selectedTab = tab
-            }
-        )
+    init(appModel: AppModel, navModel: UnifiedNavigationModel) {
+        self.appModel = appModel
+        self.navModel = navModel
     }
 
     var body: some View {
-        List(selection: tabSelectionBinding) {
-            Section(header: Text("웹 및 작업").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                NavigationLink(value: TabSelection.browser) {
-                    Label(TabSelection.browser.rawValue, systemImage: TabSelection.browser.iconName)
-                }
-                .accessibilityLabel("브라우저: 사이트를 열고 영상을 골라 저장")
-
-                NavigationLink(value: TabSelection.ai) {
-                    Label(TabSelection.ai.rawValue, systemImage: TabSelection.ai.iconName)
-                }
-
-                HStack(spacing: 0) {
-                    NavigationLink(value: TabSelection.saw) {
-                        HStack(spacing: 8) {
-                            SAWTelescopeIcon()
-                                .frame(width: 18, height: 18)
-                                .foregroundColor(appModel.selectedTab == .saw && hostedToolID == nil ? palette.accentColor : palette.textColor)
-                            Text("플래너")
-                                .lineLimit(1)
-                        }
-                    }
-                    .help("플래너")
-                    .accessibilityLabel("플래너")
-
-                    Spacer(minLength: 4)
-
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isProjectsExpanded.toggle()
-                        }
-                    } label: {
-                        Image(systemName: isProjectsExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(palette.textColor.opacity(0.7))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isProjectsExpanded ? "프로젝트 접기" : "프로젝트 펼치기")
-                    .accessibilityLabel(isProjectsExpanded ? "프로젝트 접기" : "프로젝트 펼치기")
-                }
-
-                if isProjectsExpanded {
-                    let activeProjects = workspace.store.projects.filter { !$0.archived }
-                    if activeProjects.isEmpty {
-                        Text("진행 중인 프로젝트가 없습니다.")
-                            .font(.system(size: 12))
-                            .foregroundColor(palette.textColor.opacity(0.6))
-                            .padding(.leading, 16)
-                    } else {
-                        ForEach(activeProjects) { proj in
-                            let isSelected = (proj.id == workspace.selectedProjectID && appModel.selectedTab == .saw && hostedToolID == nil)
-                            SAWProjectRowView(
-                                project: proj,
-                                workspace: workspace,
-                                isSelected: isSelected,
-                                isExpanded: false,
-                                onToggle: {
-                                    clearHostedTool()
-                                    workspace.selectProject(proj.id)
-                                    appModel.selectedTab = .saw
-                                    let targetSess = workspace.session(for: proj.id)
-                                    if targetSess.tabs.isEmpty {
-                                        targetSess.newTab()
-                                    }
-                                    onRevealProject?()
-                                }
-                            )
-                            .padding(.leading, 16)
-                        }
-                    }
-
-                    Button {
-                        clearHostedTool()
-                        appModel.selectedTab = .saw
-                        let p = workspace.createProject(title: "새 프로젝트", goal: "")
-                        let sess = workspace.session(for: p.id)
-                        if sess.tabs.isEmpty { sess.newTab() }
-                        onRevealProject?()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text("새 프로젝트")
-                                .font(.system(size: 12))
-                        }
-                        .foregroundColor(palette.accentColor)
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 16)
-                    .help("새 프로젝트 생성")
-                    .accessibilityLabel("새 프로젝트 생성")
-                }
-
-                NavigationLink(value: TabSelection.queue) {
-                    HStack {
-                        Label("다운로드", systemImage: TabSelection.queue.iconName)
-                        Spacer()
-                        if activeQueueCount > 0 {
-                            Text("\(activeQueueCount)")
-                                .font(.caption.bold())
-                                .foregroundColor(palette.accentColor)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(palette.accentSoftColor))
-                        }
-                    }
-                }
-                .help("웹 주소를 끌어다 놓으면 분석 후 바로 다운로드합니다")
-
-                NavigationLink(value: TabSelection.history) {
-                    HStack {
-                        Label(TabSelection.history.rawValue, systemImage: TabSelection.history.iconName)
-                        Spacer()
-                        if historyCount > 0 {
-                            Text("\(historyCount)")
-                                .font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(palette.surface2Color))
-                        }
-                    }
+        VStack(spacing: 0) {
+            VStack(spacing: 3) {
+                ForEach(Self.topDestinations) { dest in
+                    sidebarRow(dest)
                 }
             }
+            .padding(.top, 10)
+            .padding(.horizontal, 10)
 
-            Section(header: Text("웹 도구 및 설정").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                NavigationLink(value: TabSelection.pageVideos) {
-                    Label(TabSelection.pageVideos.rawValue, systemImage: TabSelection.pageVideos.iconName)
-                }
+            Spacer()
 
-                NavigationLink(value: TabSelection.addressSearch) {
-                    Label(TabSelection.addressSearch.rawValue, systemImage: TabSelection.addressSearch.iconName)
-                }
+            Divider()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
 
-                NavigationLink(value: TabSelection.speed) {
-                    Label(TabSelection.speed.rawValue, systemImage: TabSelection.speed.iconName)
-                }
-
-                NavigationLink(value: TabSelection.settings) {
-                    Label(TabSelection.settings.rawValue, systemImage: TabSelection.settings.iconName)
+            VStack(spacing: 3) {
+                ForEach(Self.bottomDestinations) { dest in
+                    sidebarRow(dest)
                 }
             }
-
-            Section(header: Text("번역 및 워크벤치").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                hostToolRow(id: "home", title: "홈 요약", icon: "house")
-                hostToolRow(id: "mail", title: "메일·이미지 번역", icon: "envelope")
-                hostToolRow(id: "screen", title: "화면 번역", icon: "viewfinder")
-                hostToolRow(id: "browser", title: "번역 확장 연동", icon: "puzzlepiece.extension")
-            }
-
-            Section(header: Text("입력 도우미").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                hostToolRow(id: "input.appLanguage", title: "앱별 언어 전환", icon: "character.bubble")
-                hostToolRow(id: "input.koreanTypo", title: "한글 오타 교정", icon: "pencil.and.outline")
-                hostToolRow(id: "input.personalDictionary", title: "개인 사전", icon: "book")
-                hostToolRow(id: "input.trackpad", title: "트랙패드 잠금", icon: "hand.raised")
-                hostToolRow(id: "input.general", title: "입력 설정", icon: "keyboard")
-            }
-
-            Section(header: Text("Mac 관리 및 서버").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                hostToolRow(id: "macManagement", title: "Mac 관리", icon: "desktopcomputer")
-                hostToolRow(id: "macManagementSettings", title: "Mac 관리 설정", icon: "slider.horizontal.3")
-                hostToolRow(id: "cleanUSB", title: "USB 드라이브 정리", icon: "externaldrive")
-                hostToolRow(id: "serverStatus", title: "서버 현황", icon: "chart.bar.xaxis")
-            }
-
-            Section(header: Text("설정 및 지원").font(.caption).foregroundColor(palette.textColor.opacity(0.6))) {
-                hostToolRow(id: "general", title: "일반 설정", icon: "gearshape.2")
-                hostToolRow(id: "help", title: "사용 안내", icon: "questionmark.circle")
-            }
+            .padding(.bottom, 12)
+            .padding(.horizontal, 10)
         }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
+        .frame(minWidth: 200, maxWidth: 260)
+        .frame(maxHeight: .infinity)
         .background(palette.cardColor)
         .contentShape(Rectangle())
         .urlDropTarget(appModel: appModel)
     }
 
-    private func hostToolRow(id: String, title: String, icon: String) -> some View {
-        let isSelected = hostedToolID == id
-        return Button {
-            selectTool(id)
+    @ViewBuilder
+    private func sidebarRow(_ dest: MainNavDestination) -> some View {
+        let isSelected = navModel.destination == dest
+        Button {
+            navModel.navigateTo(
+                destination: dest,
+                appModel: appModel,
+                selectTool: selectTool,
+                clearTool: clearHostedTool
+            )
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .frame(width: 18, height: 18)
+            HStack(spacing: 10) {
+                Image(systemName: dest.iconName)
+                    .font(.system(size: 15))
+                    .frame(width: 20, height: 20)
                     .foregroundColor(isSelected ? palette.accentColor : palette.textColor)
-                Text(title)
-                    .font(.system(size: 13))
+
+                Text(dest.rawValue)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? palette.accentColor : palette.textColor)
                     .lineLimit(1)
+
                 Spacer()
+
+                if dest == .downloads && activeQueueCount > 0 {
+                    Text("\(activeQueueCount)")
+                        .font(.caption.bold())
+                        .foregroundColor(palette.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(palette.accentSoftColor))
+                }
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .contentShape(Rectangle())
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 7)
                     .fill(isSelected ? palette.accentSoftColor : Color.clear)
             )
         }
         .buttonStyle(.plain)
-        .help(title)
-        .accessibilityLabel(title)
+        .help(dest == .downloads && activeQueueCount > 0 ? "다운로드 (\(activeQueueCount)개 진행 중)" : dest.rawValue)
+        .accessibilityLabel(dest == .downloads && activeQueueCount > 0 ? "\(dest.rawValue), 진행 중 \(activeQueueCount)개" : dest.rawValue)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 }
@@ -1158,7 +1062,6 @@ struct HeaderAddressBar: View {
         .urlDropTarget(appModel: appModel)
     }
 }
-
 // MARK: - HTTPS 연결 도움 (the one switch + blocked-connection recovery)
 
 /// The only user control of connection assist: proxy + TLS first-record split together. Shown in the header of

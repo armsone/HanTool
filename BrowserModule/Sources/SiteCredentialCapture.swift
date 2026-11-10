@@ -42,7 +42,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 const action = override('formaction', form.action);
                 try {
                     const destination = new URL(action || location.href, document.baseURI);
-                    if (destination.origin !== location.origin || destination.protocol !== 'https:') return false;
+                    if (destination.origin !== location.origin || (destination.protocol !== 'https:' && destination.protocol !== 'http:')) return false;
                 } catch (_) { return false; }
                 const base = document.querySelector('base[target]');
                 const target = (override('formtarget', form.getAttribute('target')) || base?.target || '_self').trim();
@@ -125,7 +125,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
 
                 var form = e.target;
                 if (!form || form.tagName !== 'FORM') return;
-                if (window.location.protocol !== 'https:') return;
+                if (window.location.protocol !== 'https:' && window.location.protocol !== 'http:') return;
 
                 var submitter = e.submitter || null;
                 if (!isEligibleForm(form, submitter)) return;
@@ -151,7 +151,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 if (!isVisible(target)) return;
 
                 var form = target.form;
-                if (window.location.protocol !== 'https:') return;
+                if (window.location.protocol !== 'https:' && window.location.protocol !== 'http:') return;
                 if (!isEligibleForm(form, null)) return;
                 if (isSignupForm(form)) return;
 
@@ -240,7 +240,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
               message.webView === webView else { return }
 
         guard let currentURL = webView.url,
-              currentURL.scheme?.lowercased() == "https",
+              let scheme = currentURL.scheme?.lowercased(),
+              (scheme == "https" || scheme == "http"),
               let popupURL = model.popupCommittedURL,
               popupURL == currentURL else { return }
 
@@ -380,7 +381,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                           currentWindow === window,
                           model.generation == generation,
                           let currentURL = wv.url,
-                          currentURL.scheme?.lowercased() == "https",
+                          let scheme = currentURL.scheme?.lowercased(),
+                          (scheme == "https" || scheme == "http"),
                           let targetCommitted = committedURL,
                           model.popupCommittedURL == targetCommitted,
                           currentURL == targetCommitted,
@@ -477,7 +479,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
               window.isKeyWindow,
               window.attachedSheet == nil,
               let currentURL = webView.url,
-              currentURL.scheme?.lowercased() == "https",
+              let scheme = currentURL.scheme?.lowercased(),
+              (scheme == "https" || scheme == "http"),
               let popupURL = model.popupCommittedURL,
               popupURL == currentURL,
               let origin = SiteCredentialStore.canonicalOrigin(for: currentURL) else { return }

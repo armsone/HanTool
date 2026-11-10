@@ -20,12 +20,52 @@ public final class CCMBIntegration: ObservableObject {
     public static let sourceNAS = "nas"
     public static let sourceLocalMac = "localMac"
 
+    // MARK: - 연결 상태
+    public enum ConnectionState: Equatable {
+        case idle
+        case checking
+        case connected(authenticated: Bool, role: String?)
+        case failed(String)
+    }
+
     // MARK: - 발행 상태
     @Published public private(set) var isEnabled: Bool
     @Published public private(set) var showMenuBar: Bool
     @Published public private(set) var serverTarget: String
     @Published public private(set) var dataSource: String
-    @Published public var targetDraft: String
+    @Published public var targetDraft: String {
+        didSet {
+            if Self.normalizedTarget(oldValue) != Self.normalizedTarget(targetDraft) {
+                invalidateAsyncWork(closeLogin: true)
+            }
+        }
+    }
+    @Published public private(set) var connectionState: ConnectionState = .idle
+
+    // MARK: - 비동기 작업 무효화 (probe/login)
+    private var probeGeneration = 0
+    private var loginGeneration = 0
+    private var probeTask: Task<Void, Never>?
+
+    /// 진행 중인 probe를 취소하고 이전 세대의 결과 적용을 막습니다. closeLogin이면 로그인 창/콜백도 무효화합니다.
+    private func invalidateAsyncWork(closeLogin: Bool) {
+        probeGeneration &+= 1
+        probeTask?.cancel()
+        probeTask = nil
+        connectionState = .idle
+        if closeLogin {
+            loginGeneration &+= 1
+            NASLoginWindowController.closeActive()
+        }
+    }
+
+    private static func normalizedTarget(_ target: String) -> String {
+        switch validateTarget(target) {
+        case .empty: return ""
+        case .valid(let validated): return validated
+        case .invalid: return target.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
 
     // MARK: - 외부 호스트 매니저 약한 참조
     private weak var updater: UpdaterManager?
@@ -50,6 +90,7 @@ public final class CCMBIntegration: ObservableObject {
     func setup(updater: UpdaterManager?, loginItem: LoginItemManager?) {
         self.updater = updater
         self.loginItem = loginItem
+        HTTCCMBProviderPageRouter.openPage = { url in EmbeddedBrowser.open(urls: [url]) }
     }
 
     // MARK: - 수명주기 제어
@@ -65,6 +106,7 @@ public final class CCMBIntegration: ObservableObject {
     public func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
+        invalidateAsyncWork(closeLogin: true)
 
         if enabled {
             configureModuleSettings()
@@ -86,13 +128,10 @@ public final class CCMBIntegration: ObservableObject {
     /// 데이터 소스 전환 ("nas" 또는 "localMac")
     public func setDataSource(_ source: String) {
         guard source == Self.sourceNAS || source == Self.sourceLocalMac else { return }
+        invalidateAsyncWork(closeLogin: true)
         dataSource = source
         UserDefaults.standard.set(source, forKey: Self.dataSourceKey)
         HTTCCMBRuntime.setDataSource(source)
-
-        if isEnabled {
-            restartRuntime()
-        }
     }
 
     /// 대상 서버 초안(targetDraft) 검증 및 적용
@@ -101,23 +140,101 @@ public final class CCMBIntegration: ObservableObject {
         let result = Self.validateTarget(targetDraft)
         switch result {
         case .empty:
+            invalidateAsyncWork(closeLogin: true)
             serverTarget = ""
             UserDefaults.standard.set("", forKey: Self.serverTargetKey)
             HTTCCMBRuntime.setServerTarget("")
-            if isEnabled {
-                restartRuntime()
-            }
+            connectionState = .idle
             return true
         case .valid(let validated):
             serverTarget = validated
             UserDefaults.standard.set(validated, forKey: Self.serverTargetKey)
             HTTCCMBRuntime.setServerTarget(validated)
-            if isEnabled {
-                restartRuntime()
-            }
+            checkConnection()
             return true
         case .invalid:
             return false
+        }
+    }
+
+    // MARK: - 놀이터 서버 연결 및 로그인 제어
+
+    /// 놀이터 서버 세션 상태를 비동기로 확인합니다 (GET /api/session).
+    public func checkConnection() {
+        invalidateAsyncWork(closeLogin: false)
+        let target = targetDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else {
+            connectionState = .idle
+            return
+        }
+
+        let validation = Self.validateTarget(target)
+        guard case .valid(let validated) = validation else {
+            connectionState = .failed(validation.errorMessage ?? "올바른 놀이터 HTTPS 주소를 입력하세요.")
+            return
+        }
+
+        connectionState = .checking
+        let generation = probeGeneration
+        probeTask = Task { @MainActor in
+            do {
+                let session = try await NASHTTPClient.shared.fetchSession(target: validated)
+                guard self.isCurrentProbe(generation, target: validated) else { return }
+                self.connectionState = .connected(authenticated: session.authenticated, role: session.role)
+                if session.authenticated, self.isAppliedNASTarget(validated) {
+                    HTTCCMBRuntime.triggerNASRefresh()
+                }
+            } catch let error as NASFetchError {
+                guard self.isCurrentProbe(generation, target: validated) else { return }
+                if case .loginRequired = error {
+                    self.connectionState = .connected(authenticated: false, role: nil)
+                } else {
+                    self.connectionState = .failed(error.label)
+                }
+            } catch {
+                guard self.isCurrentProbe(generation, target: validated) else { return }
+                self.connectionState = .failed("연결 실패")
+            }
+        }
+    }
+
+    /// 현재 NAS 소스이며 같은 세대/정규화 대상일 때만 probe 결과를 적용할 수 있습니다.
+    private func isCurrentProbe(_ generation: Int, target: String) -> Bool {
+        !Task.isCancelled
+            && generation == probeGeneration
+            && dataSource == Self.sourceNAS
+            && Self.normalizedTarget(targetDraft) == target
+    }
+
+    /// 적용된(저장된) 대상이 요청 대상과 같고 NAS 소스·활성 상태일 때만 갱신을 트리거할 수 있습니다.
+    private func isAppliedNASTarget(_ target: String) -> Bool {
+        isEnabled
+            && dataSource == Self.sourceNAS
+            && Self.normalizedTarget(serverTarget) == Self.normalizedTarget(target)
+    }
+
+    /// 내장 브라우저 창을 띄워 사용자가 놀이터 웹 화면에서 직접 로그인하도록 합니다.
+    public func openLoginWindow() {
+        let raw = (targetDraft.isEmpty ? serverTarget : targetDraft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty, dataSource == Self.sourceNAS,
+              case .valid(let target) = Self.validateTarget(raw) else { return }
+
+        let generation = loginGeneration
+        NASLoginWindowController.show(target: target) { [weak self] success in
+            guard let self,
+                  generation == self.loginGeneration,
+                  self.dataSource == Self.sourceNAS,
+                  Self.normalizedTarget(self.targetDraft.isEmpty ? self.serverTarget : self.targetDraft) == target
+            else { return }
+            if success {
+                self.invalidateAsyncWork(closeLogin: false)
+                self.connectionState = .connected(authenticated: true, role: nil)
+                if self.isAppliedNASTarget(target) {
+                    HTTCCMBRuntime.triggerNASRefresh()
+                }
+            } else {
+                self.checkConnection()
+            }
         }
     }
 
@@ -129,6 +246,7 @@ public final class CCMBIntegration: ObservableObject {
 
     /// 런타임 종료 (호스트 앱 종료 시)
     public func stop() {
+        invalidateAsyncWork(closeLogin: true)
         HTTCCMBRuntime.stop()
     }
 
@@ -169,6 +287,7 @@ public final class CCMBIntegration: ObservableObject {
             },
             onDataSourceChanged: { [weak self] newSource in
                 guard let self, self.dataSource != newSource else { return }
+                self.invalidateAsyncWork(closeLogin: true)
                 self.dataSource = newSource
                 UserDefaults.standard.set(newSource, forKey: Self.dataSourceKey)
             }
@@ -188,7 +307,7 @@ public final class CCMBIntegration: ObservableObject {
             return isRunning ? "실행 중 (이 Mac)" : "대기 중 (이 Mac)"
         }
         if serverTarget.isEmpty {
-            return "대상 미설정"
+            return "놀이터 주소 미설정"
         }
         return isRunning ? "실행 중 (\(serverTarget))" : "대기 중 (\(serverTarget))"
     }
@@ -201,9 +320,9 @@ public final class CCMBIntegration: ObservableObject {
             return isRunning ? "이 Mac의 AI 사용량을 확인하고 있습니다." : "이 Mac의 AI 사용량 조회 준비 중입니다."
         }
         if serverTarget.isEmpty {
-            return "대상 서버가 설정되지 않았습니다. SSH 호스트를 입력해 주세요."
+            return "놀이터 서버 주소가 설정되지 않았습니다. HTTPS 주소를 입력해 주세요."
         }
-        return isRunning ? "SSH 호스트(\(serverTarget))로부터 서버 상태를 수집하고 있습니다." : "SSH 호스트(\(serverTarget)) 연결 준비 중입니다."
+        return isRunning ? "놀이터 서버(\(serverTarget))로부터 서버 상태를 수집하고 있습니다." : "놀이터 서버(\(serverTarget)) 연결 준비 중입니다."
     }
 
     // MARK: - 대상 서버 입력 검증
@@ -228,38 +347,18 @@ public final class CCMBIntegration: ObservableObject {
         }
     }
 
-    /// 엄격한 SSH 대상 검증:
-    /// - 빈 값은 미설정(연결 시도 없음) 상태로 허용
-    /// - 첫 글자 영문/숫자, 이후 영문·숫자·마침표(.)·하이픈(-)·밑줄(_)만 허용 (최대 253자)
-    /// - 옵션 주입 방지(선행 하이픈 차단), 공백/제어문자 차단, HTTP/SSH URL 스키마 및 슬래시 차단
+    /// 놀이터 서버 대상 주소 검증 (HTTPS 필수, 로컬 루프백 제외)
     public static func validateTarget(_ target: String) -> TargetValidationResult {
         let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             return .empty
         }
 
-        if target != trimmed || target.contains(where: { $0.isWhitespace || $0.isNewline }) {
-            return .invalid("공백이나 줄바꿈 문자는 포함할 수 없습니다.")
+        let result = NASURLValidator.validate(urlString: trimmed)
+        if result.isValid, let normalized = result.url {
+            return .valid(normalized.absoluteString)
+        } else {
+            return .invalid(result.message ?? "올바른 놀이터 HTTPS 주소를 입력하세요.")
         }
-
-        if target.hasPrefix("-") {
-            return .invalid("SSH 옵션 주입 방지를 위해 하이픈(-)으로 시작할 수 없습니다.")
-        }
-
-        if target.contains("://") || target.contains("/") {
-            return .invalid("URL 스키마(http://, ssh://)나 슬래시는 지원되지 않습니다. SSH 호스트 별칭 또는 호스트명을 입력하세요.")
-        }
-
-        if target.count > 253 {
-            return .invalid("호스트 대상은 최대 253자까지 가능합니다.")
-        }
-
-        let pattern = "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
-        let predicate = NSPredicate(format: "SELF MATCHES %@", pattern)
-        if !predicate.evaluate(with: target) {
-            return .invalid("첫 글자는 영문 또는 숫자여야 하며, 영문, 숫자, 마침표(.), 하이픈(-), 밑줄(_)만 사용할 수 있습니다.")
-        }
-
-        return .valid(target)
     }
 }

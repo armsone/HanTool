@@ -57,7 +57,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     @Published var address = ""
     @Published var currentURL: URL?
     private var authorizedPlannerReportURL: URL?
-    /// The committed main-frame URL of this tab's webView, reset at view install/teardown/provisional navigation.
+    /// The committed main-frame URL of this tab's webView, reset at view install/teardown/home.
     @Published public private(set) var popupCommittedURL: URL?
     @Published var pageTitle = ""
     @Published var isLoading = false
@@ -1271,6 +1271,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         lastMainFrameURL = nil
         webView?.stopLoading()
         isShowingHome = true
+        popupCommittedURL = nil
         address = ""
         isLoading = false
         progress = 0

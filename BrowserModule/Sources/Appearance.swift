@@ -66,10 +66,10 @@ struct Palette: Equatable {
         danger: 0x9c3b2a, dangerSoft: 0xf6e3de)
     static let friday = Palette(
         id: "friday", isDark: false,
-        bg: 0xf7efe3, card: 0xfffaf1, surface: 0xfffdf8, surface2: 0xf0e2cc, text: 0x2a1f16, text2: 0x55422f,
-        muted: 0x725b45, border: 0xe8d8c0, border2: 0xd3bb98, accent: 0x9a4a12, accentStrong: 0x743508,
-        accentSoft: 0xf6dfc0, onAccent: 0xffffff, warn: 0x8a5a00, warnSoft: 0xf8e6b8, warnInk: 0x6d3c10,
-        danger: 0xa3204a, dangerSoft: 0xf8dce4)
+        bg: 0xc8ccd0, card: 0xd4d8dc, surface: 0xe0e4e8, surface2: 0xb8bec4, text: 0x16191d, text2: 0x383d44,
+        muted: 0x4c535c, border: 0xa8afb7, border2: 0x8e96a0, accent: 0x743c16, accentStrong: 0x6f350c,
+        accentSoft: 0xb4c0cc, onAccent: 0xffffff, warn: 0x855200, warnSoft: 0xdfd2b5, warnInk: 0x663a0a,
+        danger: 0x9e2638, dangerSoft: 0xdfc2c8)
     static let jarvis = Palette(
         id: "jarvis", isDark: true,
         bg: 0x0c1420, card: 0x121c2b, surface: 0x162337, surface2: 0x1c2d44, text: 0xe3edf7, text2: 0xb3c4d6,
@@ -78,12 +78,11 @@ struct Palette: Equatable {
         danger: 0xf28b82, dangerSoft: 0x3d2126)
     static let ultron = Palette(
         id: "ultron", isDark: true,
-        bg: 0x121316, card: 0x1a1c20, surface: 0x202328, surface2: 0x272a30, text: 0xe6e7ea, text2: 0xb8bbc2,
-        muted: 0x8e929b, border: 0x2b2e34, border2: 0x3b3f47, accent: 0xf2566a, accentStrong: 0xff8a95,
-        accentSoft: 0x3a1a20, onAccent: 0x1a0508, warn: 0xe8a24f, warnSoft: 0x36291a, warnInk: 0xf2c27f,
+        bg: 0x08090c, card: 0x121418, surface: 0x1a1d22, surface2: 0x24282e, text: 0xf2f3f5, text2: 0xc7cbd1,
+        muted: 0xa0a6af, border: 0x30343b, border2: 0x515964, accent: 0xff4d63, accentStrong: 0xff8795,
+        accentSoft: 0x35171e, onAccent: 0x21050a, warn: 0xe8a24f, warnSoft: 0x36291a, warnInk: 0xf2c27f,
         danger: 0xff9a9a, dangerSoft: 0x3e1f22)
 }
-
 extension Palette {
     static func color(_ hex: UInt32) -> Color {
         Color(.sRGB, red: Double((hex >> 16) & 0xff) / 255, green: Double((hex >> 8) & 0xff) / 255,

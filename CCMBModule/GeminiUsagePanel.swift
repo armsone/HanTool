@@ -33,6 +33,7 @@ enum NASFourServiceClient {
     @MainActor private static var isFetchInFlight = false
     @MainActor private static var lastFetchDate: Date?
     @MainActor private static var currentTask: Task<Void, Never>?
+    @MainActor private static var currentGeneration = 0
 
     enum Outcome {
         case success(NASSnapshotV2)
@@ -57,31 +58,41 @@ enum NASFourServiceClient {
         }
         isFetchInFlight = true
         lastFetchDate = now
+        currentGeneration += 1
+        let taskGeneration = currentGeneration
         currentTask = Task { @MainActor in
             defer {
-                isFetchInFlight = false
-                currentTask = nil
+                if currentGeneration == taskGeneration {
+                    isFetchInFlight = false
+                    currentTask = nil
+                }
             }
             do {
                 let data = try await NASSnapshotClient().fetchSnapshot()
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 guard let parsed = NASSnapshotV2Core.parse(data) else {
                     completion(.unreadableResponse)
                     return
                 }
                 completion(.success(parsed))
             } catch let error as NASFetchError {
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 completion(.failure(error))
             } catch {
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 completion(.failure(.cancelled))
             }
         }
     }
 
-    /// Stops an in-flight read (SIGTERM→SIGKILL on the ssh child, then the
-    /// normal reaped completion) when the user leaves NAS mode.
+    /// Stops an in-flight read when the user leaves NAS mode or cancels.
+    /// Immediately releases inFlight flag so subsequent requests are not blocked.
     @MainActor
     static func cancelInFlight() {
+        currentGeneration += 1
         currentTask?.cancel()
+        currentTask = nil
+        isFetchInFlight = false
     }
 
     @MainActor
@@ -90,18 +101,16 @@ enum NASFourServiceClient {
     }
 }
 
-/// Fetches the NAS's stored consumption-history v2 output over the same
-/// read-only SSH transport as `NASFourServiceClient`, on its own throttle
-/// so a slow or unavailable history never blocks the four-service snapshot
-/// cadence. The helper's structured `{ok:false,error}` result is passed
-/// through as such; the caller keeps whatever history it last parsed — this
-/// client itself holds no cache.
+/// Fetches the NAS's stored consumption-history v2 output over the safe
+/// HTTP transport, on its own throttle so a slow or unavailable history never
+/// blocks the four-service snapshot cadence.
 enum NASHistoryClient {
     static let minimumRequestIntervalSeconds: TimeInterval = 180
 
     @MainActor private static var isFetchInFlight = false
     @MainActor private static var lastFetchDate: Date?
     @MainActor private static var currentTask: Task<Void, Never>?
+    @MainActor private static var currentGeneration = 0
 
     enum Outcome {
         case success(NASHistoryReadResult)
@@ -123,17 +132,24 @@ enum NASHistoryClient {
         }
         isFetchInFlight = true
         lastFetchDate = now
+        currentGeneration += 1
+        let taskGeneration = currentGeneration
         currentTask = Task { @MainActor in
             defer {
-                isFetchInFlight = false
-                currentTask = nil
+                if currentGeneration == taskGeneration {
+                    isFetchInFlight = false
+                    currentTask = nil
+                }
             }
             do {
                 let result = try await NASSnapshotClient().fetchHistory()
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 completion(.success(result))
             } catch let error as NASFetchError {
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 completion(.failure(error))
             } catch {
+                guard currentGeneration == taskGeneration, !Task.isCancelled else { return }
                 completion(.failure(.cancelled))
             }
         }
@@ -141,7 +157,10 @@ enum NASHistoryClient {
 
     @MainActor
     static func cancelInFlight() {
+        currentGeneration += 1
         currentTask?.cancel()
+        currentTask = nil
+        isFetchInFlight = false
     }
 
     @MainActor
@@ -328,7 +347,7 @@ enum GeminiUsageFetchOutcome {
         case .success, .skippedInFlight, .skippedThrottled:
             return nil
         case .commandNotFound:
-            return "agy(Antigravity CLI) 없음"
+            return "로컬 한도 조회 미지원 · 제공사 화면에서 확인"
         case .timedOut:
             return "응답 시간 초과"
         case .nonZeroExit:

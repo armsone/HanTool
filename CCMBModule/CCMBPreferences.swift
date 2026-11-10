@@ -72,5 +72,6 @@ public final class CCMBPreferences: @unchecked Sendable {
     public func clearNASCaches() {
         defaults.removeObject(forKey: Self.nasServiceCacheDefaultsKey)
         defaults.removeObject(forKey: Self.nasHistoryV2DefaultsKey)
+        NASHTTPClient.shared.clearSessionCache()
     }
 }

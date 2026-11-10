@@ -1721,8 +1721,8 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                     refreshAllFromNAS(force: true)
                 }
             } else {
-                nasState.applyFailure(label: "NAS 서버 미설정")
-                lastNASHistoryFetchFailureLabel = "NAS 서버 미설정"
+                nasState.applyFailure(label: "놀이터 주소 미설정")
+                lastNASHistoryFetchFailureLabel = "놀이터 주소 미설정"
             }
             restartAutoRefreshTimer()
             refreshStatusTitle()
@@ -2921,11 +2921,11 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     /// 이어도 다른 서비스 값에는 영향이 없다. 연결 실패는 결코 이 Mac 직접
     /// 조회로 자동 전환되지 않으며, 마지막 값/오래됨 표시만 남긴다. NAS 값은
     /// 로컬 기록·공유 파일·iCloud 업로드로 흘러가지 않는다.
-    private func refreshAllFromNAS(force: Bool) {
+    func refreshAllFromNAS(force: Bool) {
         guard isNASMode else { return }
         guard NASConfig.isValidTarget(CCMBPreferences.shared.serverTarget) else {
-            nasState.applyFailure(label: "NAS 서버 미설정")
-            lastNASHistoryFetchFailureLabel = "NAS 서버 미설정"
+            nasState.applyFailure(label: "놀이터 주소 미설정")
+            lastNASHistoryFetchFailureLabel = "놀이터 주소 미설정"
             refreshStatusTitle()
             updateSplitPanel()
             return
@@ -3153,6 +3153,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     /// refresher update `auth.json`, at most once per five minutes.
     private func startAutomaticGrokAuthRecovery() -> Bool {
         guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else { return false }
+        guard GrokAuthenticationClient.isAvailable else { return false }
         guard !grokAuthRecoveryInProgress,
               GrokAuthStore.readCredential()?.hasRefreshToken == true
         else { return false }
@@ -3177,9 +3178,13 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                     self.refreshGrokUsage(force: true, allowAuthRecovery: false)
                 } else {
                     self.grokLoginRequired = true
-                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
-                        "\($0) · 브라우저 로그인이 필요합니다"
-                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    if result == .commandNotFound {
+                        self.lastGrokFetchFailureLabel = result.failureLabel ?? "로컬 CLI 미지원 · 제공사 화면에서 확인"
+                    } else {
+                        self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                            "\($0) · 브라우저 로그인이 필요합니다"
+                        } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    }
                     self.finishGrokRefreshUI()
                 }
             }
@@ -3197,11 +3202,15 @@ final class AppDelegate: NSObject, NSMenuDelegate {
 
     @objc private func performGrokUsageAction() {
         guard DataSourceGate.allowsLocalCollection(dataCollectionSourcePreference) else {
-            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            ProviderUsageWindow.show(url: UsageDashboardURLs.grok, title: "Grok · 제공사 화면에서 확인")
             return
         }
         guard grokLoginRequired else {
-            NSWorkspace.shared.open(UsageDashboardURLs.grok)
+            ProviderUsageWindow.show(url: UsageDashboardURLs.grok, title: "Grok · 제공사 화면에서 확인")
+            return
+        }
+        guard GrokAuthenticationClient.isAvailable else {
+            ProviderUsageWindow.show(url: UsageDashboardURLs.grok, title: "Grok · 제공사 화면에서 확인")
             return
         }
         guard !grokLoginInProgress, !grokAuthRecoveryInProgress else { return }
@@ -3224,9 +3233,13 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                     self.refreshGrokUsage(force: true, allowAuthRecovery: false)
                 } else {
                     self.grokLoginRequired = true
-                    self.lastGrokFetchFailureLabel = result.failureLabel.map {
-                        "\($0) · 브라우저 로그인이 필요합니다"
-                    } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    if result == .commandNotFound {
+                        self.lastGrokFetchFailureLabel = result.failureLabel ?? "로컬 CLI 미지원 · 제공사 화면에서 확인"
+                    } else {
+                        self.lastGrokFetchFailureLabel = result.failureLabel.map {
+                            "\($0) · 브라우저 로그인이 필요합니다"
+                        } ?? "브라우저에서 Grok 로그인이 필요합니다"
+                    }
                     self.finishGrokRefreshUI()
                 }
             }
@@ -5193,7 +5206,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     }
 
     @objc private func openGeminiDashboard() {
-        NSWorkspace.shared.open(UsageDashboardURLs.gemini)
+        ProviderUsageWindow.show(url: UsageDashboardURLs.gemini, title: "Gemini · 제공사 화면에서 확인")
     }
 
     @objc private func openFooterLink() {
@@ -5663,5 +5676,9 @@ public enum HTTCCMBRuntime {
     public static func setDataSource(_ source: String) {
         CCMBPreferences.shared.dataCollectionSource = source
         sharedController?.setDataSource(source)
+    }
+
+    public static func triggerNASRefresh() {
+        sharedController?.refreshAllFromNAS(force: true)
     }
 }

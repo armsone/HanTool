@@ -31,7 +31,7 @@ public struct CCMBSettingsView: View {
                 featureTogglesSection
                 dataSourceSection
                 if integration.dataSource == CCMBIntegration.sourceNAS {
-                    sshTargetSection
+                    playgroundTargetSection
                 }
                 lifecycleProtectionNote
             }
@@ -155,14 +155,14 @@ public struct CCMBSettingsView: View {
                     get: { integration.dataSource },
                     set: { integration.setDataSource($0) }
                 )) {
-                    Text("놀이터 서버 (SSH)").tag(CCMBIntegration.sourceNAS)
+                    Text("놀이터 서버").tag(CCMBIntegration.sourceNAS)
                     Text("이 Mac (로컬 수집)").tag(CCMBIntegration.sourceLocalMac)
                 }
                 .pickerStyle(.segmented)
 
                 Text(integration.dataSource == CCMBIntegration.sourceNAS
-                     ? "원격 놀이터 NAS의 SSH 연결을 통해 AI 사용량·작업 상태를 수집합니다 (기본값)."
-                     : "현재 실행 중인 로컬 Mac의 자원을 직접 수집합니다 (명시적으로 선택한 경우에만 수집).")
+                     ? "놀이터 서버의 웹 연결을 통해 AI 사용량과 작업 상태를 수집합니다 (기본값)."
+                     : "현재 실행 중인 로컬 Mac의 지원 항목을 직접 수집합니다. Gemini·Grok은 별도 CLI 설치 없이 앱 내 제공사 화면에서 확인할 수 있습니다.")
                     .font(.caption)
                     .foregroundStyle(palette.muted)
             }
@@ -172,24 +172,24 @@ public struct CCMBSettingsView: View {
         }
     }
 
-    // MARK: - SSH 대상 서버 설정
+    // MARK: - 놀이터 서버 설정
 
-    private var sshTargetSection: some View {
+    private var playgroundTargetSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("SSH 대상 서버 설정")
+            Text("놀이터 서버 설정")
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("SSH 호스트 별칭 또는 주소")
+                    Text("놀이터 주소")
                         .font(.subheadline.weight(.medium))
-                    Text("~/.ssh/config에 정의된 호스트 별칭(예: my-server) 또는 호스트명/IP(예: nas.example.com)를 입력하세요. HTTP/HTTPS 웹 주소 단독으로는 동작하지 않으며, SSH 인증(키 기반)이 미리 구성되어 있어야 합니다.")
+                    Text("놀이터 서버의 HTTPS 웹 주소(예: https://nas.example.com:8443)를 입력하세요. SSH 설정이나 터미널 명령어 구성 없이 바로 연결됩니다.")
                         .font(.caption)
                         .foregroundStyle(palette.muted)
                 }
 
                 HStack(spacing: 8) {
-                    TextField("호스트명 또는 SSH 별칭 (예: my-server)", text: $integration.targetDraft)
+                    TextField("https://nas.example.com:8443 또는 https://host/alfred", text: $integration.targetDraft)
                         .textFieldStyle(.roundedBorder)
                         .font(.body)
 
@@ -200,6 +200,24 @@ public struct CCMBSettingsView: View {
                     .disabled(isApplyDisabled)
                 }
 
+                HStack(spacing: 8) {
+                    Button("연결 확인") {
+                        integration.checkConnection()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!targetValidation.isValid)
+
+                    Button("로그인") {
+                        integration.openLoginWindow()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!targetValidation.isValid)
+
+                    Spacer()
+                }
+
+                connectionStatusView
+
                 if case .invalid(let message) = targetValidation {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -209,15 +227,15 @@ public struct CCMBSettingsView: View {
                             .foregroundStyle(Color.red)
                     }
                 } else if integration.targetDraft.isEmpty {
-                    Text("대상이 비어 있으면 아무런 SSH 연결도 시도하지 않는 안전한 미설정 상태가 유지됩니다.")
+                    Text("주소가 비어 있으면 연결을 시도하지 않는 안전한 미설정 상태가 유지됩니다.")
                         .font(.caption)
                         .foregroundStyle(palette.muted)
                 } else if integration.targetDraft != integration.serverTarget {
-                    Text("수정된 대상이 아직 적용되지 않았습니다. '적용' 버튼을 눌러주세요.")
+                    Text("수정된 주소가 아직 적용되지 않았습니다. '적용' 버튼을 눌러주세요.")
                         .font(.caption)
                         .foregroundStyle(Color.orange)
                 } else {
-                    Text("현재 적용된 대상: \(integration.serverTarget)")
+                    Text("현재 적용된 주소: \(integration.serverTarget)")
                         .font(.caption)
                         .foregroundStyle(palette.muted)
                 }
@@ -225,6 +243,45 @@ public struct CCMBSettingsView: View {
             .padding(16)
             .background(palette.card)
             .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    @ViewBuilder
+    private var connectionStatusView: some View {
+        switch integration.connectionState {
+        case .idle:
+            EmptyView()
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("놀이터 서버 연결 확인 중...")
+                    .font(.caption)
+                    .foregroundStyle(palette.muted)
+            }
+        case .connected(let authenticated, let role):
+            HStack(spacing: 6) {
+                Image(systemName: authenticated ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(authenticated ? Color.green : Color.orange)
+                if authenticated {
+                    let roleSuffix = role.map { " (역할: \($0))" } ?? ""
+                    Text("연결 성공 · 로그인 완료\(roleSuffix)")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.green)
+                } else {
+                    Text("연결 성공 · 로그인이 필요합니다. '로그인' 버튼을 눌러 로그인해 주세요.")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.orange)
+                }
+            }
+        case .failed(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(Color.red)
+                Text("연결 실패: \(message)")
+                    .font(.caption)
+                    .foregroundStyle(Color.red)
+            }
         }
     }
 

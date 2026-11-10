@@ -1978,12 +1978,7 @@ struct HanaPanelView: View {
     @ObservedObject var host: HanaPanelHost
     let availableWidth: CGFloat
     var nativeInputAllowed: () -> Bool = { true }
-    var onHandoffToPlanner: (() -> Void)? = nil
     @Environment(\.bkPalette) private var palette
-
-    private var handoffEnabled: Bool {
-        !host.isCapturingPlannerHandoff && host.isBridgeReady && !host.isLoading && nativeInputAllowed()
-    }
 
     private var displayedWidth: CGFloat {
         host.effectiveWidth(forAvailableWidth: availableWidth)
@@ -1994,22 +1989,6 @@ struct HanaPanelView: View {
             HanaPanelDivider(host: host, availableWidth: availableWidth)
 
             VStack(spacing: 0) {
-                if let onHandoff = onHandoffToPlanner {
-                    HStack {
-                        Spacer()
-                        Button(host.isCapturingPlannerHandoff ? "읽는 중…" : "플래너에게 넘기기") {
-                            onHandoff()
-                        }
-                        .font(.caption2.bold())
-                        .buttonStyle(.plain)
-                        .foregroundColor(handoffEnabled ? palette.accentColor : palette.textColor.opacity(0.4))
-                        .disabled(!handoffEnabled)
-                        .help("지금 보이는 하나 대화와 현재 웹페이지로 새 플래너 프로젝트를 만들어 시작합니다. 입력창에 쓴 내용이 있으면 그것이 목표가 되고, 업무가 플래너에 저장되면 넘긴 입력만 비워집니다. 자동으로 넘기지 않습니다.")
-                        .accessibilityLabel("플래너에게 넘기기")
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                }
                 if let msg = host.statusMessage {
                     statusBanner(msg)
                 }

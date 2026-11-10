@@ -315,7 +315,7 @@ enum GrokAuthenticationOutcome: Equatable {
         case .success:
             return nil
         case .commandNotFound:
-            return "Grok CLI를 찾을 수 없습니다"
+            return "로컬 CLI 미지원 · 제공사 화면에서 확인"
         case .timedOut:
             return "Grok 인증 시간이 초과되었습니다"
         case .failed:
@@ -329,6 +329,10 @@ enum GrokAuthenticationOutcome: Equatable {
 enum GrokAuthenticationClient {
     private static let refreshTimeoutSeconds: TimeInterval = 20
     private static let loginTimeoutSeconds: TimeInterval = 300
+
+    static var isAvailable: Bool {
+        grokExecutableURL() != nil
+    }
 
     static func refreshCredential(completion: @escaping (GrokAuthenticationOutcome) -> Void) {
         runGrok(arguments: ["models"], timeout: refreshTimeoutSeconds) { outcome in

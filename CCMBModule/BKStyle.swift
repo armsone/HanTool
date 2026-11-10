@@ -93,24 +93,24 @@ struct BKThemePalette {
     )
 
     static let friday = BKThemePalette(
-        bg: color(0xf7efe3),
-        card: color(0xfffaf1),
-        surface: color(0xfffdf8),
-        surface2: color(0xf0e2cc),
-        text: color(0x2a1f16),
-        text2: color(0x55422f),
-        muted: color(0x725b45),
-        border: color(0xe8d8c0),
-        border2: color(0xd3bb98),
-        accent: color(0x9a4a12),
-        accentStrong: color(0x743508),
-        accentSoft: color(0xf6dfc0),
+        bg: color(0xc8ccd0),
+        card: color(0xd4d8dc),
+        surface: color(0xe0e4e8),
+        surface2: color(0xb8bec4),
+        text: color(0x16191d),
+        text2: color(0x383d44),
+        muted: color(0x4c535c),
+        border: color(0xa8afb7),
+        border2: color(0x8e96a0),
+        accent: color(0x743c16),
+        accentStrong: color(0x6f350c),
+        accentSoft: color(0xb4c0cc),
         onAccent: color(0xffffff),
-        warn: color(0x8a5a00),
-        warnSoft: color(0xf8e6b8),
-        warnInk: color(0x6d3c10),
-        danger: color(0xa3204a),
-        dangerSoft: color(0xf8dce4)
+        warn: color(0x855200),
+        warnSoft: color(0xdfd2b5),
+        warnInk: color(0x663a0a),
+        danger: color(0x9e2638),
+        dangerSoft: color(0xdfc2c8)
     )
 
     static let jarvis = BKThemePalette(
@@ -135,19 +135,19 @@ struct BKThemePalette {
     )
 
     static let ultron = BKThemePalette(
-        bg: color(0x0f1012),
-        card: color(0x1a1b1e),
-        surface: color(0x222326),
-        surface2: color(0x2b2c30),
-        text: color(0xe6e7ea),
-        text2: color(0xb8bbc2),
-        muted: color(0x8e929b),
-        border: color(0x3a2a2e),
-        border2: color(0x8a2c3a),
-        accent: color(0xdc4057),
-        accentStrong: color(0xff7a88),
-        accentSoft: color(0x3a1519),
-        onAccent: color(0xffffff),
+        bg: color(0x08090c),
+        card: color(0x121418),
+        surface: color(0x1a1d22),
+        surface2: color(0x24282e),
+        text: color(0xf2f3f5),
+        text2: color(0xc7cbd1),
+        muted: color(0xa0a6af),
+        border: color(0x30343b),
+        border2: color(0x515964),
+        accent: color(0xff4d63),
+        accentStrong: color(0xff8795),
+        accentSoft: color(0x35171e),
+        onAccent: color(0x21050a),
         warn: color(0xe8a24f),
         warnSoft: color(0x36291a),
         warnInk: color(0xf2c27f),
@@ -155,7 +155,6 @@ struct BKThemePalette {
         dangerSoft: color(0x3e1f22)
     )
 }
-
 enum UsagePanelThemeStore {
     static let defaultsKey = "usagePanelThemeV1"
 
@@ -248,11 +247,11 @@ enum BKStyleTokens {
     static var structureHairline: NSColor {
         isAccentTheme ? currentPalette.accent.withAlphaComponent(0.55) : currentPalette.border2
     }
-    /// Large canvas wash: blue under Jarvis, crimson-graphite under Ultron.
+    /// Large canvas wash: blue under Jarvis, neutral graphite canvas under Ultron, coherent wash under Light/Friday.
     static var canvasWash: NSColor {
         switch UsagePanelThemeStore.current {
         case .jarvis: return NSColor(srgbRed: 0x0f / 255.0, green: 0x3a / 255.0, blue: 0x68 / 255.0, alpha: 1)
-        case .ultron: return NSColor(srgbRed: 0x2a / 255.0, green: 0x1a / 255.0, blue: 0x1e / 255.0, alpha: 1)
+        case .ultron: return currentPalette.surface2
         case .light, .friday: return currentPalette.surface2
         }
     }
@@ -307,7 +306,6 @@ enum BKStyleTokens {
         path.stroke()
     }
 }
-
 /// Code-drawn 16pt glyph vocabulary for section titles. Drawn by hand (like
 /// the existing provider marks) so the deployment target never depends on
 /// SF Symbols availability, and every glyph shares one stroke weight.

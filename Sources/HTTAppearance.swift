@@ -29,7 +29,7 @@ public enum HTTTheme: String, CaseIterable, Identifiable {
         case .light: return .friday
         case .friday: return .jarvis
         case .jarvis: return .ultron
-        case .ultron: return .auto
+        case .ultron: return .light
         }
     }
 
@@ -88,24 +88,24 @@ public struct HTTThemePalette {
     )
 
     public static let friday = HTTThemePalette(
-        bg: Color(hex: "#f7efe3"),
-        card: Color(hex: "#fffaf1"),
-        surface: Color(hex: "#fffdf8"),
-        surface2: Color(hex: "#f0e2cc"),
-        text: Color(hex: "#2a1f16"),
-        text2: Color(hex: "#55422f"),
-        muted: Color(hex: "#725b45"),
-        border: Color(hex: "#e8d8c0"),
-        border2: Color(hex: "#d3bb98"),
-        accent: Color(hex: "#9a4a12"),
-        accentStrong: Color(hex: "#743508"),
-        accentSoft: Color(hex: "#f6dfc0"),
+        bg: Color(hex: "#c8ccd0"),
+        card: Color(hex: "#d4d8dc"),
+        surface: Color(hex: "#e0e4e8"),
+        surface2: Color(hex: "#b8bec4"),
+        text: Color(hex: "#16191d"),
+        text2: Color(hex: "#383d44"),
+        muted: Color(hex: "#4c535c"),
+        border: Color(hex: "#a8afb7"),
+        border2: Color(hex: "#8e96a0"),
+        accent: Color(hex: "#743c16"),
+        accentStrong: Color(hex: "#6f350c"),
+        accentSoft: Color(hex: "#b4c0cc"),
         onAccent: Color(hex: "#ffffff"),
-        warn: Color(hex: "#8a5a00"),
-        warnSoft: Color(hex: "#f8e6b8"),
-        warnInk: Color(hex: "#6d3c10"),
-        danger: Color(hex: "#a3204a"),
-        dangerSoft: Color(hex: "#f8dce4")
+        warn: Color(hex: "#855200"),
+        warnSoft: Color(hex: "#dfd2b5"),
+        warnInk: Color(hex: "#663a0a"),
+        danger: Color(hex: "#9e2638"),
+        dangerSoft: Color(hex: "#dfc2c8")
     )
 
     public static let jarvis = HTTThemePalette(
@@ -130,19 +130,19 @@ public struct HTTThemePalette {
     )
 
     public static let ultron = HTTThemePalette(
-        bg: Color(hex: "#121316"),
-        card: Color(hex: "#1a1c20"),
-        surface: Color(hex: "#202328"),
-        surface2: Color(hex: "#272a30"),
-        text: Color(hex: "#e6e7ea"),
-        text2: Color(hex: "#b8bbc2"),
-        muted: Color(hex: "#8e929b"),
-        border: Color(hex: "#2b2e34"),
-        border2: Color(hex: "#3b3f47"),
-        accent: Color(hex: "#f2566a"),
-        accentStrong: Color(hex: "#ff8a95"),
-        accentSoft: Color(hex: "#3a1a20"),
-        onAccent: Color(hex: "#1a0508"),
+        bg: Color(hex: "#08090c"),
+        card: Color(hex: "#121418"),
+        surface: Color(hex: "#1a1d22"),
+        surface2: Color(hex: "#24282e"),
+        text: Color(hex: "#f2f3f5"),
+        text2: Color(hex: "#c7cbd1"),
+        muted: Color(hex: "#a0a6af"),
+        border: Color(hex: "#30343b"),
+        border2: Color(hex: "#515964"),
+        accent: Color(hex: "#ff4d63"),
+        accentStrong: Color(hex: "#ff8795"),
+        accentSoft: Color(hex: "#35171e"),
+        onAccent: Color(hex: "#21050a"),
         warn: Color(hex: "#e8a24f"),
         warnSoft: Color(hex: "#36291a"),
         warnInk: Color(hex: "#f2c27f"),
@@ -150,7 +150,6 @@ public struct HTTThemePalette {
         dangerSoft: Color(hex: "#3e1f22")
     )
 }
-
 // MARK: - 병기스타일 아이콘 스타일 (Icon Styles)
 
 public enum HTTIconStyle: String, CaseIterable, Identifiable {

@@ -87,15 +87,19 @@ final class NASTaskStatusStore {
         attemptToken += 1
         let token = attemptToken
         inFlight = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.attemptToken == token {
+                    self.inFlight = nil
+                }
+            }
             var parsed: NASTaskStatusCounts?
             do {
-                let output = try await NASSSHTransport.run(command: NASConfig.remoteTaskStatusCommand)
-                if output.exitStatus == 0 { parsed = NASTaskStatusParser.parse(output.stdout) }
+                let data = try await NASHTTPClient.shared.fetchTaskStatus()
+                parsed = NASTaskStatusParser.parse(data)
             } catch {
                 parsed = nil
             }
             guard let self, self.attemptToken == token, !Task.isCancelled else { return }
-            self.inFlight = nil
             if let parsed {
                 self.lastCounts = parsed
                 self.lastFetchedAt = Date()
