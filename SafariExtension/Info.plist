@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>ko</string>
 	<key>CFBundleDisplayName</key>
-	<string>HTT 웹 번역</string>
+	<string>한툴 웹 번역</string>
 	<key>CFBundleExecutable</key>
 	<string>SMTSafariExtension</string>
 	<key>CFBundleIdentifier</key>
@@ -13,13 +13,13 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>HTT 웹 번역</string>
+	<string>한툴 웹 번역</string>
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.1.1</string>
+	<string>1.27.0</string>
 	<key>CFBundleVersion</key>
-	<string>202611010011</string>
+	<string>202611102320</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSExtension</key>

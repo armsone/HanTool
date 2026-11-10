@@ -5,9 +5,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.local.screentranslator.wake-helper</string>
     <key>CFBundleName</key>
-    <string>HTTWakeHelper</string>
+    <string>한툴 깨우기</string>
     <key>CFBundleDisplayName</key>
-    <string>HTTWakeHelper</string>
+    <string>한툴 깨우기</string>
     <key>CFBundleExecutable</key>
     <string>HTTWakeHelper</string>
     <key>CFBundlePackageType</key>

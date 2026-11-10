@@ -95,13 +95,13 @@ public enum BTNMigrationFailureReason: String, Equatable, Sendable {
         case .protectionParseFailed:
             return "기존 BTN 보호 목록 형식을 확인하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         case .protectionCopyFailed:
-            return "보호 목록을 HTT 설정으로 이전하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
+            return "보호 목록을 한툴 설정으로 이전하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         case .historyReadFailed:
             return "기존 BTN 정리 이력을 읽지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         case .historyParseFailed:
             return "기존 BTN 정리 이력 형식을 확인하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         case .historyCopyFailed:
-            return "정리 이력을 HTT 저장소로 이전하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
+            return "정리 이력을 한툴 저장소로 이전하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         case .completionMarkerWriteFailed:
             return "이전 완료 상태를 저장하지 못해 안전을 위해 Mac 관리 및 정리 기능을 중지했습니다."
         }

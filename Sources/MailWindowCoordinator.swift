@@ -42,6 +42,7 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         // 사용자가 섹션을 옮기면(사이드바·홈/가이드 버튼·메뉴) 잠시 내린 캡처는 포기한다.
         store.onSectionChanged = { [weak self] in self?.abandonSuspendedCapture() }
         NSApp.servicesProvider = serviceProvider
+        NSRegisterServicesProvider(serviceProvider, "HanTool")
         NSUpdateDynamicServices()
         UserDefaults.standard.register(defaults: ["attachedMailTranslationButton": true])
         MailToolbarButton.shared.resumeIfEnabled()
@@ -156,7 +157,7 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.contentViewController = controller
-        window.title = "HTT"
+        window.title = "한툴"
         window.identifier = NSUserInterfaceItemIdentifier("htt-workbench")
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed

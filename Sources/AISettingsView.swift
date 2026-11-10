@@ -34,9 +34,9 @@ struct AISettingsView: View {
                     Button("업데이트 확인…") { (NSApp.delegate as? AppDelegate)?.checkForUpdates() }
                 }
             } header: {
-                Text("HTT 정보")
+                Text("한툴 정보")
             } footer: {
-                Text("메뉴의 'HTT 정보'는 이 화면으로 이동합니다. 업데이트 확인은 시스템 표준 창으로 표시됩니다.")
+                Text("메뉴의 '한툴 정보'는 이 화면으로 이동합니다. 업데이트 확인은 시스템 표준 창으로 표시됩니다.")
             }
             Section {
                 HStack {
@@ -71,7 +71,7 @@ struct AISettingsView: View {
             } header: {
                 Text("Dock")
             } footer: {
-                Text("켜면 Dock에도 HTT 아이콘을 표시합니다.")
+                Text("켜면 Dock에도 한툴 아이콘을 표시합니다.")
             }
 
             Section {
@@ -106,7 +106,7 @@ struct AISettingsView: View {
                         HStack(alignment: .top, spacing: 6) {
                             Image(systemName: "exclamationmark.triangle")
                                 .foregroundStyle(.orange)
-                            Text("다른 앱 실행 중 전역 키 감지에는 손쉬운 사용 권한이 필요합니다. 권한이 없으면 HTT 앱 외부에서의 두 번 누름이 동작하지 않을 수 있습니다.")
+                            Text("다른 앱 실행 중 전역 키 감지에는 손쉬운 사용 권한이 필요합니다. 권한이 없으면 한툴 앱 외부에서의 두 번 누름이 동작하지 않을 수 있습니다.")
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
@@ -137,7 +137,7 @@ struct AISettingsView: View {
                     Button("로그인 항목 설정 열기") { loginItem.openSystemSettings() }
                 }
 
-                Toggle("잠자기에서 깨어나면 HTT 실행", isOn: Binding(
+                Toggle("잠자기에서 깨어나면 한툴 실행", isOn: Binding(
                     get: { wakeEnabled },
                     set: { enabled in
                         wakeManager.setEnabled(enabled)
@@ -153,7 +153,7 @@ struct AISettingsView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(loginStatus)
-                    Text("HTT가 꺼져 있을 때만 실행합니다. 이미 실행 중인 HTT는 그대로 둡니다. (\(wakeStatus))")
+                    Text("한툴이 꺼져 있을 때만 실행합니다. 이미 실행 중인 한툴은 그대로 둡니다. (\(wakeStatus))")
                 }
             }
 

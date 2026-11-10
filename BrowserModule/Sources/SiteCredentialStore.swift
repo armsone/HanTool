@@ -113,7 +113,7 @@ public enum SiteCredentialStore {
             status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: passwordData] as CFDictionary)
         } else {
             q[kSecValueData as String] = passwordData
-            q[kSecAttrLabel as String] = "HTT 사이트 계정"
+            q[kSecAttrLabel as String] = "한툴 사이트 계정"
             q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             status = SecItemAdd(q as CFDictionary, nil)
         }

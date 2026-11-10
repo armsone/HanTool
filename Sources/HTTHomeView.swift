@@ -129,7 +129,7 @@ public struct HTTHomeView: View {
                             inputCoordinator.isLegacyInputMateRunning ? "독립 InputMate" : nil,
                             btnIntegration.isStandaloneConflictActive ? "독립 BTN" : nil
                         ].compactMap { $0 }.joined(separator: ", ")
-                        Text("\(details) 앱이 실행 중이어서 데이터 경합을 방지하기 위해 HTT 내 해당 모듈을 일시정지했습니다. 독립 앱 종료 시 자동 재개됩니다.")
+                        Text("\(details) 앱이 실행 중이어서 데이터 경합을 방지하기 위해 한툴 내 해당 모듈을 일시정지했습니다. 독립 앱 종료 시 자동 재개됩니다.")
                             .font(.callout)
                             .foregroundStyle(palette.text2)
                     }
@@ -409,7 +409,7 @@ public struct HTTHomeView: View {
             } label: {
                 HStack {
                     HTTIconView(id: "settings", size: 18)
-                    Text("앱 설정 (HTT 정보·테마·Dock·시작)")
+                    Text("앱 설정 (한툴 정보·테마·Dock·시작)")
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)

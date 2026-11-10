@@ -295,7 +295,7 @@ public struct CCMBSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("서버 현황 창 동작 안내")
                     .font(.subheadline.weight(.medium))
-                Text("서버 현황 창의 종료·다시 시작은 이 기능만 제어하며, HTT 앱과 플래너 작업은 중단 없이 계속 실행됩니다.")
+                Text("서버 현황 창의 종료·다시 시작은 이 기능만 제어하며, 한툴 앱과 플래너 작업은 중단 없이 계속 실행됩니다.")
                     .font(.caption)
                     .foregroundStyle(palette.muted)
             }

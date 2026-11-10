@@ -867,7 +867,7 @@ final class WebTranslatorRunner {
             backgroundWindow?.hide()
             webView.removeFromSuperview()
             webView.interactive = true
-            let window = AIBIBrowserWindow(title: "\(site.translator.title) — HTT 웹 번역",
+            let window = AIBIBrowserWindow(title: "\(site.translator.title) — 한툴 웹 번역",
                                            header: WebTranslatorTaskHeader(), webView: webView)
             window.onUserClose = { [weak self] in
                 self?.window = nil
@@ -1465,7 +1465,7 @@ final class WebTranslatorBrowserBridge: BrowserExternalTranslating {
             guard let translator = WebTranslator(rawValue: engine) else { return "알 수 없는 번역 엔진입니다." }
             guard WebTranslatorConsentStore.shared.hasConsent(translator) else {
                 let section = WebTranslatorConsentStore.pageTranslators.contains(translator) ? "현재 페이지 외부 번역 전송 동의" : "웹 번역 전송 동의"
-                return "HTT 앱에서 \(translator.title) 전송 동의가 필요합니다. HTT 메뉴 막대 › 설정… › \(section)에서 동의한 뒤 다시 시도하세요."
+                return "한툴 앱에서 \(translator.title) 전송 동의가 필요합니다. 한툴 메뉴 막대 › 설정… › \(section)에서 동의한 뒤 다시 시도하세요."
             }
             return nil
         }

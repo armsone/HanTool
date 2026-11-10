@@ -253,5 +253,5 @@ struct PersonalDictionaryView: View {
         return nil
     }
 
-    private static let unavailableText = "기존 사전 데이터를 확인하지 못해 지금은 저장할 수 없습니다. HTT를 다시 실행한 뒤 시도하세요."
+    private static let unavailableText = "기존 사전 데이터를 확인하지 못해 지금은 저장할 수 없습니다. 한툴을 다시 실행한 뒤 시도하세요."
 }

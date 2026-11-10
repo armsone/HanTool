@@ -1350,10 +1350,10 @@ struct BrowserPane: View {
                         }
                     }
                     if !extensions.isInsideHTT {
-                        Button("HTT 번역 확장 연결…") { extensions.chooseAppAndConnect() }
+                        Button("한툴 번역 확장 연결…") { extensions.chooseAppAndConnect() }
                             .disabled(extensions.status == .loading)
                         if extensions.installedAppAvailable {
-                            Button("설치된 HTT 연결 (\(BrowserExtensionManager.installedAppPath))") {
+                            Button("설치된 한툴 연결 (\(BrowserExtensionManager.installedAppPath))") {
                                 extensions.connectInstalledApp()
                             }
                             .disabled(extensions.status == .loading)
@@ -1640,7 +1640,7 @@ struct BrowserPane: View {
             let reasonText = others.prefix(2).map { "\($0.host): \($0.reason)" }.joined(separator: ", ")
             HStack(spacing: 6) {
                 Image(systemName: "hand.raised.fill").foregroundColor(palette.warnColor)
-                Text("HTT 연결 도움의 연결 제한: \(reasonText)")
+                Text("한툴 연결 도움의 연결 제한: \(reasonText)")
                     .font(.caption)
                     .foregroundColor(palette.warnInkColor)
                     .lineLimit(2)

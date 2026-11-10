@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "HTT 웹 번역",
-  "short_name": "HTT 번역",
-  "description": "이 Mac의 HTT(Mac 기본 번역, 기기 내)로 웹 페이지 글자와 이미지 속 글자를 번역합니다.",
+  "name": "한툴 웹 번역",
+  "short_name": "한툴 번역",
+  "description": "이 Mac의 한툴(Mac 기본 번역, 기기 내)로 웹 페이지 글자와 이미지 속 글자를 번역합니다.",
   "version": "__SMT_VERSION__",
   "background": { "scripts": ["fx.js", "background.js"], "persistent": false },
   "action": {
-    "default_title": "HTT 웹 번역",
+    "default_title": "한툴 웹 번역",
     "default_popup": "popup.html",
     "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" }
   },

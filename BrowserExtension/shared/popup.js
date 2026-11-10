@@ -32,7 +32,7 @@ async function call(message) {
   return response;
 }
 
-/** HTD 전용: 호스트(HTD) 툴바의 HTT 버튼이 방금 눌렸는지 호스트에 묻는다. 호스트가 직접 답하며 한 번 답하면 지운다. */
+/** HTD 전용: 호스트(HTD) 툴바의 한툴 버튼이 방금 눌렸는지 호스트에 묻는다. 호스트가 직접 답하며 한 번 답하면 지운다. */
 async function hostRequestedTranslate() {
   try {
     const reply = await api.runtime.sendNativeMessage("com.local.screentranslator", { v: 1, type: "htdHostIntent", id: `intent-${Date.now()}` });
@@ -76,7 +76,7 @@ function render(state) {
   }
 
   if (state.settings.consent && state.engine.ok && !state.engine.enabled) {
-    showError("HTT 메뉴 막대 › 브라우저 번역…에서 '브라우저 확장 연결 허용'을 켜 주세요.");
+    showError("한툴 메뉴 막대 › 브라우저 번역…에서 '브라우저 확장 연결 허용'을 켜 주세요.");
   } else if (state.settings.consent && !state.engine.ok) {
     showError(state.engine.message);
   } else if (state.page?.error) {

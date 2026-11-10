@@ -6,10 +6,10 @@ enum AppIdentity {
     /// 검증된 바깥 HTT.app 안에서 실행 중이거나 호스트 모드인지(BrowserExtensionManager.embeddingHTTApp과 같은 기준).
     #if HTT_HOST
     static let isEmbedded: Bool = true
-    static var displayName: String { "HTT" }
+    static var displayName: String { "한툴" }
     #else
     static let isEmbedded: Bool = BrowserExtensionManager.embeddingHTTApp != nil
-    static var displayName: String { isEmbedded ? "HTT 브라우저" : "HTD" }
+    static var displayName: String { isEmbedded ? "한툴 브라우저" : "HTD" }
     #endif
 }
 

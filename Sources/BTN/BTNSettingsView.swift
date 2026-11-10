@@ -88,7 +88,7 @@ public struct BTNSettingsView: View {
                             .font(.callout.bold())
                         Text("기존 BTN이 실행 중이어서 Mac 관리 작업을 일시 중지했습니다.")
                             .font(.callout)
-                        Text("기존 BTN을 종료하면 HTT의 Mac 관리를 사용할 수 있습니다.")
+                        Text("기존 BTN을 종료하면 한툴의 Mac 관리를 사용할 수 있습니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

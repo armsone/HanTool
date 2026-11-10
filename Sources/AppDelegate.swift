@@ -108,8 +108,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard updater.hasPendingInstall, EmbeddedBrowser.isEmbeddedRunning() else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "HTT 브라우저 작업을 먼저 완료해 주세요"
-        alert.informativeText = "업데이트 설치가 예약되어 있어, HTT를 종료하면 실행 중인 브라우저 다운로드나 작업이 중단될 수 있습니다. 진행 중인 작업이 끝나면 HTT를 다시 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
+        alert.messageText = "한툴 브라우저 작업을 먼저 완료해 주세요"
+        alert.informativeText = "업데이트 설치가 예약되어 있어, 한툴을 종료하면 실행 중인 브라우저 다운로드나 작업이 중단될 수 있습니다. 진행 중인 작업이 끝나면 한툴을 다시 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
         alert.addButton(withTitle: "확인")
         alert.runModal()
         return .terminateCancel
@@ -210,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let button = item.button {
             // 메뉴 막대 아이콘은 SF Symbol 대신 기존 디자인된 앱 아이콘을 그대로 축소해 쓴다(원본 색 유지).
             button.image = menuBarIconImage()
-            button.toolTip = "HTT (화면 \(GlobalHotKey.displayString) · 메일 \(GlobalHotKey.mailDisplayString) · 브라우저 \(GlobalHotKey.browserDisplayString))"
+            button.toolTip = "한툴 (화면 \(GlobalHotKey.displayString) · 메일 \(GlobalHotKey.mailDisplayString) · 브라우저 \(GlobalHotKey.browserDisplayString))"
         }
         let menu = NSMenu()
         menu.delegate = self
@@ -225,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         menu.addItem(headerItem())
-        menu.addItem(item("HTT 열기", #selector(showHome), symbol: "globe"))
+        menu.addItem(item("한툴 열기", #selector(showHome), symbol: "globe"))
         menu.addItem(item("앱 상태 개요", #selector(showOverview), symbol: "house"))
         menu.addItem(.separator())
 
@@ -295,13 +295,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(warning)
         }
         menu.addItem(item("업데이트 확인…", #selector(checkForUpdates), symbol: "arrow.down.circle"))
-        menu.addItem(item("HTT 종료", #selector(NSApplication.terminate(_:)), target: NSApp, symbol: "power"))
+        menu.addItem(item("한툴 종료", #selector(NSApplication.terminate(_:)), target: NSApp, symbol: "power"))
     }
 
     /// 앱 아이콘·이름·버전을 보여주는 비활성 머리글 행
     private func headerItem() -> NSMenuItem {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        let title = version.isEmpty ? "HTT" : "HTT v\(version)"
+        let title = version.isEmpty ? "한툴" : "한툴 v\(version)"
         let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         header.isEnabled = false
         if let icon = NSApp.applicationIconImage {
@@ -509,9 +509,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(item("HTT 열기", #selector(showHome), symbol: "globe"))
+        appMenu.addItem(item("한툴 열기", #selector(showHome), symbol: "globe"))
         appMenu.addItem(item("앱 상태 개요", #selector(showOverview), symbol: "house"))
-        appMenu.addItem(item("HTT 정보", #selector(showAbout)))
+        appMenu.addItem(item("한툴 정보", #selector(showAbout)))
         appMenu.addItem(item("업데이트 확인…", #selector(checkForUpdates)))
         appMenu.addItem(.separator())
         appMenu.addItem(item("USB 정리·추출", #selector(showCleanUSB)))
@@ -532,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guide.target = self
         appMenu.addItem(guide)
         appMenu.addItem(.separator())
-        appMenu.addItem(NSMenuItem(title: "HTT 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "한툴 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
@@ -589,7 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let helpMenuItem = NSMenuItem()
         let helpMenu = NSMenu(title: "도움말")
         helpMenu.addItem(item("사용 방법…", #selector(showGuide)))
-        helpMenu.addItem(item("HTT 정보", #selector(showAbout)))
+        helpMenu.addItem(item("한툴 정보", #selector(showAbout)))
         helpMenuItem.submenu = helpMenu
         mainMenu.addItem(helpMenuItem)
 

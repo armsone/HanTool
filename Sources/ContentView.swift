@@ -458,7 +458,7 @@ private struct DocumentView: View {
     }
 
     private var footer: some View {
-        Text("원본 메일은 변경되지 않았습니다. HTT 창을 닫거나 '현재 내용 지우기'를 하면 앱의 메모리에서 내용이 사라집니다."
+        Text("원본 메일은 변경되지 않았습니다. 한툴 창을 닫거나 '현재 내용 지우기'를 하면 앱의 메모리에서 내용이 사라집니다."
              + (model.backend.webTranslator != nil ? " 웹 번역기로 이미 보낸 내용은 해당 서비스에 기록될 수 있습니다."
                 : model.backend.isExternal ? " 외부 AI로 이미 보낸 내용은 해당 서비스 대화 기록에 남을 수 있습니다." : ""))
             .font(.caption)

@@ -659,7 +659,7 @@ final class MonitorViewModel: ObservableObject {
             return "독립 BTN 앱이 실행 중이어서 중복 관측·정리 경합을 막기 위해 작업을 중지했습니다."
         }
         if !isManagementEnabled {
-            return "HTT 설정에서 'Mac 관리 사용'을 켜면 시스템 지표와 개발 저장 공간을 확인합니다."
+            return "한툴 설정에서 'Mac 관리 사용'을 켜면 시스템 지표와 개발 저장 공간을 확인합니다."
         }
         return diagnosis.keyCause
     }
@@ -693,13 +693,13 @@ final class MonitorViewModel: ObservableObject {
             return migrationFailureMessage
         }
         if isStandaloneConflictActive {
-            return "독립 BTN 앱이 실행 중이어서 중복 관측·정리 경합을 방지하기 위해 HTT Mac 관리의 활성 작업을 일시 중지했습니다. 독립 BTN을 강제 종료하거나 원본 설정을 바꾸지 않으며, 독립 BTN이 종료되면 현재 선택한 HTT 설정대로 자동 복구됩니다."
+            return "독립 BTN 앱이 실행 중이어서 중복 관측·정리 경합을 방지하기 위해 한툴 Mac 관리의 활성 작업을 일시 중지했습니다. 독립 BTN을 강제 종료하거나 원본 설정을 바꾸지 않으며, 독립 BTN이 종료되면 현재 선택한 한툴 설정대로 자동 복구됩니다."
         }
         if !isManagementEnabled {
-            return "현재 'Mac 관리 사용'이 꺼져 있어 지표 수집, 30초 자동 새로고침, 정리 실행이 모두 중지되어 있습니다. HTT 설정에서 'Mac 관리 사용'을 켜면 활성화됩니다."
+            return "현재 'Mac 관리 사용'이 꺼져 있어 지표 수집, 30초 자동 새로고침, 정리 실행이 모두 중지되어 있습니다. 한툴 설정에서 'Mac 관리 사용'을 켜면 활성화됩니다."
         }
         if !isCleanupEnabled {
-            return "현재 '정리 기능 사용'이 꺼져 있어 진단 및 후보 확인만 가능하며 실제 정리는 시작되지 않습니다. 정리가 필요하면 HTT 설정에서 '정리 기능 사용'을 켜세요."
+            return "현재 '정리 기능 사용'이 꺼져 있어 진단 및 후보 확인만 가능하며 실제 정리는 시작되지 않습니다. 정리가 필요하면 한툴 설정에서 '정리 기능 사용'을 켜세요."
         }
         return nil
     }

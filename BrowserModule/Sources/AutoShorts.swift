@@ -23,7 +23,7 @@ enum AutoShorts {
               contents.lastPathComponent == "Contents" else {
             return false
         }
-        guard parentApp.lastPathComponent == "HTT.app" || parentApp.pathExtension == "app" else {
+        guard parentApp.pathExtension == "app" else {
             return false
         }
         guard let parentBundle = Bundle(url: parentApp),

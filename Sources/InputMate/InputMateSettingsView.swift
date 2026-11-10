@@ -276,7 +276,7 @@ struct InputMateSettingsView: View {
                     Image(systemName: "keyboard.badge.ellipsis")
                         .font(.system(size: 48))
                         .foregroundStyle(Color.accentColor)
-                    Text("HTT 입력 도우미")
+                    Text("한툴 입력 도우미")
                         .font(.title2.bold())
                     Text("키보드와 트랙패드를 편하게")
                         .font(.subheadline)
@@ -299,7 +299,7 @@ struct InputMateSettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Link("GitHub 저장소…", destination: URL(string: "https://github.com/armsone/HTT-MacOS")!)
+                            Link("GitHub 저장소…", destination: URL(string: "https://github.com/armsone/HanTool")!)
                         }
                         .padding(4)
                     }

@@ -2214,7 +2214,7 @@ struct SettingsView: View {
                         LabeledContent("Deno (JS 런타임)", value: h.denoAvailable ? "\(h.denoVersion) · \(h.denoPath ?? "")" : "미설치 (일부 사이트에서 필요)")
                         LabeledContent("EJS (yt-dlp-ejs)", value: h.ejsAvailable ? "설치됨" : "미설치 (일부 사이트에서 필요)")
                         Text(BrowserExtensionManager.embeddingHTTApp != nil
-                             ? "통합 HTT가 엔진, yt-dlp, FFmpeg, ffprobe, Deno를 하나의 번들로 함께 제공합니다. 별도로 내려받거나 설치할 필요가 없으며, 이 번들의 업데이트는 HTT 메뉴의 '업데이트 확인…'으로 합니다."
+                             ? "통합 한툴이 엔진, yt-dlp, FFmpeg, ffprobe, Deno를 하나의 번들로 함께 제공합니다. 별도로 내려받거나 설치할 필요가 없으며, 이 번들의 업데이트는 한툴 메뉴의 '업데이트 확인…'으로 합니다."
                              : "독립 실행 중입니다. 엔진은 자동으로 업데이트되거나 설치되지 않으며, 필요한 도구는 직접 준비해야 합니다.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -2240,13 +2240,13 @@ struct SettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         HStack {
-                            Text(#"open -a "/Applications/HTT.app" "https://www.youtube.com""#)
+                            Text(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#)
                                 .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                             Spacer()
                             Button("복사") {
                                 NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(#"open -a "/Applications/HTT.app" "https://www.youtube.com""#, forType: .string)
+                                NSPasteboard.general.setString(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#, forType: .string)
                             }
                             .buttonStyle(.bordered)
                         }
@@ -2266,9 +2266,9 @@ struct SettingsView: View {
                         LabeledContent("버전", value: "\(shortVer) (\(buildNum))")
                         LabeledContent("빌드", value: buildStamp)
 #if HTT_HOST
-                        LabeledContent("배포 형태", value: "HTT 통합 기능")
+                        LabeledContent("배포 형태", value: "한툴 통합 기능")
 #else
-                        LabeledContent("배포 형태", value: "HTT 통합 브라우저")
+                        LabeledContent("배포 형태", value: "한툴 통합 브라우저")
 #endif
                         LabeledContent("저작권", value: "Copyright © 2026 Hanstree")
                     }

@@ -91,8 +91,8 @@ final class UpdaterManager: NSObject, SPUUpdaterDelegate {
                 }
             }
             let alert = NSAlert()
-            alert.messageText = "HTT 브라우저를 종료하면 업데이트를 이어서 설치합니다"
-            alert.informativeText = "HTT 브라우저가 실행 중이라 설치를 잠시 미뤘습니다. 받는 중인 파일이 있으면 끝난 뒤 브라우저를 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
+            alert.messageText = "한툴 브라우저를 종료하면 업데이트를 이어서 설치합니다"
+            alert.informativeText = "한툴 브라우저가 실행 중이라 설치를 잠시 미뤘습니다. 받는 중인 파일이 있으면 끝난 뒤 브라우저를 종료해 주세요. 브라우저는 자동으로 종료하지 않습니다."
             alert.addButton(withTitle: "확인")
             alert.runModal()
             // 안내를 보는 사이 HTD가 이미 종료됐다면 바로 이어서 설치한다.

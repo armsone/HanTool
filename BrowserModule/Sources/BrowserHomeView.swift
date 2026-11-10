@@ -2081,10 +2081,10 @@ private extension BrowserHomeView {
         switch format {
         case .httbookmarks:
             panel.allowedContentTypes = [UTType(filenameExtension: "httbookmarks") ?? .data]
-            panel.nameFieldStringValue = "HTT-즐겨찾기.httbookmarks"
+            panel.nameFieldStringValue = "한툴-즐겨찾기.httbookmarks"
         case .markdown:
             panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-            panel.nameFieldStringValue = "HTT-즐겨찾기.md"
+            panel.nameFieldStringValue = "한툴-즐겨찾기.md"
         }
 
         guard panel.runModal() == .OK, let url = panel.url else { return }

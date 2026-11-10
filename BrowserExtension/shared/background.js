@@ -177,18 +177,18 @@ async function autoStillAllowed(epoch, origin = null) {
 function describeNativeFailure(raw) {
   const text = String(raw || "");
   if (IS_SAFARI) {
-    return "HTT 확장 앱에 연결하지 못했습니다. HTT를 응용 프로그램 폴더에 설치해 한 번 실행하고 Safari 설정에서 확장을 켜 주세요.";
+    return "한툴 확장 앱에 연결하지 못했습니다. 한툴을 응용 프로그램 폴더에 설치해 한 번 실행하고 Safari 설정에서 확장을 켜 주세요.";
   }
   if (IS_HTD && text) {
     return text.length > 300 ? `${text.slice(0, 300)}…` : text;
   }
   if (/not found/i.test(text)) {
-    return "HTT 연결이 등록되지 않았습니다. HTT 메뉴 막대 › 브라우저 번역…에서 이 브라우저의 '설치 시작'을 누르세요.";
+    return "한툴 연결이 등록되지 않았습니다. 한툴 메뉴 막대 › 브라우저 번역…에서 이 브라우저의 '설치 시작'을 누르세요.";
   }
   if (/forbidden/i.test(text)) {
-    return "이 확장은 HTT 연결 허용 목록에 없습니다. HTT의 '브라우저 번역…'에서 '설치 시작'을 다시 누른 뒤 확장 폴더를 다시 로드하세요.";
+    return "이 확장은 한툴 연결 허용 목록에 없습니다. 한툴의 '브라우저 번역…'에서 '설치 시작'을 다시 누른 뒤 확장 폴더를 다시 로드하세요.";
   }
-  return "HTT 엔진과 연결이 끊겼습니다. HTT가 응용 프로그램 폴더에 있는지 확인하고 다시 시도하세요.";
+  return "한툴 엔진과 연결이 끊겼습니다. 한툴이 응용 프로그램 폴더에 있는지 확인하고 다시 시도하세요.";
 }
 
 const native = {
@@ -266,7 +266,7 @@ const native = {
       const timer = setTimeout(() => {
         if (!this.pending.has(id)) return;
         this.cancel(id);
-        reject(codedError("timeout", "HTT 응답 시간이 지났습니다. 다시 시도하세요."));
+        reject(codedError("timeout", "한툴 응답 시간이 지났습니다. 다시 시도하세요."));
       }, timeout);
       this.pending.set(id, { resolve, reject, timer, tabId, kind, onProgress });
       const failSend = (error) => {
@@ -548,7 +548,7 @@ async function updateTabIcon(tabId) {
     await callActionApi(api.action.setBadgeText.bind(api.action), { tabId, text: "" });
   }
   if (typeof api.action?.setTitle === "function") {
-    const title = info.running ? "HTT 웹 번역 — 번역 중…" : "HTT 웹 번역";
+    const title = info.running ? "한툴 웹 번역 — 번역 중…" : "한툴 웹 번역";
     await callActionApi(api.action.setTitle.bind(api.action), { tabId, title });
   }
 }
@@ -626,7 +626,7 @@ function captureErrorCode(error) {
 }
 
 const CAPTURE_MESSAGES = {
-  capture_denied: "이미지 글자 번역에는 화면 캡처 권한이 필요합니다. 툴바의 HTT 아이콘에서 '번역'을 누르세요.",
+  capture_denied: "이미지 글자 번역에는 화면 캡처 권한이 필요합니다. 툴바의 한툴 아이콘에서 '번역'을 누르세요.",
   capture_rate_limited: "화면 캡처 요청이 잠시 몰려 이번에는 이미지를 확인하지 못했습니다. 잠시 뒤 다시 번역을 누르세요.",
   capture_failed: "화면을 캡처하지 못해 이미지 글자를 번역하지 못했습니다. 다시 번역을 눌러 주세요.",
   stale: ""
@@ -1151,7 +1151,7 @@ async function handleContent(message, sender) {
       return { ...(await fx.get(reason)) };
     }
     case "translate": {
-      if (!settings.consent) throw codedError("consent_required", "툴바의 HTT 아이콘에서 먼저 동의해 주세요.");
+      if (!settings.consent) throw codedError("consent_required", "툴바의 한툴 아이콘에서 먼저 동의해 주세요.");
       const engine = requestEngine(message, settings);
       if (!TARGETS.includes(message.target) || !validTexts(message.texts, engine)) throw codedError("bad_request", "잘못된 번역 요청입니다.");
       const id = native.nextId("t");
@@ -1175,7 +1175,7 @@ async function handleContent(message, sender) {
       const texts = Array.isArray(response.texts) && response.texts.length === message.texts.length
         ? response.texts.map((t) => (typeof t === "string" ? t : null))
         : null;
-      if (!texts) throw codedError("bad_response", "HTT 응답 형식이 올바르지 않습니다.");
+      if (!texts) throw codedError("bad_response", "한툴 응답 형식이 올바르지 않습니다.");
       return { ok: true, texts, missing: Array.isArray(response.missing) ? response.missing.filter((m) => typeof m === "string") : [],
                langs: sanitizeLangs(response.langs, texts.length), warning: sanitizeWarning(response.warning),
                aiRefine: response.aiRefine === true, timing: sanitizeTiming(response.timing) };
@@ -1185,7 +1185,7 @@ async function handleContent(message, sender) {
     // translatePageGoogle은 이전 내용 스크립트용 옛 이름(Google 전용)이다.
     case "translatePageExternal":
     case "translatePageGoogle": {
-      if (!settings.consent) throw codedError("consent_required", "툴바의 HTT 아이콘에서 먼저 동의해 주세요.");
+      if (!settings.consent) throw codedError("consent_required", "툴바의 한툴 아이콘에서 먼저 동의해 주세요.");
       const engine = pageEngineOf(message);
       if (!engine || !externalAllowedFor(message, sender, tab, engine)) throw codedError("cancelled", "");
       if (!TARGETS.includes(message.target) || !validTexts(message.texts, engine)) {
@@ -1204,12 +1204,12 @@ async function handleContent(message, sender) {
       const texts = Array.isArray(response.texts) && response.texts.length === message.texts.length
         ? response.texts.map((t) => (typeof t === "string" ? t : null))
         : null;
-      if (!texts) throw codedError("bad_response", "HTT 응답 형식이 올바르지 않습니다.");
+      if (!texts) throw codedError("bad_response", "한툴 응답 형식이 올바르지 않습니다.");
       return { ok: true, texts, missing: Array.isArray(response.missing) ? response.missing.filter((m) => typeof m === "string") : [],
                langs: sanitizeLangs(response.langs, texts.length), warning: sanitizeWarning(response.warning) };
     }
     case "capture": {
-      if (!settings.consent) throw codedError("consent_required", "툴바의 HTT 아이콘에서 먼저 동의해 주세요.");
+      if (!settings.consent) throw codedError("consent_required", "툴바의 한툴 아이콘에서 먼저 동의해 주세요.");
       const captureId = await captureVisible(tab, validCalibration(message.calibration), epoch);
       if (epoch !== control.epoch) {
         captures.delete(tab.id);
@@ -1220,7 +1220,7 @@ async function handleContent(message, sender) {
     case "ocr":
     case "ocrPageExternal":
     case "ocrPageGoogle": {
-      if (!settings.consent) throw codedError("consent_required", "툴바의 HTT 아이콘에서 먼저 동의해 주세요.");
+      if (!settings.consent) throw codedError("consent_required", "툴바의 한툴 아이콘에서 먼저 동의해 주세요.");
       const viewport = message.viewport;
       const page = message.cmd !== "ocr";
       const engine = page ? pageEngineOf(message) : requestEngine(message, settings);
@@ -1277,7 +1277,7 @@ async function handleContent(message, sender) {
                calibration: sanitizeCalibration(response.calibration), timing: sanitizeTiming(response.timing) };
     }
     case "refine": {
-      if (!settings.consent) throw codedError("consent_required", "툴바의 HTT 아이콘에서 먼저 동의해 주세요.");
+      if (!settings.consent) throw codedError("consent_required", "툴바의 한툴 아이콘에서 먼저 동의해 주세요.");
       const engine = requestEngine(message, settings);
       if (engine !== LOCAL_ENGINE) throw codedError("bad_request", "다듬기는 Mac 기본 번역에서만 지원합니다.");
       if (!TARGETS.includes(message.target) || !validRefineItems(message.items)) {
@@ -1509,7 +1509,7 @@ async function handlePopup(message) {
       settings = await loadSettings();
       const grant = await hasGlobalGrant();
       // 동의 전에는 Barobogi를 실행하거나 연결하지 않는다.
-      let engine = { ok: false, message: "동의하면 HTT에 연결합니다." };
+      let engine = { ok: false, message: "동의하면 한툴에 연결합니다." };
       if (settings.consent) {
         try {
           engine = { ok: true, ...(await native.hello()) };
@@ -1668,7 +1668,7 @@ async function handlePopup(message) {
       if (!page) {
         if (externalPages.get(tabId)?.token === token) externalPages.delete(tabId);
         if (deadlines.get(tabId)?.token === token) dropDeadline(tabId);
-        throw codedError("bad_response", "HTT 확장과 통신하지 못했습니다.");
+        throw codedError("bad_response", "한툴 확장과 통신하지 못했습니다.");
       }
       return { ok: true, page };
     }

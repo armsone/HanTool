@@ -84,7 +84,7 @@ final class BrowserExtensionManager: ObservableObject {
 
     /// The one native-messaging peer that may ever be used: HTT's own app extension.
     static let expectedExtensionIdentifier = "com.local.screentranslator.safari-extension"
-    static let installedAppPath = "/Applications/HTT.app"
+    static let installedAppPath = "/Applications/HanTool.app"
     static let httBundleIdentifier = "com.local.screentranslator"
 
     /// HTD가 HTT.app/Contents/Helpers/HTD.app 안에서 실행 중이거나 HTT_HOST 하에서 호스트 번들일 때의 HTT.app.
@@ -101,7 +101,7 @@ final class BrowserExtensionManager: ObservableObject {
         let contents = helpers.deletingLastPathComponent()
         let app = contents.deletingLastPathComponent()
         guard me.lastPathComponent == "HTD.app", helpers.lastPathComponent == "Helpers",
-              contents.lastPathComponent == "Contents", app.lastPathComponent == "HTT.app",
+              contents.lastPathComponent == "Contents", app.pathExtension == "app",
               Bundle(url: app)?.bundleIdentifier == httBundleIdentifier,
               let own = ownTeamIdentifier(), teamIdentifier(of: app) == own else { return nil }
         return app
@@ -234,8 +234,8 @@ final class BrowserExtensionManager: ObservableObject {
     func chooseAppAndConnect() {
         guard isSupported else { return }
         let panel = NSOpenPanel()
-        panel.title = "HTT.app 선택"
-        panel.message = "연결할 HTT 앱을 선택하세요. 앱 파일은 읽기만 하고 복사하거나 바꾸지 않습니다."
+        panel.title = "HanTool.app 선택"
+        panel.message = "연결할 한툴 앱을 선택하세요. 앱 파일은 읽기만 하고 복사하거나 바꾸지 않습니다."
         panel.prompt = "선택"
         panel.allowedContentTypes = [.application]
         panel.canChooseFiles = true
@@ -268,7 +268,7 @@ final class BrowserExtensionManager: ObservableObject {
         } else {
             unloadCurrent()
             status = .notConnected
-            notice = "HTT 번역 확장 연결을 껐습니다. HTT 앱 파일은 그대로입니다."
+            notice = "한툴 번역 확장 연결을 껐습니다. 한툴 앱 파일은 그대로입니다."
         }
     }
 
@@ -285,7 +285,7 @@ final class BrowserExtensionManager: ObservableObject {
             d.removeObject(forKey: Self.approvedKey)
         }
         status = .notConnected
-        notice = "HTT 번역 확장 등록을 지웠습니다. HTT 앱 파일은 그대로입니다."
+        notice = "한툴 번역 확장 등록을 지웠습니다. 한툴 앱 파일은 그대로입니다."
     }
 
     /// 'HTT 번역' (menu) and the toolbar button: the user's click is the gesture for the active tab.
@@ -296,7 +296,7 @@ final class BrowserExtensionManager: ObservableObject {
         }
         guard isConnected, let rt = currentRuntime else {
             if installedAppAvailable {
-                notice = "설치된 HTT 번역 확장을 연결하는 중입니다…"
+                notice = "설치된 한툴 번역 확장을 연결하는 중입니다…"
                 connectInstalledApp()
             } else if !isInsideHTT {
                 chooseAppAndConnect()
@@ -380,7 +380,7 @@ final class BrowserExtensionManager: ObservableObject {
                 self.issues = rt.currentIssues()
                 self.status = .connected
                 self.notice = firstConnection
-                    ? "\(summary.name) 확장을 불러왔습니다.\(autoAccess ? " 알려진 기능과 http/https 사이트 접근은 자동으로 허용했습니다." : "") 번역이 실제로 되는지는 'HTT 번역'을 실행해 확인해 주세요."
+                    ? "\(summary.name) 확장을 불러왔습니다.\(autoAccess ? " 알려진 기능과 http/https 사이트 접근은 자동으로 허용했습니다." : "") 번역이 실제로 되는지는 '한툴 번역'을 실행해 확인해 주세요."
                     : nil
             } catch {
                 guard generation == self.loadGeneration else { return }
@@ -412,13 +412,13 @@ final class BrowserExtensionManager: ObservableObject {
                   id.hasPrefix(appID + "."),
                   let ext = bundle.infoDictionary?["NSExtension"] as? [String: Any],
                   ext["NSExtensionPointIdentifier"] as? String == extensionPoint else { continue }
-            if let problem = signatureProblem(appURL) { throw ExtensionUIError(message: "HTT 앱: " + problem) }
-            if let problem = signatureProblem(url) { throw ExtensionUIError(message: "HTT 확장: " + problem) }
+            if let problem = signatureProblem(appURL) { throw ExtensionUIError(message: "한툴 앱: " + problem) }
+            if let problem = signatureProblem(url) { throw ExtensionUIError(message: "한툴 확장: " + problem) }
             let name = (appBundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
                 ?? (appBundle.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? appURL.deletingPathExtension().lastPathComponent
             return ExtensionIdentity(appURL: appURL, appexURL: url, appexBundle: bundle, appName: name, appIdentifier: appID)
         }
-        throw ExtensionUIError(message: "이 앱에서 HTT 웹 번역 확장(\(expectedExtensionIdentifier))을 찾지 못했습니다.")
+        throw ExtensionUIError(message: "이 앱에서 한툴 웹 번역 확장(\(expectedExtensionIdentifier))을 찾지 못했습니다.")
     }
 
     private static func ownTeamIdentifier() -> String? {
@@ -479,7 +479,7 @@ final class BrowserExtensionManager: ObservableObject {
         lines.append("앱: \(identity.appURL.path) (코드 서명 확인됨)")
         lines.append("요청하는 기능: " + listText(summary.permissions))
         if summary.permissions.contains("nativeMessaging") {
-            lines.append("HTT 앱과 통신(nativeMessaging)은 서명된 HTT 앱 확장 \(expectedExtensionIdentifier) 한 곳과만 이루어집니다.")
+            lines.append("한툴 앱과 통신(nativeMessaging)은 서명된 한툴 앱 확장 \(expectedExtensionIdentifier) 한 곳과만 이루어집니다.")
         }
         lines.append("접근을 요청하는 사이트: " + listText(summary.hostPatterns))
         lines.append("알려진 기능 외의 요청과 http/https가 아닌 주소는 허용되지 않습니다.")
@@ -489,7 +489,7 @@ final class BrowserExtensionManager: ObservableObject {
         if !summary.loadErrors.isEmpty {
             lines.append("읽는 중 알려진 문제: " + listText(summary.loadErrors, limit: 3))
         }
-        lines.append("페이지 내용은 'HTT 번역'을 직접 실행하고 해당 사이트 접근을 허용한 경우에만 확장이 읽습니다. 이 앱은 아무것도 몰래 보내지 않습니다.")
+        lines.append("페이지 내용은 '한툴 번역'을 직접 실행하고 해당 사이트 접근을 허용한 경우에만 확장이 읽습니다. 이 앱은 아무것도 몰래 보내지 않습니다.")
         return confirm(message: "\(summary.name) \(summary.version) 확장을 이 브라우저에 연결할까요?",
                        detail: lines.joined(separator: "\n\n"), allow: "연결")
     }
@@ -539,8 +539,8 @@ final class BrowserExtensionManager: ObservableObject {
     }
 
     var toolbarLabel: String {
-        guard #available(macOS 15.4, *), let rt = currentRuntime, let action = rt.currentAction() else { return "HTT 번역" }
-        return action.label.isEmpty ? "HTT 번역" : action.label
+        guard #available(macOS 15.4, *), let rt = currentRuntime, let action = rt.currentAction() else { return "한툴 번역" }
+        return action.label.isEmpty ? "한툴 번역" : action.label
     }
 
     func bumpAction() { actionRevision += 1 }
@@ -790,7 +790,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
 
     private func startHelper() throws -> HelperChannel {
         if let existing = helper, existing.process.isRunning { return existing }
-        guard let appURL = helperAppURL else { throw ExtensionUIError(message: "HTT 앱 위치를 알 수 없습니다.") }
+        guard let appURL = helperAppURL else { throw ExtensionUIError(message: "한툴 앱 위치를 알 수 없습니다.") }
         _ = try BrowserExtensionManager.verify(appURL: appURL)
         let helperURL = appURL.appendingPathComponent("Contents/Helpers/SMTBrowserHost")
         let root = appURL.resolvingSymlinksInPath().path + "/"
@@ -798,10 +798,10 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         guard helperURL.resolvingSymlinksInPath().path.hasPrefix(root),
               FileManager.default.fileExists(atPath: helperURL.path, isDirectory: &isDir), !isDir.boolValue,
               FileManager.default.isExecutableFile(atPath: helperURL.path) else {
-            throw ExtensionUIError(message: "HTT 도우미(SMTBrowserHost)를 찾지 못했습니다.")
+            throw ExtensionUIError(message: "한툴 도우미(SMTBrowserHost)를 찾지 못했습니다.")
         }
         if let problem = BrowserExtensionManager.signatureProblem(helperURL) {
-            throw ExtensionUIError(message: "HTT 도우미: " + problem)
+            throw ExtensionUIError(message: "한툴 도우미: " + problem)
         }
         let channel = HelperChannel()
         channel.process.executableURL = helperURL
@@ -815,11 +815,11 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
             let status = process.terminationStatus
             Task { @MainActor in
                 guard let self = self, let channel = channel, self.helper === channel else { return }
-                self.stopHelper(reason: "HTT 도우미가 종료되었습니다 (코드 \(status)).")
+                self.stopHelper(reason: "한툴 도우미가 종료되었습니다 (코드 \(status)).")
             }
         }
         do { try channel.process.run() } catch {
-            throw ExtensionUIError(message: "HTT 도우미를 시작하지 못했습니다: " + error.localizedDescription)
+            throw ExtensionUIError(message: "한툴 도우미를 시작하지 못했습니다: " + error.localizedDescription)
         }
         helper = channel
         // Drop our copy of the child's write end so the reader sees EOF once the helper exits.
@@ -839,11 +839,11 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
                 }
                 return data
             }
-            var failure = "HTT 도우미 연결이 끊어졌습니다."
+            var failure = "한툴 도우미 연결이 끊어졌습니다."
             while let header = readExactly(4) {
                 let length = Int(header.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) })
                 if length == 0 || length > limit {
-                    failure = "HTT 도우미 응답 크기가 올바르지 않습니다."
+                    failure = "한툴 도우미 응답 크기가 올바르지 않습니다."
                     break
                 }
                 guard let frame = readExactly(length) else { break }
@@ -901,7 +901,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         if let id = object["id"] as? String {
             finish(id, object, nil)
         } else if type == "error" {
-            let text = (object["message"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "HTT 도우미 오류"
+            let text = (object["message"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "한툴 도우미 오류"
             failAll(text)
         }
     }
@@ -910,7 +910,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         let isCancel = message["type"] as? String == "cancel"
         guard JSONSerialization.isValidJSONObject(message), let data = try? JSONSerialization.data(withJSONObject: message),
               data.count <= Self.maxInputFrame else {
-            reply(nil, ExtensionUIError(message: "HTT로 보낼 메시지가 올바르지 않거나 너무 큽니다."))
+            reply(nil, ExtensionUIError(message: "한툴로 보낼 메시지가 올바르지 않거나 너무 큽니다."))
             return
         }
         if isCancel {
@@ -923,7 +923,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
             return
         }
         guard pendingReplies.count < Self.maxPending, pendingReplies[id] == nil else {
-            reply(nil, ExtensionUIError(message: "HTT 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."))
+            reply(nil, ExtensionUIError(message: "한툴 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."))
             return
         }
         let channel: HelperChannel
@@ -935,14 +935,14 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         let timeout = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
-            self?.finish(id, nil, ExtensionUIError(message: "HTT 응답 시간이 지났습니다."))
+            self?.finish(id, nil, ExtensionUIError(message: "한툴 응답 시간이 지났습니다."))
         }
         pendingReplies[id] = PendingReply(reply: reply, timeout: timeout)
         channel.queue.async { [weak self, weak channel] in
             guard let channel = channel, !channel.write(frame: data) else { return }
             Task { @MainActor in
                 guard let self = self, self.helper === channel else { return }
-                self.stopHelper(reason: "HTT 도우미에 메시지를 보내지 못했습니다.")
+                self.stopHelper(reason: "한툴 도우미에 메시지를 보내지 못했습니다.")
             }
         }
     }
@@ -955,7 +955,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
             return
         }
         guard let dict = message as? [String: Any], let id = dict["id"] as? String, !id.isEmpty else {
-            replyHandler(nil, ExtensionUIError(message: "HTT로 보낼 메시지 형식이 올바르지 않습니다."))
+            replyHandler(nil, ExtensionUIError(message: "한툴로 보낼 메시지 형식이 올바르지 않습니다."))
             return
         }
         if dict["type"] as? String == "htdHostIntent" {
@@ -1356,12 +1356,12 @@ struct ExtensionActionButton: NSViewRepresentable {
         button.imageHugsTitle = true
         if isConn {
             let label = manager.toolbarLabel
-            let tip = label.isEmpty ? "HTT 번역" : label
+            let tip = label.isEmpty ? "한툴 번역" : label
             button.toolTip = tip
             button.setAccessibilityLabel(tip)
             button.isEnabled = manager.canPerformAction
         } else {
-            let tip = "HTT 번역 (미연결 — 클릭하여 HTT 연결)"
+            let tip = "한툴 번역 (미연결 — 클릭하여 한툴 연결)"
             button.toolTip = tip
             button.setAccessibilityLabel(tip)
             button.isEnabled = manager.isSupported
@@ -1378,7 +1378,7 @@ struct ExtensionMenu: View {
             Text(manager.statusText)
             if manager.isSupported {
                 if manager.isConnected {
-                    Button("HTT 번역") { manager.performAction() }
+                    Button("한툴 번역") { manager.performAction() }
                         .disabled(!manager.canPerformAction)
                     Button("업데이트 다시 불러오기") { manager.reload() }
                 } else if manager.registeredAppPath != nil {
@@ -1387,10 +1387,10 @@ struct ExtensionMenu: View {
                 }
                 Divider()
                 if !manager.isInsideHTT {
-                    Button("HTT 번역 확장 연결…") { manager.chooseAppAndConnect() }
+                    Button("한툴 번역 확장 연결…") { manager.chooseAppAndConnect() }
                         .disabled(manager.status == .loading)
                     if manager.installedAppAvailable {
-                        Button("설치된 HTT 사용 (\(BrowserExtensionManager.installedAppPath))") { manager.connectInstalledApp() }
+                        Button("설치된 한툴 사용 (\(BrowserExtensionManager.installedAppPath))") { manager.connectInstalledApp() }
                             .disabled(manager.status == .loading)
                     }
                 }
@@ -1398,7 +1398,7 @@ struct ExtensionMenu: View {
                     Divider()
                     Button(manager.isEnabled ? "연결 끄기" : "연결 켜기") { manager.setEnabled(!manager.isEnabled) }
                     if !manager.isInsideHTT {
-                        Button("등록 제거 (HTT 파일은 그대로)") { manager.removeRegistration() }
+                        Button("등록 제거 (한툴 파일은 그대로)") { manager.removeRegistration() }
                     }
                 }
             }
@@ -1406,7 +1406,7 @@ struct ExtensionMenu: View {
             Label("확장 기능", systemImage: "puzzlepiece.extension")
         }
         .fixedSize()
-        .help("별도로 설치한 HTT 번역 확장을 연결합니다.")
+        .help("별도로 설치한 한툴 번역 확장을 연결합니다.")
         .accessibilityLabel("확장 기능 메뉴")
     }
 }
