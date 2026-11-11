@@ -33,6 +33,7 @@ public final class CCMBIntegration: ObservableObject {
     @Published public private(set) var showMenuBar: Bool
     @Published public private(set) var serverTarget: String
     @Published public private(set) var dataSource: String
+    @Published public private(set) var runtimeGeneration: Int = 0
     @Published public var targetDraft: String {
         didSet {
             if Self.normalizedTarget(oldValue) != Self.normalizedTarget(targetDraft) {
@@ -293,6 +294,7 @@ public final class CCMBIntegration: ObservableObject {
             }
         )
         HTTCCMBRuntime.start(showMenuBar: showMenuBar, callbacks: callbacks)
+        runtimeGeneration &+= 1
     }
 
     // MARK: - 상태 조회

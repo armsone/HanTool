@@ -171,6 +171,7 @@ public struct MainView: View {
     @State private var hasOpenedSAW: Bool = false
     @State private var projectRevealToken: Int = 0
     @ObservedObject private var adHide = BrowserAdHideManager.shared
+    @ObservedObject private var rateDisplay = NetworkRateDisplayStore.shared
     #if HTT_HOST
     @ObservedObject private var hostExport = HTDHostExport.shared
     private var hostedToolID: String? { hostExport.hostedToolID }
@@ -197,7 +198,9 @@ public struct MainView: View {
         #if HTT_HOST
         let isExpanded = (columnVisibility != .detailOnly)
         HSplitView {
-            SidebarView(appModel: appModel, navModel: navModel)
+            HierarchicalSidebarView(appModel: appModel, navModel: navModel, onRequestDownloadInput: {
+                appModel.requestDownloadInputFocus()
+            })
             .frame(minWidth: isExpanded ? 200 : 0,
                    idealWidth: isExpanded ? 220 : 0,
                    maxWidth: isExpanded ? 260 : 0,
@@ -208,7 +211,9 @@ public struct MainView: View {
             .accessibilityHidden(!isExpanded)
 
             detailContentView
-                .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            GlobalAssistantDock(appModel: appModel)
         }
         .frame(minWidth: 860, idealWidth: 1120, maxWidth: .infinity,
                minHeight: 560, idealHeight: 760, maxHeight: .infinity)
@@ -226,8 +231,15 @@ public struct MainView: View {
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
+                ToolbarItem(placement: .primaryAction) {
+                    AIPanelSwitch(appModel: appModel)
+                }
+                .sharedBackgroundVisibility(.hidden)
             } else {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .primaryAction) {
+                    AIPanelSwitch(appModel: appModel)
+                }
             }
         }
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
@@ -279,18 +291,31 @@ public struct MainView: View {
         }
         #else
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(appModel: appModel, navModel: navModel)
+            HierarchicalSidebarView(appModel: appModel, navModel: navModel, onRequestDownloadInput: {
+                appModel.requestDownloadInputFocus()
+            })
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
         } detail: {
-            detailContentView
+            HStack(spacing: 0) {
+                detailContentView
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                GlobalAssistantDock(appModel: appModel)
+            }
         }
         .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
         .toolbar {
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
+                ToolbarItem(placement: .primaryAction) {
+                    AIPanelSwitch(appModel: appModel)
+                }
+                .sharedBackgroundVisibility(.hidden)
             } else {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .primaryAction) {
+                    AIPanelSwitch(appModel: appModel)
+                }
             }
         }
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
@@ -358,8 +383,8 @@ public struct MainView: View {
                             navModel.selectDownloadTab(tab, appModel: appModel, clearTool: clearHostedTool)
                         },
                         onStartWithURL: {
-                            navModel.navigateTo(destination: .browser, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                            appModel.requestAddressFocus(for: appModel.browser, isExplicit: true)
+                            navModel.selectDownloadTab(.queue, appModel: appModel, clearTool: clearHostedTool)
+                            appModel.requestDownloadInputFocus()
                         }
                     )
                     Divider()
@@ -407,9 +432,12 @@ public struct MainView: View {
                         }
                     )
                     Divider()
-                } else if navModel.destination == .macManagement {
+                } else if navModel.destination == .macManagement || navModel.destination == .usbDrives {
                     MacManagementHeaderView(
-                        activeChild: $navModel.activeMacManagementChild,
+                        activeChild: Binding(
+                            get: { navModel.destination == .usbDrives ? "cleanUSB" : navModel.activeMacManagementChild },
+                            set: { navModel.activeMacManagementChild = $0 }
+                        ),
                         onSelectChild: { childID in
                             navModel.selectMacManagementChild(childID, selectTool: selectTool)
                         },
@@ -532,14 +560,33 @@ public struct MainView: View {
         HStack(spacing: 4) {
             PageAudioControls(appModel: appModel)
                 .fixedSize()
-            Button {
-                navModel.isSpeedTestPresented = true
-            } label: {
-                NetworkRateIndicator()
+            if rateDisplay.location == .appTop {
+                Button {
+                    navModel.isSpeedTestPresented = true
+                } label: {
+                    NetworkRateIndicator()
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("속도 테스트 열기")
+                .help("속도 테스트 열기")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("속도 테스트 열기")
-            .help("속도 테스트 열기")
+
+            if navModel.destination == .browser && appModel.selectedTab == .browser && hostedToolID == nil {
+                ExtensionActionButton(manager: appModel.extensions)
+                    .fixedSize()
+            }
+            #if HTT_HOST
+            if (hostedToolID == "mail" || hostedToolID == "screen"),
+               let toolID = hostedToolID,
+               let button = hostExport.hostedTranslationControl?(toolID) {
+                button
+                    .font(.caption.bold())
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+                    .frame(height: 26)
+                    .background(Capsule().fill(palette.surfaceColor))
+            }
+            #endif
 
             Button(action: selectDestinationFolder) {
                 HStack(spacing: 4) {
@@ -596,8 +643,6 @@ public struct MainView: View {
                 .fixedSize()
 
 
-            AIPanelSwitch(appModel: appModel)
-                .fixedSize()
 
             ThemeButton(store: appearance)
                 .frame(width: 26, height: 26)
@@ -644,7 +689,7 @@ struct CompactSidebarRail: View {
     #endif
 
     private static let topDestinations: [MainNavDestination] = [
-        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .server
+        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .usbDrives, .server
     ]
     private static let bottomDestinations: [MainNavDestination] = [
         .settings, .help
@@ -874,119 +919,6 @@ private struct CompactProjectSessionRow: View {
     }
 }
 
-// MARK: - Sidebar
-
-struct SidebarView: View {
-    @ObservedObject var appModel: AppModel
-    @ObservedObject var navModel: UnifiedNavigationModel
-    @Environment(\.bkPalette) var palette
-
-    #if HTT_HOST
-    @ObservedObject private var hostExport = HTDHostExport.shared
-    private var hostedToolID: String? { hostExport.hostedToolID }
-    private func selectTool(_ id: String) { hostExport.selectToolFromSidebar(id) }
-    private func clearHostedTool() { hostExport.clearHostedTool() }
-    #else
-    private var hostedToolID: String? { nil }
-    private func selectTool(_ id: String) {}
-    private func clearHostedTool() {}
-    #endif
-
-    private static let topDestinations: [MainNavDestination] = [
-        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .server
-    ]
-    private static let bottomDestinations: [MainNavDestination] = [
-        .settings, .help
-    ]
-
-    private var activeQueueCount: Int {
-        appModel.jobs.filter { !$0.state.isTerminal || $0.state == .interrupted || $0.state == .selectionChanged }.count
-    }
-
-    init(appModel: AppModel, navModel: UnifiedNavigationModel) {
-        self.appModel = appModel
-        self.navModel = navModel
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 3) {
-                ForEach(Self.topDestinations) { dest in
-                    sidebarRow(dest)
-                }
-            }
-            .padding(.top, 10)
-            .padding(.horizontal, 10)
-
-            Spacer()
-
-            Divider()
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-
-            VStack(spacing: 3) {
-                ForEach(Self.bottomDestinations) { dest in
-                    sidebarRow(dest)
-                }
-            }
-            .padding(.bottom, 12)
-            .padding(.horizontal, 10)
-        }
-        .frame(minWidth: 200, maxWidth: 260)
-        .frame(maxHeight: .infinity)
-        .background(palette.cardColor)
-        .contentShape(Rectangle())
-        .urlDropTarget(appModel: appModel)
-    }
-
-    @ViewBuilder
-    private func sidebarRow(_ dest: MainNavDestination) -> some View {
-        let isSelected = navModel.destination == dest
-        Button {
-            navModel.navigateTo(
-                destination: dest,
-                appModel: appModel,
-                selectTool: selectTool,
-                clearTool: clearHostedTool
-            )
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: dest.iconName)
-                    .font(.system(size: 15))
-                    .frame(width: 20, height: 20)
-                    .foregroundColor(isSelected ? palette.accentColor : palette.textColor)
-
-                Text(dest.rawValue)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? palette.accentColor : palette.textColor)
-                    .lineLimit(1)
-
-                Spacer()
-
-                if dest == .downloads && activeQueueCount > 0 {
-                    Text("\(activeQueueCount)")
-                        .font(.caption.bold())
-                        .foregroundColor(palette.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(palette.accentSoftColor))
-                }
-            }
-            .padding(.vertical, 6)
-            .padding(.horizontal, 10)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(isSelected ? palette.accentSoftColor : Color.clear)
-            )
-        }
-        .buttonStyle(.plain)
-        .help(dest == .downloads && activeQueueCount > 0 ? "다운로드 (\(activeQueueCount)개 진행 중)" : dest.rawValue)
-        .accessibilityLabel(dest == .downloads && activeQueueCount > 0 ? "\(dest.rawValue), 진행 중 \(activeQueueCount)개" : dest.rawValue)
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
-    }
-}
-
 // MARK: - Header Address Bar
 
 struct HeaderAddressBar: View {
@@ -994,6 +926,7 @@ struct HeaderAddressBar: View {
     @ObservedObject var session: SessionManager
     @ObservedObject var connection: ConnectionManager
     @Environment(\.bkPalette) private var palette
+    @FocusState private var isFieldFocused: Bool
 
     init(appModel: AppModel) {
         self.appModel = appModel
@@ -1007,17 +940,26 @@ struct HeaderAddressBar: View {
                 HStack(spacing: 8) {
                     TextField("다운로드할 웹 주소(URL)를 입력하세요", text: $appModel.urlInput)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isFieldFocused)
                         .onSubmit {
                             appModel.addJobFromInput()
                         }
                         .accessibilityLabel("다운로드할 웹 주소")
+                        .onAppear {
+                            if appModel.downloadInputFocusRequest > 0 {
+                                isFieldFocused = true
+                            }
+                        }
+                        .onChange(of: appModel.downloadInputFocusRequest) { _ in
+                            isFieldFocused = true
+                        }
 
                     Button(action: {
                         appModel.addJobFromInput()
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "magnifyingglass")
-                            Text("분석")
+                            Text("다운로드")
                         }
                         .padding(.horizontal, 6)
                     }
@@ -1037,12 +979,12 @@ struct HeaderAddressBar: View {
                     Button(action: { appModel.pasteLinksFromClipboard() }) {
                         HStack(spacing: 4) {
                             Image(systemName: "doc.on.clipboard")
-                            Text("링크 붙여넣기")
+                            Text("링크 붙여넣고 받기")
                         }
                     }
                     .buttonStyle(.bordered)
-                    .help("클립보드에 복사된 웹 주소를 눌렀을 때만 읽어 분석 후 바로 다운로드합니다.")
-                    .accessibilityLabel("클립보드의 링크 붙여넣어 분석")
+                    .help("클립보드에 복사된 웹 주소를 눌렀을 때만 읽어 바로 다운로드합니다.")
+                    .accessibilityLabel("링크 붙여넣고 받기")
                 }
 
                 if session.isAlive {
@@ -1188,9 +1130,28 @@ struct AIPanelSwitch: View {
         hasAnyEnabled ? aiStore.selectedService.name : "사용 안 함"
     }
 
+    private func setPanelOpen(_ val: Bool) {
+        if val && !hasAnyEnabled {
+            navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+        } else {
+            appModel.setAIPanelOpen(val)
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Menu {
+                Button {
+                    setPanelOpen(!appModel.isAIPanelOpen)
+                } label: {
+                    Label(
+                        appModel.isAIPanelOpen ? "비서 대화창 닫기" : "비서 대화창 열기",
+                        systemImage: appModel.isAIPanelOpen ? "sidebar.right" : "sidebar.leading"
+                    )
+                }
+
+                Divider()
+
                 if aiStore.enabledServices.isEmpty {
                     Text("설정 > AI 연결에서 사용할 AI를 켜 주세요")
                         .font(.caption)
@@ -1230,11 +1191,7 @@ struct AIPanelSwitch: View {
             Toggle("비서 대화창 (\(selectedName))", isOn: Binding(
                 get: { appModel.isAIPanelOpen },
                 set: { val in
-                    if val && !hasAnyEnabled {
-                        navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                    } else {
-                        appModel.setAIPanelOpen(val)
-                    }
+                    setPanelOpen(val)
                 }
             ))
             .labelsHidden()

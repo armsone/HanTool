@@ -51,6 +51,10 @@ public final class UnifiedBrowserManager {
     /// 모듈이 소유한 캐시된 단일 컨트롤러(내부에 통합 바깥 사이드바 + 브라우저/Planner + 주입된 단일 불투명 toolView 포함)를 반환한다.
     public func makeMainBrowserViewController(toolView: AnyView) -> NSViewController? {
         guard ensureReady() else { return nil }
+        HTDHostExport.shared.hostedTranslationControl = { id in
+            guard id == "mail" || id == "screen" else { return nil }
+            return AnyView(HostedTranslationToolbarButton(context: id))
+        }
         return HTDHostExport.shared.makeMainBrowserViewController(toolView: toolView) { [weak self] toolID in
             self?.handleToolSelectedFromModule(toolID)
         }
@@ -106,6 +110,8 @@ public final class UnifiedBrowserManager {
             MailWindowCoordinator.shared.selectSectionFromModule(.cleanUSB)
         case "serverStatus":
             MailWindowCoordinator.shared.selectSectionFromModule(.serverStatus)
+        case "serverStatusSettings":
+            MailWindowCoordinator.shared.selectSectionFromModule(.serverStatusSettings)
         case "help":
             MailWindowCoordinator.shared.selectSectionFromModule(.help)
         case "general":
@@ -134,6 +140,7 @@ public final class UnifiedBrowserManager {
         case .macManagementSettings: return "macManagementSettings"
         case .cleanUSB: return "cleanUSB"
         case .serverStatus: return "serverStatus"
+        case .serverStatusSettings: return "serverStatusSettings"
         case .help: return "help"
         case .general: return "general"
         }

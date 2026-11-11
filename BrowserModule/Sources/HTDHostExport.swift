@@ -17,6 +17,7 @@ public final class HTDHostExport: ObservableObject {
 
     public var onToolSelected: ((String) -> Void)? = nil
     public var onThemeChanged: ((String) -> Void)? = nil
+    public var hostedTranslationControl: ((String) -> AnyView?)? = nil
 
     private var cachedController: NSViewController? = nil
     private var themeCancellable: AnyCancellable? = nil

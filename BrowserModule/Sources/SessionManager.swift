@@ -59,6 +59,8 @@ public final class SessionManager: ObservableObject {
     private static let maxSnapshotBytes = 64 * 1024 // 64 KB bounded size
 
     @Published public private(set) var optOutHosts: Set<String>
+    @Published public private(set) var loginContinuityAccessIssue: String?
+    var onLoginContinuityAccessIssue: ((String) -> Void)?
 
     private static func loadOptOutHosts() -> Set<String> {
         let defaults = HTDBrowserDefaults.standard
@@ -258,7 +260,7 @@ public final class SessionManager: ObservableObject {
         guard !isClearing, !optOutHosts.contains(host), observerGeneration == restoreGen else { return }
 
         guard let snapshot = loadKeychainSnapshot(forHost: host) else {
-            if !optOutHosts.contains(host) && observerGeneration == restoreGen {
+            if !isKeychainAccessBlocked && !optOutHosts.contains(host) && observerGeneration == restoreGen {
                 restoredHosts.insert(host)
             }
             return
@@ -387,7 +389,53 @@ public final class SessionManager: ObservableObject {
         status == errSecInteractionNotAllowed ||
         status == errSecAuthFailed ||
         status == errSecInteractionRequired ||
-        status == errSecNotAvailable
+        status == errSecNotAvailable ||
+        status == errSecUserCanceled
+    }
+
+    private func publishAccessIssueOnce(isRestoreFailure: Bool = false) {
+        let message = isRestoreFailure
+            ? "로그인 유지 보조 저장소 상태 복구에 실패하여 이번 실행에서는 다시 요청하지 않습니다. 기존 브라우저 로그인은 유지됩니다."
+            : "로그인 유지 보조 저장소에 접근하지 못해 이번 실행에서는 다시 요청하지 않습니다. 기존 브라우저 로그인은 유지됩니다."
+        if loginContinuityAccessIssue == nil {
+            loginContinuityAccessIssue = message
+            onLoginContinuityAccessIssue?(message)
+        }
+    }
+
+    private func withInteractionDisabled(_ operation: () -> OSStatus) -> OSStatus {
+        var previousState = DarwinBoolean(false)
+        let getStatus = SecKeychainGetUserInteractionAllowed(&previousState)
+        guard getStatus == errSecSuccess else {
+            isKeychainAccessBlocked = true
+            publishAccessIssueOnce()
+            return getStatus
+        }
+
+        let disableStatus = SecKeychainSetUserInteractionAllowed(false)
+        guard disableStatus == errSecSuccess else {
+            isKeychainAccessBlocked = true
+            publishAccessIssueOnce()
+            return disableStatus
+        }
+
+        var opStatus: OSStatus = errSecSuccess
+        var restoreStatus: OSStatus = errSecSuccess
+        do {
+            defer {
+                restoreStatus = SecKeychainSetUserInteractionAllowed(previousState.boolValue)
+                if restoreStatus != errSecSuccess {
+                    isKeychainAccessBlocked = true
+                    publishAccessIssueOnce(isRestoreFailure: true)
+                }
+            }
+            opStatus = operation()
+        }
+
+        if restoreStatus != errSecSuccess {
+            return restoreStatus
+        }
+        return opStatus
     }
 
     private func saveKeychainSnapshot(cookies: [HTTPCookie], forHost host: String) {
@@ -454,23 +502,29 @@ public final class SessionManager: ObservableObject {
         ]
 
         // atomic SecItemUpdate then Add; don't delete old before add
-        let updateStatus = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        let updateStatus = withInteractionDisabled {
+            SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+        }
         if updateStatus == errSecItemNotFound {
             var addQuery = query
             addQuery[kSecUseAuthenticationContext as String] = Self.makeNoUIAuthenticationContext()
             addQuery[kSecValueData as String] = encoded
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            let addStatus = withInteractionDisabled {
+                SecItemAdd(addQuery as CFDictionary, nil)
+            }
             if addStatus != errSecSuccess {
-                if Self.isInteractionOrAccessDenied(addStatus) {
+                if isKeychainAccessBlocked || Self.isInteractionOrAccessDenied(addStatus) {
                     isKeychainAccessBlocked = true
+                    publishAccessIssueOnce()
                     return
                 }
                 // Metadata cutoff preserves encrypted backup but prevents automatic stale restore.
                 invalidateSnapshot(forHost: host)
             }
         } else if updateStatus != errSecSuccess {
-            if Self.isInteractionOrAccessDenied(updateStatus) {
+            if isKeychainAccessBlocked || Self.isInteractionOrAccessDenied(updateStatus) {
                 isKeychainAccessBlocked = true
+                publishAccessIssueOnce()
                 return
             }
             // Metadata cutoff preserves encrypted backup but prevents automatic stale restore.
@@ -496,9 +550,12 @@ public final class SessionManager: ObservableObject {
             kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if Self.isInteractionOrAccessDenied(status) {
+        let status = withInteractionDisabled {
+            SecItemCopyMatching(query as CFDictionary, &item)
+        }
+        if isKeychainAccessBlocked || Self.isInteractionOrAccessDenied(status) {
             isKeychainAccessBlocked = true
+            publishAccessIssueOnce()
             return nil
         }
         guard status == errSecSuccess, let data = item as? Data else { return nil }
@@ -520,9 +577,12 @@ public final class SessionManager: ObservableObject {
             kSecAttrAccount as String: host,
             kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
-        let status = SecItemDelete(query as CFDictionary)
-        if Self.isInteractionOrAccessDenied(status) {
+        let status = withInteractionDisabled {
+            SecItemDelete(query as CFDictionary)
+        }
+        if isKeychainAccessBlocked || Self.isInteractionOrAccessDenied(status) {
             isKeychainAccessBlocked = true
+            publishAccessIssueOnce()
         }
     }
 
@@ -533,9 +593,12 @@ public final class SessionManager: ObservableObject {
             kSecAttrService as String: Self.keychainService,
             kSecUseAuthenticationContext as String: Self.makeNoUIAuthenticationContext()
         ]
-        let status = SecItemDelete(query as CFDictionary)
-        if Self.isInteractionOrAccessDenied(status) {
+        let status = withInteractionDisabled {
+            SecItemDelete(query as CFDictionary)
+        }
+        if isKeychainAccessBlocked || Self.isInteractionOrAccessDenied(status) {
             isKeychainAccessBlocked = true
+            publishAccessIssueOnce()
         }
     }
 

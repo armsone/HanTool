@@ -233,7 +233,55 @@ private func verifyEmbeddedHTDParent(ppid: pid_t) -> Bool {
 
 private func verifyHTDParentProcess(ppid: pid_t) -> Bool {
     guard ppid > 1 else { return false }
-    return verifyEmbeddedHTDParent(ppid: ppid) || verifyStandaloneHTDParent(ppid: ppid)
+    return verifyIntegratedHanToolParent(ppid: ppid) || verifyEmbeddedHTDParent(ppid: ppid) || verifyStandaloneHTDParent(ppid: ppid)
+}
+
+/// HanTool 본체(도우미를 직접 포함하는 서명된 바깥 HanTool.app)에서 직접 실행된 경우를 검증한다.
+private func verifyIntegratedHanToolParent(ppid: pid_t) -> Bool {
+    guard let teamID = BrowserCodeSigning.ownTeamID(),
+          !teamID.isEmpty, teamID.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
+
+    // 1) 도우미 실제 경로 → …/HanTool.app/Contents/Helpers/SMTBrowserHost 형태여야 한다.
+    guard let helperPath = ownExecutablePath() else { return false }
+    let helperURL = URL(fileURLWithPath: helperPath)
+    guard helperURL.lastPathComponent == "SMTBrowserHost",
+          helperURL.deletingLastPathComponent().lastPathComponent == "Helpers",
+          helperURL.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Contents" else { return false }
+    let outerURL = helperURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    guard outerURL.pathExtension == "app",
+          let outerBundle = Bundle(url: outerURL),
+          outerBundle.bundleIdentifier == BrowserBridge.appBundleID else { return false }
+
+    // 2) 바깥 HanTool 서명: 같은 팀 Developer ID + 전체 번들 식별자 유효 서명
+    var outerStatic: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(outerURL as CFURL, [], &outerStatic) == errSecSuccess, let outerStatic,
+          requirementCheck("anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(BrowserBridge.appBundleID)\"", code: outerStatic) else { return false }
+
+    // 3) 부모 실행 파일 경로는 바깥 HanTool 번들의 Contents/MacOS/CFBundleExecutable의 정확한 경로(심볼릭 링크 없음)여야 한다.
+    guard let executableName = outerBundle.infoDictionary?["CFBundleExecutable"] as? String,
+          !executableName.isEmpty else { return false }
+    let expectedPath = outerURL.appendingPathComponent("Contents/MacOS/\(executableName)").path
+    guard kernelRealPath(expectedPath) == expectedPath,
+          let rawParent = parentProcessPath(for: ppid),
+          kernelRealPath(rawParent) == expectedPath,
+          rawParent == expectedPath else { return false }
+
+    // 4) 부모 프로세스 동적 서명: 같은 팀 Developer ID + BrowserBridge.appBundleID 식별자, 그리고 정적 서명 식별자/팀 일치
+    var guest: SecCode?
+    guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid as String: NSNumber(value: ppid)] as CFDictionary, [], &guest) == errSecSuccess,
+          let guest else { return false }
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString("anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(BrowserBridge.appBundleID)\"" as CFString, [], &requirement) == errSecSuccess,
+          let requirement,
+          SecCodeCheckValidity(guest, [], requirement) == errSecSuccess else { return false }
+    var staticCode: SecStaticCode?
+    guard SecCodeCopyStaticCode(guest, [], &staticCode) == errSecSuccess, let staticCode else { return false }
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+          let dict = info as? [String: Any],
+          dict[kSecCodeInfoIdentifier as String] as? String == BrowserBridge.appBundleID,
+          dict[kSecCodeInfoTeamIdentifier as String] as? String == teamID else { return false }
+    return true
 }
 
 let origin = CommandLine.arguments.dropFirst().first ?? ""

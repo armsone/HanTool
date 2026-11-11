@@ -35,7 +35,7 @@ public struct BTNSettingsView: View {
                     .foregroundStyle(integration.statusColor)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Mac 관리 설정")
+                    Text("Mac 관리")
                         .font(.headline)
                     Text(integration.statusSummary)
                         .font(.callout)

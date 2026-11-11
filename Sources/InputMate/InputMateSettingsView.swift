@@ -276,7 +276,7 @@ struct InputMateSettingsView: View {
                     Image(systemName: "keyboard.badge.ellipsis")
                         .font(.system(size: 48))
                         .foregroundStyle(Color.accentColor)
-                    Text("한툴 입력 도우미")
+                    Text("입력 도우미")
                         .font(.title2.bold())
                     Text("키보드와 트랙패드를 편하게")
                         .font(.subheadline)

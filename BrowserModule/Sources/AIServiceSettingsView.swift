@@ -109,7 +109,7 @@ public struct AIServiceSettingsView: View {
                 Image(systemName: "sparkles")
                     .font(.title2)
                     .foregroundColor(palette.accentColor)
-                Text("AI 서비스 선택")
+                Text("비서")
                     .font(.title2.bold())
                     .foregroundColor(palette.textColor)
             }

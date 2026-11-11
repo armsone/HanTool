@@ -24,6 +24,8 @@ struct BrowserSetupView: View {
                         Button("앱 설정으로 이동") { settingsStore.section = .general }
                     }
                 }
+            } header: {
+                Text("번역 확장")
             }
 
             ForEach(BrowserIntegration.ChromiumBrowser.allCases) { browser in

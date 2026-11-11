@@ -1,5 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
+import HTTHTDCore
 import ServiceManagement
 import SwiftUI
 
@@ -13,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var mailHotKey: GlobalHotKey?
     private var browserHotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
+    private var networkRateCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         BundledFonts.registerIfNeeded()
@@ -217,6 +220,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         item.menu = menu
         statusItem = item
+
+        NetworkRateMonitor.shared.start()
+        setupNetworkRateObservation()
+    }
+
+    private func setupNetworkRateObservation() {
+        Publishers.CombineLatest3(
+            NetworkRateDisplayStore.shared.$location,
+            NetworkRateMonitor.shared.$uploadRate,
+            NetworkRateMonitor.shared.$downloadRate
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] location, upload, download in
+            self?.updateStatusItemRate(location: location, upload: upload, download: download)
+        }
+        .store(in: &networkRateCancellables)
+    }
+
+    private func updateStatusItemRate(location: NetworkRateDisplayLocation, upload: Double, download: Double) {
+        guard let item = statusItem, let button = item.button else { return }
+        switch location {
+        case .menuBar:
+            item.length = NSStatusItem.variableLength
+            button.imagePosition = .imageLeading
+            let up = NetworkRateMonitor.formatRate(upload)
+            let down = NetworkRateMonitor.formatRate(download)
+            let text = "▲\(up.value)\(up.unit) ▼\(down.value)\(down.unit)"
+            let attr = NSAttributedString(
+                string: text,
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+                ]
+            )
+            button.attributedTitle = attr
+        case .appTop:
+            item.length = NSStatusItem.squareLength
+            button.imagePosition = .imageOnly
+            button.attributedTitle = NSAttributedString(string: "")
+            button.title = ""
+        }
     }
 
     /// 메뉴를 열 때마다 현재 상태(창 표시, 주 버튼, 로그인 항목, 업데이트)로 다시 만든다.

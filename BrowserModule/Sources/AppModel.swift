@@ -189,6 +189,10 @@ public final class AppModel: ObservableObject {
         addressFocusRequest = AddressFocusRequest(tabID: tab.tabID, attemptId: tab.logicalAttemptId, isNewTab: isNewTab, isExplicit: isExplicit)
     }
     func clearAddressFocusRequest() { addressFocusRequest = nil }
+    @Published public private(set) var downloadInputFocusRequest: Int = 0
+    public func requestDownloadInputFocus() {
+        downloadInputFocusRequest &+= 1
+    }
     /// Burst of permitted popups: track pending focus to select the first popup after popups settle.
     private var pendingPopupBurstFocusTask: Task<Void, Never>?
     private var pendingPopupBurstFirstTabID: UUID?
@@ -439,6 +443,12 @@ public final class AppModel: ObservableObject {
         // Eagerly initialize SAW workspace and scheduler once configs and stores are ready
         _ = sawWorkspace
         attachAssistantPlanner()
+        session.onLoginContinuityAccessIssue = { [weak self] issue in
+            self?.browser.notice = issue
+        }
+        if let existingIssue = session.loginContinuityAccessIssue {
+            browser.notice = existingIssue
+        }
     }
 
     /// Owner of the common planner trigger for every chat host (Hana panel and the third-party panel, catalog and custom
@@ -451,6 +461,9 @@ public final class AppModel: ObservableObject {
             session.onLifecycle = { [weak self] _ in self?._sawWorkspace?.wakeAssistantOutbox() }
         }
     }
+
+    /// Stable owner identity for dock delegation and assistant handoff callbacks.
+    public let ownerUUID = UUID()
 
     /// The pane that currently owns the typed/manual handoff callbacks of the chat hosts (memory only).
     var assistantHandoffOwner: UUID?

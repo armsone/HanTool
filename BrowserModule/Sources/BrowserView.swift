@@ -13,143 +13,8 @@ struct BrowserView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            tabStrip
-            BrowserPane(appModel: appModel, model: appModel.browser)
-        }
-        .background(palette.cardColor)
-    }
-
-    private var tabStrip: some View {
-        HStack(spacing: 6) {
-            Button { appModel.newTab() } label: { Image(systemName: "plus") }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .frame(minWidth: 24, minHeight: 24)
-                .disabled(appModel.tabs.count >= AppModel.maxTabs)
-                .help("새 탭")
-                .accessibilityLabel("새 탭 열기")
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    ForEach(appModel.tabs, id: \.tabID) { tab in
-                        BrowserTabItem(tab: tab, isSelected: tab.tabID == appModel.selectedTabID,
-                                       onSelect: { appModel.selectTab(tab.tabID) },
-                                       onClose: { appModel.closeTab(tab.tabID) })
-                    }
-                }
-                .padding(.vertical, 1)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.top, 8)
-    }
-}
-
-/// One tab of the strip. Selecting and closing are sibling buttons (never nested).
-struct BrowserTabItem: View {
-    @ObservedObject var tab: LoginBrowserModel
-    let isSelected: Bool
-    let onSelect: () -> Void
-    let onClose: () -> Void
-    @Environment(\.bkPalette) private var palette
-    @ObservedObject private var audioController = PageAudioController.shared
-
-    var body: some View {
-        let audioState = audioController.audioState(for: tab.webView)
-        return HStack(spacing: 2) {
-            Button(action: onSelect) {
-                HStack(spacing: 4) {
-                    Image(systemName: tab.isShowingHome ? "house" : "globe").font(.caption2)
-                    Text(tab.tabTitle)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .frame(maxWidth: 140, alignment: .leading)
-                    if audioState == .playingAudible {
-                        Image(systemName: "speaker.wave.2.fill")
-                            .font(.caption2)
-                            .foregroundColor(palette.accentColor)
-                    } else if audioState == .playingMuted {
-                        Image(systemName: "speaker.slash.fill")
-                            .font(.caption2)
-                            .foregroundColor(palette.warnColor)
-                    }
-                }
-                .padding(.leading, 8)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(tab.tabTitle)
-            .accessibilityLabel("탭: \(tab.tabTitle)")
-            Button(action: onClose) {
-                Image(systemName: "xmark").font(.caption2)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("탭 닫기")
-            .accessibilityLabel("탭 닫기: \(tab.tabTitle)")
-        }
-        .foregroundColor(palette.textColor)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? palette.accentSoftColor : palette.surface2Color))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(isSelected ? palette.accentColor : palette.borderColor, lineWidth: 1))
-        .overlay(alignment: .bottom) {
-            if tab.isLoading {
-                GeometryReader { geo in
-                    palette.accentColor
-                        .frame(width: geo.size.width * CGFloat(max(0, min(1, tab.progress))), height: 2)
-                }
-                .frame(height: 2)
-                .allowsHitTesting(false)
-            }
-        }
-    }
-}
-
-/// The common planner entry shown above the assistant panel of ANY chat service: what the planner connection can do
-/// on this page right now, plus the manual "플래너에게 넘기기". It reads the page only when pressed.
-private struct AssistantPlannerEntryBar: View {
-    @ObservedObject var session: AssistantWebSession
-    let refreshToken: String
-    let onManual: () -> Void
-    @Environment(\.bkPalette) private var palette
-
-    private var activeFeedback: String? {
-        let status = session.status
-        if status.kind == .accepted || status.kind == .refused || status.kind == .pending {
-            return status.message
-        }
-        return nil
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if let feedback = activeFeedback {
-                Text(feedback)
-                    .font(.caption)
-                    .lineLimit(2)
-                    .help(feedback)
-            }
-            Spacer(minLength: 4)
-            Menu {
-                Button("플래너에게 넘기기", action: onManual)
-                    .disabled(session.binding == nil || session.status.kind == .pending)
-                    .help("지금 열린 대화를 읽어 새 플래너 프로젝트로 넘깁니다. 입력창 내용은 바꾸지 않습니다.")
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.caption)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("대화 도구")
-            .help("대화 도구")
-        }
-        .foregroundColor(palette.textColor)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(activeFeedback != nil ? palette.accentSoftColor : palette.cardColor)
-        .task(id: refreshToken) { await session.refreshCapability() }
+        BrowserPane(appModel: appModel, model: appModel.browser)
+            .background(palette.cardColor)
     }
 }
 
@@ -260,19 +125,12 @@ struct BrowserPane: View {
     @State private var showingAdManagement = false
     @FocusState private var addressFocused: Bool
     @State private var fieldFocused = false
-    @State private var handoffInFlight = false
-    @State private var handoffNonce = UUID()
-    /// Source page of the last accepted common handoff; lets the late presentation prove nothing changed meanwhile.
-    @State private var acceptedHandoffSource: (request: String, webView: ObjectIdentifier?, isHome: Bool, url: URL?)?
     @State private var pickerHovering = false
     @State private var pickerSelection = 0
     /// Address text the picker must stay hidden for: text the app itself put in the field (navigation, focus gain,
     /// a finished choice, Esc). Only text that differs from it was typed or pasted by the user.
     @State private var pickerSuppressedText: String? = nil
     @State private var pickerKeyMonitor: Any?
-    @ObservedObject private var hanaHost: HanaPanelHost = .shared
-    @ObservedObject var aiStore: AIServiceStore
-    @ObservedObject private var thirdPartyHost: ThirdPartyAIPanelHost
     @StateObject private var webPageAgent = WebPageAgentCoordinator()
     let plannerSession: SAWProjectSession?
 
@@ -280,7 +138,6 @@ struct BrowserPane: View {
         self.appModel = appModel
         self.model = model
         self.plannerSession = plannerSession
-        self.thirdPartyHost = appModel.thirdPartyAIHost
         self.connection = appModel.connection
         self.session = appModel.session
         self.siteRoutes = appModel.siteRoutes
@@ -288,7 +145,6 @@ struct BrowserPane: View {
         self.preferences = appModel.preferences
         self.addressStore = appModel.preferences.addressSearch
         self.extensions = appModel.extensions
-        self.aiStore = appModel.aiServices
     }
 
     var isPaneActive: Bool {
@@ -308,233 +164,6 @@ struct BrowserPane: View {
     private var isCurrentURLBookmarked: Bool {
         guard let url = model.currentURL?.absoluteString else { return false }
         return preferences.isBookmarked(url: url)
-    }
-
-    /// Explicit "플래너에게 넘기기": reads the displayed Hana conversation, then creates a NEW planner project from it
-    /// and the current ordinary web page. Nothing else (tabs, page state, Hana draft) is changed.
-    /// `delegation` is set only by the trusted typed '플래너에게 맡겨줘' bridge (same path, plus the typed instruction);
-    /// every refusal then releases that request and keeps the Hana draft.
-    private func handoffHanaToPlanner(delegation: HanaDelegationRequest? = nil) {
-        func refuse(_ message: String) {
-            if let delegation = delegation {
-                hanaHost.finishDelegation(delegation, error: message)
-            } else {
-                hanaHost.statusMessage = message
-            }
-        }
-        guard plannerSession == nil, !handoffInFlight, !hanaHost.isCapturingPlannerHandoff,
-              appModel.selectedTab == .browser, appModel.browser === model else {
-            if delegation != nil { refuse("지금은 일반 브라우저 화면에서만 플래너로 넘길 수 있습니다. 입력은 그대로 둡니다.") }
-            return
-        }
-        let tabID = model.tabID
-        let sourceWV = model.webView
-        let isHome = model.isShowingHome
-        let sourceURL: URL? = isHome ? nil : model.currentURL
-        if !isHome {
-            guard let url = sourceURL, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-                  let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else {
-                refuse("현재 페이지가 일반 웹 주소(http/https)가 아니어서 넘길 수 없습니다.")
-                return
-            }
-        }
-        let nonce = UUID()
-        handoffNonce = nonce
-        handoffInFlight = true
-        addressFocused = false
-        fieldFocused = false
-        Task { @MainActor in
-            defer { if handoffNonce == nonce { handoffInFlight = false } }
-            guard let handoff = try? await hanaHost.capturePlannerHandoff(delegation: delegation) else {
-                // capture already showed its own error; just release the typed request (draft stays).
-                if let delegation = delegation { hanaHost.finishDelegation(delegation, error: nil) }
-                return
-            }
-            guard !Task.isCancelled, handoffNonce == nonce,
-                  appModel.selectedTab == .browser, appModel.browser === model, model.tabID == tabID,
-                  model.webView === sourceWV, model.isShowingHome == isHome,
-                  isHome || model.currentURL == sourceURL,
-                  delegation.map({ hanaHost.isDelegationCurrent($0) }) ?? true else {
-                refuse("넘기는 동안 화면이 바뀌어 취소했습니다. 다시 시도해 주세요.")
-                return
-            }
-            let context = isHome ? "[현재 활성 웹페이지 없음]\n" + handoff.context : handoff.context
-            guard let pid = appModel.sawWorkspace.acceptHanaHandoff(goal: handoff.goal, context: context, pageURL: sourceURL,
-                                                                   delegatedInstruction: delegation?.utterance) else {
-                refuse("플래너 프로젝트를 만들지 못했습니다.")
-                return
-            }
-            sourceWV?.pauseAllMediaPlayback(completionHandler: nil)
-            // The goal now lives in the new project/run: consume only the exact transferred draft (no-op otherwise).
-            guard !Task.isCancelled, let runID = appModel.sawWorkspace.session(for: pid).teamRunID else {
-                if let delegation = delegation { hanaHost.finishDelegation(delegation, error: nil, accepted: true) }
-                return
-            }
-            if let delegation = delegation {
-                hanaHost.registerDelegation(delegation, projectID: pid, runID: runID)
-                await hanaHost.acknowledgePlannerHandoff(handoff)
-                hanaHost.finishDelegation(delegation, error: nil, accepted: true)
-            } else {
-                await hanaHost.acknowledgePlannerHandoff(handoff)
-            }
-        }
-    }
-
-    /// Common handoff (typed control sentence or the manual entry) of any chat host: Hana, catalog and custom services.
-    /// Always creates a NEW planner project with one run bound to the exact origin conversation; the source page is
-    /// the active ordinary tab and is validated again after the hop, so a navigation that raced the gesture cancels it.
-    private func handleAssistantHandoff(_ handoff: AssistantWebHandoff, from session: AssistantWebSession) async -> AssistantWebHandoffDecision {
-        guard plannerSession == nil, isPaneActive else {
-            return .refused("지금은 일반 브라우저 화면에서만 플래너로 넘길 수 있습니다.")
-        }
-        guard !handoffInFlight else { return .refused("이미 플래너로 넘기는 중입니다.") }
-        let tabID = model.tabID
-        let sourceWV = model.webView
-        let isHome = model.isShowingHome
-        let sourceURL: URL? = isHome ? nil : model.currentURL
-        if !isHome {
-            guard let url = sourceURL, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-                  let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else {
-                return .refused("현재 페이지가 일반 웹 주소(http/https)가 아니어서 넘길 수 없습니다.")
-            }
-            guard !SAWWorkspace.hasCredentialQuery(url) else {
-                return .refused("현재 페이지 주소에 인증 정보로 보이는 값이 있어 넘기지 않았습니다.")
-            }
-        }
-        handoffInFlight = true
-        defer { handoffInFlight = false }
-        addressFocused = false
-        fieldFocused = false
-        await Task.yield()
-        func sourceUnchanged() -> Bool {
-            !Task.isCancelled && isPaneActive && model.tabID == tabID && model.webView === sourceWV
-                && model.isShowingHome == isHome && (isHome || model.currentURL == sourceURL) && session.binding != nil
-        }
-        guard sourceUnchanged() else {
-            return .refused("넘기는 동안 화면이 바뀌어 취소했습니다. 다시 시도해 주세요.")
-        }
-        // The chat host must still show the captured conversation (Hana re-reads its host context); the ordinary
-        // source tab is then validated again, and the project is created in the same synchronous step.
-        guard await session.isHandoffCurrent(handoff), sourceUnchanged() else {
-            return .refused("넘기는 동안 대화나 화면이 바뀌어 취소했습니다. 다시 시도해 주세요.")
-        }
-        let decision = appModel.sawWorkspace.acceptAssistantHandoff(handoff, session: session, pageURL: sourceURL)
-        if case .accepted = decision {
-            sourceWV?.pauseAllMediaPlayback(completionHandler: nil)
-            acceptedHandoffSource = (handoff.requestUUID, sourceWV.map { ObjectIdentifier($0) }, isHome, sourceURL)
-        }
-        return decision
-    }
-
-    /// Runs after the session finished the draft acknowledgement of an accepted handoff (composer verifiably empty, or
-    /// a manual capture that never touches it). The new planner project is shown only if this very pane, chat thread
-    /// and source page are still the ones the handoff came from; otherwise the user stays where they are.
-    private func presentAcceptedAssistantHandoff(_ handoff: AssistantWebHandoff, from session: AssistantWebSession) {
-        defer { acceptedHandoffSource = nil }
-        guard plannerSession == nil, appModel.assistantHandoffOwner == model.tabID, isPaneActive,
-              appModel.browser === model,
-              let source = acceptedHandoffSource, source.request == handoff.requestUUID,
-              source.webView == model.webView.map({ ObjectIdentifier($0) }), source.isHome == model.isShowingHome,
-              source.isHome || model.currentURL == source.url,
-              session.originToken == handoff.identity.originToken, let binding = session.binding,
-              binding.serviceID == handoff.identity.serviceID, binding.profileID == handoff.identity.profileID,
-              binding.conversationURL() == handoff.identity.conversationURL else { return }
-        let workspace = appModel.sawWorkspace
-        guard let association = workspace.assistantPlanner.associations.first(where: {
-                  $0.identity.requestID == handoff.requestUUID && $0.status == .active
-                      && $0.identity.serviceID == binding.serviceID && $0.identity.profileID == binding.profileID }),
-              let projectID = UUID(uuidString: association.identity.projectID),
-              let runID = UUID(uuidString: association.identity.runID),
-              workspace.store.projects.contains(where: { $0.id == projectID && !$0.archived }),
-              workspace.store.runs.contains(where: { $0.id == runID && $0.projectID == projectID }) else { return }
-        workspace.selectedProjectID = projectID
-        appModel.selectedTab = .saw
-    }
-
-    /// The normal pane owns the handoff callback of every chat host session; rebound when the active tab changes.
-    private func bindAssistantHandoff() {
-        guard plannerSession == nil else { return }
-        appModel.assistantHandoffOwner = model.tabID
-        for session in [hanaHost.plannerSession, thirdPartyHost.plannerSession].compactMap({ $0 }) {
-            session.onHandoff = { [weak session] handoff in
-                guard let session = session else { return .refused("대화창이 바뀌어 넘기지 않았습니다.") }
-                return await handleAssistantHandoff(handoff, from: session)
-            }
-            session.onAcceptedPresentation = { [weak session] handoff in
-                guard let session = session else { return }
-                presentAcceptedAssistantHandoff(handoff, from: session)
-            }
-        }
-    }
-
-    private func releaseAssistantHandoff() {
-        guard plannerSession == nil, appModel.assistantHandoffOwner == model.tabID else { return }
-        appModel.assistantHandoffOwner = nil
-        for session in [hanaHost.plannerSession, thirdPartyHost.plannerSession].compactMap({ $0 }) {
-            session.onHandoff = nil
-            session.onAcceptedPresentation = nil
-        }
-    }
-
-    /// Manual entry shared by the Hana panel button and the common bar: the current conversation of the shown assistant.
-    private func startManualAssistantHandoff(_ session: AssistantWebSession?, isHana: Bool) {
-        // Hana's root address names a conversation only while the page exposes a genuine stable DOM ID; without one the
-        // common capture cannot build a durable identity, so the existing Hana-only reader stays the manual path.
-        guard let session = session, let binding = session.binding, !isHana || binding.conversationURL() != nil else {
-            if isHana {
-                handoffHanaToPlanner()   // common session unavailable or no stable identity: the existing Hana-only reader
-            } else {
-                thirdPartyHost.statusMessage = "이 서비스는 플래너 연결을 사용할 수 없어 넘기지 못했습니다."
-            }
-            return
-        }
-        Task { @MainActor in _ = await session.captureManually() }
-    }
-
-    /// Only the normal (non-planner) pane owns the typed-delegation callback; rebound whenever the active tab changes.
-    private func bindHanaDelegation() {
-        guard plannerSession == nil else { return }
-        hanaHost.bindDelegation(owner: model.tabID, handler: { request in handoffHanaToPlanner(delegation: request) },
-                                pageContext: { request in askHanaAboutCurrentPage(request) })
-    }
-
-    /// Typed explicit current-page question ('현재 페이지 요약해줘' ...): reads ONLY the active normal tab through the existing
-    /// extractor, then sends the formatted prompt to the SAME Hana conversation. Any page/mode/thread/draft change after the
-    /// await sends nothing and keeps the typed input. Ordinary Hana questions never reach this path.
-    private func askHanaAboutCurrentPage(_ request: HanaDelegationRequest) {
-        func refuse(_ message: String) {
-            hanaHost.finishPageContext(request, error: message)
-        }
-        guard plannerSession == nil, appModel.selectedTab == .browser, appModel.browser === model,
-              !model.isShowingHome, !model.isLoading, let sourceURL = model.currentURL, let sourceWV = model.webView else {
-            refuse("지금은 읽을 수 있는 일반 웹 페이지가 열려 있지 않아 보내지 않았습니다. 입력은 그대로 둡니다.")
-            return
-        }
-        let tabID = model.tabID
-        Task { @MainActor in
-            let result = await AIPageSnapshotExtractor.capture(tab: model, timeoutSeconds: 8)
-            guard !Task.isCancelled, appModel.selectedTab == .browser, appModel.browser === model, model.tabID == tabID,
-                  model.webView === sourceWV, !model.isShowingHome, model.currentURL == sourceURL,
-                  hanaHost.isPageContextCurrent(request) else {
-                refuse("읽는 동안 페이지나 하나 대화가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.")
-                return
-            }
-            let snapshot: AIPageSnapshot
-            switch result {
-            case .failure(let error):
-                refuse((error.errorDescription ?? "페이지를 읽지 못했습니다.") + " 입력은 그대로 둡니다.")
-                return
-            case .success(let value):
-                snapshot = value
-            }
-            let prompt = AIPagePromptFormatter.format(snapshot: snapshot, question: request.utterance)
-            do {
-                try await hanaHost.sendPageContextPrompt(prompt, request: request)
-                hanaHost.finishPageContext(request, error: nil)
-            } catch {
-                refuse(((error as? HanaResultQuestionError)?.message ?? "하나로 보내지 못했습니다.") + (error is HanaResultQuestionError ? "" : " 입력은 그대로 둡니다."))
-            }
-        }
     }
 
     private func toggleBookmark() {
@@ -624,65 +253,6 @@ struct BrowserPane: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(palette.bgColor)
-
-                    if plannerSession == nil && (appModel.isAIPanelOpen || hanaHost.isPanelOpen) {
-                        let isHanaPanel = appModel.activeAIPanelIsHana || hanaHost.isPanelOpen
-                        let panelWidth = isHanaPanel
-                            ? hanaHost.effectiveWidth(forAvailableWidth: geo.size.width)
-                            : appModel.thirdPartyAIHost.effectiveWidth(forAvailableWidth: geo.size.width)
-
-                        VStack(spacing: 0) {
-                            // One common planner entry (status + manual handoff) for Hana and every other service.
-                            if let entrySession = isHanaPanel ? hanaHost.plannerSession : thirdPartyHost.plannerSession {
-                                AssistantPlannerEntryBar(
-                                    session: entrySession,
-                                    refreshToken: isHanaPanel
-                                        ? "hana|\(hanaHost.isBridgeReady)"
-                                        : "\(thirdPartyHost.currentService?.id ?? "")|\(thirdPartyHost.isLoading)",
-                                    onManual: { startManualAssistantHandoff(entrySession, isHana: isHanaPanel) }
-                                )
-                                Divider()
-                            }
-                            if isHanaPanel {
-                                HanaPanelView(
-                                    host: hanaHost,
-                                    availableWidth: geo.size.width,
-                                    nativeInputAllowed: { appModel.selectedTab == .browser }
-                                )
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            } else {
-                                ThirdPartyAIPanelView(
-                                    host: appModel.thirdPartyAIHost,
-                                    service: appModel.aiServices.selectedService,
-                                    availableWidth: geo.size.width,
-                                    onClose: { appModel.setAIPanelOpen(false) },
-                                    nativeInputAllowed: { appModel.selectedTab == .browser }
-                                )
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            }
-
-                            // Hana has no page-context footer: current-page questions are typed straight into Hana.
-                            if !isHanaPanel {
-                                Divider()
-
-                                HStack(spacing: 0) {
-                                    Rectangle()
-                                        .fill(palette.borderColor)
-                                        .frame(width: 16)
-
-                                    AIPageContextComposerView(
-                                        appModel: appModel,
-                                        tabModel: model,
-                                        isHana: isHanaPanel,
-                                        panelWidth: panelWidth
-                                    )
-                                    .frame(width: panelWidth)
-                                }
-                                .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .frame(width: panelWidth + 16)
-                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -693,35 +263,11 @@ struct BrowserPane: View {
         .onAppear {
             model.activate()
             webPageAgent.syncContext(tab: model)
-            if plannerSession == nil {
-                bindHanaDelegation()
-                bindAssistantHandoff()
-                hanaHost.onOpenExternalURL = { [weak appModel] url in
-                    guard let appModel = appModel else { return }
-                    guard let validatedString = BrowserPreferences.validateWebURL(url.absoluteString) else { return }
-                    if appModel.tabs.count >= AppModel.maxTabs {
-                        appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
-                        return
-                    }
-                    appModel.newTab()?.open(validatedString)
-                }
-                appModel.thirdPartyAIHost.onOpenExternalURL = { [weak appModel] url in
-                    guard let appModel = appModel else { return }
-                    guard let validatedString = BrowserPreferences.validateWebURL(url.absoluteString) else { return }
-                    if appModel.tabs.count >= AppModel.maxTabs {
-                        appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
-                        return
-                    }
-                    appModel.newTab()?.open(validatedString)
-                }
-            }
         }
         // A 길찾기 lookup belongs to the tab it was started in: leaving that tab or this screen drops it.
         .onChange(of: model.tabID) { _, _ in
             addressFlow.cancel()
             webPageAgent.syncContext(tab: model)
-            bindHanaDelegation()
-            bindAssistantHandoff()
         }
         .onChange(of: appModel.selectedTab) { _, selection in
             if !isPaneActive {
@@ -738,10 +284,6 @@ struct BrowserPane: View {
         .onDisappear {
             addressFlow.cancel()
             webPageAgent.teardown()
-            if plannerSession == nil {
-                hanaHost.releaseDelegation(owner: model.tabID)
-                releaseAssistantHandoff()
-            }
         }
         .sheet(isPresented: Binding(get: { addressFlow.isPresented },
                                     set: { if !$0 { addressFlow.cancel() } })) {
@@ -1069,10 +611,10 @@ struct BrowserPane: View {
             appModel.temporaryShowHanaPanel = true
             if appModel.aiServices.selectedService.isHana {
                 appModel.setAIPanelOpen(true)
-                hanaHost.submitAddressCommand(question: question, fresh: fresh)
+                HanaPanelHost.shared.submitAddressCommand(question: question, fresh: fresh)
             } else {
                 appModel.setAIPanelOpen(true)
-                hanaHost.submitAddressCommand(question: question, fresh: fresh)
+                HanaPanelHost.shared.submitAddressCommand(question: question, fresh: fresh)
                 model.notice = "하나 전용 질문이므로 하나 대화창으로 연결했습니다. (현재 기본 AI: \(appModel.aiServices.selectedService.name))"
             }
         case .hanaWindow:
@@ -1243,10 +785,6 @@ struct BrowserPane: View {
             .disabled(model.isShowingHome || model.webView == nil)
             .help("화면 캡처")
             .accessibilityLabel("화면 캡처")
-
-            ExtensionActionButton(manager: extensions)
-                .fixedSize()
-                .foregroundStyle(palette.textColor)
 
             Button(action: {
                 appModel.isMediaCandidatePresented.toggle()

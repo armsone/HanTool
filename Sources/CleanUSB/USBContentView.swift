@@ -6,7 +6,7 @@ struct CleanUSBPane: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("USB 정리·추출")
+                Text("USB 드라이브")
                     .font(.headline)
                 Spacer()
                 Button {

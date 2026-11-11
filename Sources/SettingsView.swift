@@ -12,6 +12,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
     case macManagementSettings
     case cleanUSB
     case serverStatus
+    case serverStatusSettings
     case help
     case general
 
@@ -20,15 +21,14 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
     public var title: String {
         switch self {
         case .home: return "홈"
-        case .mail: return "메일·이미지 번역"
+        case .mail: return "메일 번역"
         case .screen: return "화면 번역"
-        case .browser: return "브라우저 번역"
+        case .browser: return "번역 확장"
         case .input: return "입력 도우미"
-        case .macManagement: return "Mac 상태·정리"
-        case .macManagementSettings: return "Mac 관리 설정"
-        case .cleanUSB: return "USB 정리·추출"
-        case .serverStatus: return "서버 현황"
-        case .help: return "사용 방법"
+        case .macManagement, .macManagementSettings: return "Mac 관리"
+        case .cleanUSB: return "USB 드라이브"
+        case .serverStatus, .serverStatusSettings: return "서버 현황"
+        case .help: return "사용 안내"
         case .general: return "앱 설정"
         }
     }
@@ -41,7 +41,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .browser: return "browser"
         case .input: return "edit"
         case .macManagement, .cleanUSB, .serverStatus: return "device_files"
-        case .macManagementSettings: return "settings"
+        case .macManagementSettings, .serverStatusSettings: return "settings"
         case .help: return "help"
         case .general: return "settings"
         }
@@ -205,6 +205,7 @@ public struct SettingsView: View {
                     sidebarRow(.macManagementSettings)
                     sidebarRow(.cleanUSB)
                     sidebarRow(.serverStatus)
+                    sidebarRow(.serverStatusSettings)
                 }
                 Section("지원 및 설정") {
                     ForEach(SettingsSection.supportSections) { sidebarRow($0) }
@@ -337,6 +338,8 @@ public struct SettingsView: View {
             CleanUSBPane()
                 .environmentObject(store.cleanUSBState)
         case .serverStatus:
+            CCMBStatusView(onOpenSettings: { store.section = .serverStatusSettings })
+        case .serverStatusSettings:
             CCMBSettingsView()
         case .help:
             HTTGuideView(settingsStore: store)

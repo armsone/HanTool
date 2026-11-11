@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import WebKit
 import Security
+import Combine
 
 /// Separately installed browser extension support ("확장 기능").
 ///
@@ -127,6 +128,7 @@ final class BrowserExtensionManager: ObservableObject {
     let persists: Bool
     private var runtimeObject: AnyObject?
     private var loadGeneration = 0
+    private var cancellables = Set<AnyCancellable>()
 
     init(appModel: AppModel, persists: Bool) {
         self.appModel = appModel
@@ -143,6 +145,29 @@ final class BrowserExtensionManager: ObservableObject {
         }
         // HTT 안에서 실행 중이면 그 HTT를 쓴다(저장된 경로는 건드리지 않고, 별도 설치한 HTD 설정과 섞이지 않게 저장하지 않는다).
         if let embedded = Self.embeddingHTTApp { registeredAppPath = embedded.path }
+
+        appModel.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                if !self.isBrowserVisiblyActive {
+                    self.closeActionPopover()
+                } else if #available(macOS 15.4, *), let rt = self.currentRuntime, !rt.matchesPopupSnapshot() {
+                    self.closeActionPopover()
+                }
+            }
+            .store(in: &cancellables)
+
+        UnifiedNavigationModel.shared.$destination
+            .receive(on: RunLoop.main)
+            .sink { [weak self] destination in
+                guard let self = self else { return }
+                if destination != .browser {
+                    self.closeActionPopover()
+                }
+                self.actionRevision += 1
+            }
+            .store(in: &cancellables)
     }
 
     var isInsideHTT: Bool { Self.embeddingHTTApp != nil }
@@ -185,10 +210,18 @@ final class BrowserExtensionManager: ObservableObject {
         return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 
-    var canPerformAction: Bool {
-        guard isConnected, let app = appModel, app.selectedTab == .browser else { return false }
-        // Tabs on the alternate (other-route) store are outside the extension's controller: no action there.
+    var isBrowserVisiblyActive: Bool {
+        guard let app = appModel, app.selectedTab == .browser else { return false }
+        guard UnifiedNavigationModel.shared.destination == .browser else { return false }
+        #if HTT_HOST
+        guard HTDHostExport.shared.hostedToolID == nil else { return false }
+        #endif
         return app.browser.usesPrimaryStore && app.browser.webView != nil && !app.browser.isShowingHome
+    }
+
+    var canPerformAction: Bool {
+        guard isConnected else { return false }
+        return isBrowserVisiblyActive
     }
 
     func dismissNotice() { notice = nil }
@@ -305,8 +338,17 @@ final class BrowserExtensionManager: ObservableObject {
             }
             return
         }
-        notice = nil
+        guard isBrowserVisiblyActive else {
+            notice = "브라우저 화면에서 실행해 주세요."
+            return
+        }
+        notice = "번역 메뉴를 여는 중입니다…"
         if let problem = rt.performAction() { notice = problem }
+    }
+
+    func closeActionPopover() {
+        guard #available(macOS 15.4, *) else { return }
+        currentRuntime?.closeActionPopover()
     }
 
     // MARK: Loading and consent
@@ -569,6 +611,25 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
     private var translateIntentAt: Date?
     private var pendingReplies: [String: PendingReply] = [:]
     private var partialTranslations: [String: [[String: Any]]] = [:]
+    private weak var activePopover: NSPopover?
+    private var popupTargetTabID: UUID?
+    private var popupTargetURL: URL?
+
+    internal var isBrowserVisiblyActive: Bool {
+        manager?.isBrowserVisiblyActive == true
+    }
+
+    func matchesPopupSnapshot() -> Bool {
+        guard activePopover != nil else { return true }
+        guard let app = appModel else { return false }
+        if let targetTabID = popupTargetTabID, app.browser.tabID != targetTabID {
+            return false
+        }
+        if let targetURL = popupTargetURL, app.browser.currentURL != targetURL {
+            return false
+        }
+        return true
+    }
 
     static let nativeApplicationIdentifier = "com.local.screentranslator"
     static let nativeOrigin = "htd-web-extension://com.hanstree.HttpsDown/"
@@ -739,7 +800,16 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         }
     }
 
+    func closeActionPopover() {
+        activePopover?.close()
+        activePopover = nil
+        popupTargetTabID = nil
+        popupTargetURL = nil
+        currentAction()?.closePopup()
+    }
+
     func unloadCurrent() {
+        closeActionPopover()
         stopHelper(reason: "확장을 내렸습니다.")
         helperAppURL = nil
         if let token = errorObserver { NotificationCenter.default.removeObserver(token) }
@@ -771,17 +841,22 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
     /// Returns a message when nothing was started.
     func performAction() -> String? {
         guard let ctx = context, ctx.isLoaded else { return "확장이 불러와져 있지 않습니다." }
-        guard let app = appModel, app.selectedTab == .browser, let tab = activeAdapter() else {
+        guard let manager = manager, manager.isBrowserVisiblyActive, let tab = activeAdapter() else {
             return "브라우저 화면에서 실행해 주세요."
         }
-        guard app.browser.usesPrimaryStore else {
+        guard let app = appModel, app.browser.usesPrimaryStore else {
             return "이 탭은 사이트별 다른 연결로 열려 있어 번역 확장을 사용할 수 없습니다. 연결을 전체 설정과 같게 하면 쓸 수 있습니다."
         }
         guard app.browser.webView != nil, !app.browser.isShowingHome else {
             return "먼저 번역할 웹 페이지를 열어 주세요."
         }
+        guard let action = ctx.action(for: tab), action.presentsPopup else {
+            return "확장에서 번역 메뉴를 준비하지 못했습니다. 브라우저 추가 기능에서 확장을 다시 불러와 주세요."
+        }
         ctx.userGesturePerformed(in: tab)
-        translateIntentAt = Date()
+        translateIntentAt = nil
+        popupTargetTabID = app.browser.tabID
+        popupTargetURL = app.browser.currentURL
         ctx.performAction(for: tab)
         return nil
     }
@@ -985,17 +1060,33 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
     }
 
     func webExtensionController(_ controller: WKWebExtensionController, presentActionPopup action: WKWebExtension.Action, for context: WKWebExtensionContext, completionHandler: @escaping ((any Error)?) -> Void) {
+        guard let manager = manager, manager.isBrowserVisiblyActive else {
+            let error = ExtensionUIError(message: "브라우저 화면이 활성화되어 있지 않아 팝업을 열지 못했습니다.")
+            manager?.setIssues([error.message])
+            completionHandler(error)
+            return
+        }
+        guard let app = appModel,
+              let targetTabID = popupTargetTabID, app.browser.tabID == targetTabID,
+              let targetURL = popupTargetURL, app.browser.currentURL == targetURL else {
+            let error = ExtensionUIError(message: "팝업 대상 탭이나 페이지가 변경되어 팝업을 열지 못했습니다.")
+            manager.setIssues([error.message])
+            completionHandler(error)
+            return
+        }
         guard let popover = action.popupPopover else {
             completionHandler(ExtensionUIError(message: "확장 팝업을 만들지 못했습니다."))
             return
         }
         guard let anchor = anchor, anchor.window != nil else {
             let error = ExtensionUIError(message: "확장 버튼이 화면에 없어 팝업을 열지 못했습니다.")
-            manager?.setIssues([error.message])
+            manager.setIssues([error.message])
             completionHandler(error)
             return
         }
+        activePopover = popover
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        manager.dismissNotice()
         completionHandler(nil)
     }
 
@@ -1171,6 +1262,10 @@ final class ExtensionTabAdapter: NSObject, WKWebExtensionTab {
 
     /// Snapshot of this tab's own web view (visible area unless the configuration says otherwise).
     func takeSnapshot(using configuration: WKSnapshotConfiguration, for context: WKWebExtensionContext, completionHandler: @escaping (NSImage?, (any Error)?) -> Void) {
+        guard runtime?.isBrowserVisiblyActive == true else {
+            completionHandler(nil, ExtensionUIError(message: "브라우저 화면이 활성화되어 있지 않아 스냅샷을 촬영하지 못했습니다."))
+            return
+        }
         guard let app = app,
               app.selectedTab == .browser,
               model.usesPrimaryStore,
@@ -1203,6 +1298,11 @@ final class ExtensionTabAdapter: NSObject, WKWebExtensionTab {
         webView.takeSnapshot(with: snapshotConfig) { [weak self] rawImage, error in
             guard let self = self else {
                 completionHandler(nil, ExtensionUIError(message: "페이지 스냅샷 처리가 취소되었습니다."))
+                return
+            }
+
+            guard self.runtime?.isBrowserVisiblyActive == true else {
+                completionHandler(nil, ExtensionUIError(message: "스냅샷 처리 중 브라우저 화면이 비활성화되었습니다."))
                 return
             }
 
@@ -1337,7 +1437,7 @@ struct ExtensionActionButton: NSViewRepresentable {
         button.bezelStyle = .rounded
         button.imagePosition = .imageLeading
         button.imageHugsTitle = true
-        button.title = "번역"
+        button.title = "페이지 번역"
         button.target = context.coordinator
         button.action = #selector(Coordinator.clicked(_:))
         manager.setAnchor(button)
@@ -1349,7 +1449,7 @@ struct ExtensionActionButton: NSViewRepresentable {
         context.coordinator.manager = manager
         manager.setAnchor(button)
         let isConn = manager.isConnected
-        button.attributedTitle = NSAttributedString(string: "번역", attributes: [.foregroundColor: NSColor(palette.textColor)])
+        button.attributedTitle = NSAttributedString(string: "페이지 번역", attributes: [.foregroundColor: NSColor(palette.textColor)])
         button.image = (isConn ? manager.toolbarIcon() : nil)
             ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "번역")
         button.imagePosition = .imageLeading

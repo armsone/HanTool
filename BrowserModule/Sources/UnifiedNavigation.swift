@@ -10,6 +10,7 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
     case translation = "번역"
     case inputHelper = "입력 도우미"
     case macManagement = "Mac 관리"
+    case usbDrives = "USB 드라이브"
     case server = "서버 현황"
     case settings = "설정"
     case help = "사용 안내"
@@ -24,6 +25,7 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
         case .translation: return "character.book.closed"
         case .inputHelper: return "keyboard"
         case .macManagement: return "desktopcomputer"
+        case .usbDrives: return "externaldrive"
         case .server: return "chart.bar.xaxis"
         case .settings: return "gearshape"
         case .help: return "questionmark.circle"
@@ -33,10 +35,11 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
 
 public enum SettingsHubTab: String, CaseIterable, Identifiable {
     case general = "일반 설정"
-    case webSettings = "웹 설정"
-    case aiConnections = "AI 연결"
-    case inputSettings = "입력 설정"
-    case macSettings = "Mac 관리 설정"
+    case webSettings = "브라우저"
+    case aiConnections = "비서"
+    case inputSettings = "입력 도우미"
+    case macSettings = "Mac 관리"
+    case serverSettings = "서버 현황"
 
     public var id: String { rawValue }
 }
@@ -234,6 +237,9 @@ public final class UnifiedNavigationModel: ObservableObject {
             switch toolID {
             case "serverStatus":
                 destination = .server
+            case "serverStatusSettings":
+                destination = .settings
+                settingsTab = .serverSettings
             case "help", "home":
                 destination = .help
             case "general":
@@ -246,17 +252,19 @@ public final class UnifiedNavigationModel: ObservableObject {
                 destination = .settings
                 settingsTab = .macSettings
             case "browser":
-                destination = .settings
-                settingsTab = .webSettings
+                destination = .translation
+                activeTranslationChild = "browser"
             case "mail", "screen":
                 destination = .translation
                 activeTranslationChild = toolID
             case "input.appLanguage", "input.koreanTypo", "input.personalDictionary", "input.trackpad":
                 destination = .inputHelper
                 activeInputChild = toolID
-            case "macManagement", "cleanUSB":
+            case "macManagement":
                 destination = .macManagement
-                activeMacManagementChild = toolID
+                activeMacManagementChild = "macManagement"
+            case "cleanUSB":
+                destination = .usbDrives
             default:
                 destination = .browser
             }
@@ -319,6 +327,9 @@ public final class UnifiedNavigationModel: ObservableObject {
         case .macManagement:
             selectTool(activeMacManagementChild)
 
+        case .usbDrives:
+            selectTool("cleanUSB")
+
         case .server:
             selectTool("serverStatus")
 
@@ -352,9 +363,14 @@ public final class UnifiedNavigationModel: ObservableObject {
         _ childID: String,
         selectTool: (String) -> Void
     ) {
-        self.activeMacManagementChild = childID
-        self.destination = .macManagement
-        selectTool(childID)
+        if childID == "cleanUSB" {
+            self.destination = .usbDrives
+            selectTool("cleanUSB")
+        } else {
+            self.activeMacManagementChild = childID
+            self.destination = .macManagement
+            selectTool(childID)
+        }
     }
 
     public func selectSettingsTab(
@@ -389,6 +405,8 @@ public final class UnifiedNavigationModel: ObservableObject {
             selectTool("input.general")
         case .macSettings:
             selectTool("macManagementSettings")
+        case .serverSettings:
+            selectTool("serverStatusSettings")
         }
     }
 
@@ -1094,7 +1112,7 @@ public struct DownloadsHubHeaderView: View {
                     .fill(palette.surface2Color)
             )
 
-            Button("주소로 시작", action: onStartWithURL)
+            Button("주소 직접 입력", action: onStartWithURL)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
         }

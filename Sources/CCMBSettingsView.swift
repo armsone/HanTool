@@ -48,7 +48,7 @@ public struct CCMBSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("서버 현황")
                     .font(.title2.weight(.bold))
-                Text("놀이터 서버나 이 Mac의 AI 사용량과 남은 한도를 확인합니다.")
+                Text("서버 연결 및 모니터링 환경을 설정합니다.")
                     .font(.subheadline)
                     .foregroundStyle(palette.muted)
             }

@@ -47,18 +47,50 @@ struct ContentView: View {
                 Divider()
                 ExchangeRateStatusLine()
             }
-        }
-        .frame(minWidth: 520, minHeight: 380)
-        // 외부 AI 숨김 실행용 실제 크기 웹 보기 표면(불투명 덮개 아래, 입력을 받지 않음)
-        .aibiHiddenSurface(isMain: true)
-        // 메일 도구 막대는 메일 섹션이 앞에 있을 때만 붙여, 다른 섹션으로 새지 않게 한다(뷰 자체는 계속 유지).
-        .background {
+
             if isActive {
-                Color.clear
-                    .frame(width: 0, height: 0)
-                    .toolbar(id: "main-toolbar") { toolbarContent }
+                Divider()
+                HStack(spacing: 8) {
+                    Button("Mail에서 가져오기") {
+                        model.translateSelectedMail()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(model.isLoading)
+
+                    Button("파일 열기") {
+                        model.showImporter = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Mail 삭제") {
+                        if let id = model.document?.id {
+                            model.trashCurrentMail(confirmedDocumentID: id)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!model.canTrashCurrentMail)
+
+                    Button("원격 이미지") {
+                        confirmRemoteImages = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!model.hasUnrequestedRemoteImages)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
         }
+        .frame(minWidth: 520, minHeight: 380)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+        // 외부 AI 숨김 실행용 실제 크기 웹 보기 표면(불투명 덮개 아래, 입력을 받지 않음)
+        .aibiHiddenSurface(isMain: true)
         // 번역 세션은 항상 존재하는 최상위 뷰에 붙여, 화면 전환으로 작업이 끊기지 않게 한다.
         .translationTask(model.translationConfig) { session in
             await model.performTranslation(session: session)
@@ -85,96 +117,6 @@ struct ContentView: View {
         .task { await model.loadSupportedLanguages() }
     }
 
-    @ToolbarContentBuilder
-    private var toolbarContent: some CustomizableToolbarContent {
-        ToolbarItem(id: "translate-selected", placement: .primaryAction) {
-            Button {
-                model.translateSelectedMail()
-            } label: {
-                Label("선택한 메일 번역", systemImage: "envelope.badge")
-            }
-            .help("Mail에서 현재 선택된 메시지를 가져와 번역합니다 (⇧⌘T, 전역 \(GlobalHotKey.mailDisplayString))")
-            .disabled(model.isLoading)
-        }
-        ToolbarItem(id: "trash-mail", placement: .primaryAction) {
-            Button {
-                if let id = model.document?.id { model.trashCurrentMail(confirmedDocumentID: id) }
-            } label: {
-                Label("메일 삭제", systemImage: "trash")
-            }
-            .disabled(!model.canTrashCurrentMail)
-            .help("지금 번역 중인 이 메일을 Mail 휴지통으로 옮깁니다 (영구 삭제 아님)")
-            .accessibilityLabel("이 메일을 휴지통으로 이동")
-        }
-        ToolbarItem(id: "open-file", placement: .primaryAction) {
-            Button {
-                model.showImporter = true
-            } label: {
-                Label("파일 열기", systemImage: "doc.badge.plus")
-            }
-            .help(".eml 파일 또는 이미지 파일을 엽니다")
-        }
-        ToolbarItem(id: "display-switch", placement: .primaryAction) {
-            OriginalTranslateSwitch(displayMode: $model.displayMode)
-                .help("원문 ↔ 번역 전환. 번역과 원문을 나란히 보려면 '보기' 메뉴에서 '번역 + 원문'을 고르세요.")
-        }
-        ToolbarItem(id: "languages", placement: .automatic) {
-            HStack(spacing: 4) {
-                Picker("원본 언어", selection: $model.sourceLanguageID) {
-                    Text("자동 감지").tag("auto")
-                    Divider()
-                    ForEach(model.supportedLanguageIDs, id: \.self) { id in
-                        Text(AppModel.languageName(id)).tag(id)
-                    }
-                }
-                .frame(width: 130)
-                Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                Picker("대상 언어", selection: $model.targetLanguageID) {
-                    ForEach(model.supportedLanguageIDs.isEmpty ? ["ko"] : model.supportedLanguageIDs, id: \.self) { id in
-                        Text(AppModel.languageName(id)).tag(id)
-                    }
-                }
-                .frame(width: 120)
-            }
-            .labelsHidden()
-            .help("원본 언어와 대상 언어")
-        }
-        ToolbarItem(id: "display", placement: .automatic) {
-            Menu {
-                Picker("표시 방식", selection: $model.displayMode) {
-                    ForEach(DisplayMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.inline)
-                Divider()
-                Toggle("HTML 메일 원본 서식 유지", isOn: $model.preferFormattedHTML)
-                Toggle("이미지 번역 상세 목록 펼치기", isOn: $model.showOCRDetails)
-                Toggle("인식 영역 번호 표시(디버그)", isOn: $model.showOCRBoxes)
-                Toggle("창을 항상 위에 유지", isOn: $model.keepOnTop)
-            } label: {
-                Label("보기", systemImage: "eye")
-            }
-            .help("표시 방식")
-        }
-        ToolbarItem(id: "remote-images", placement: .automatic) {
-            Button {
-                confirmRemoteImages = true
-            } label: {
-                Label("원격 이미지 불러오기", systemImage: "photo.on.rectangle")
-            }
-            .disabled(!model.hasUnrequestedRemoteImages)
-            .help("이 메시지의 원격 이미지를 한 번만 불러옵니다 (Mail에서 선택해 번역한 메시지는 자동으로 불러옵니다)")
-        }
-        ToolbarItem(id: "copy", placement: .automatic) {
-            Button {
-                model.copyTranslation()
-            } label: {
-                Label("번역 복사", systemImage: "doc.on.doc")
-            }
-            .disabled(model.document == nil)
-            .help("번역된 내용을 클립보드에 복사합니다")
-        }
-    }
-
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
         _ = provider.loadObject(ofClass: URL.self) { url, _ in
@@ -185,9 +127,153 @@ struct ContentView: View {
     }
 }
 
+/// 창 도구 막대 또는 통합 툴바에서 팝오버로 번역 제어기를 띄우는 버튼
+internal struct HostedTranslationToolbarButton: View {
+    let context: String
+    @State private var isPresented = false
+    @State private var model = AppModel.shared
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Text(context == "mail" ? "메일 번역" : "화면 번역")
+                .font(.caption.bold())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+            popoverContent
+        }
+        .onChange(of: context) { _, _ in
+            isPresented = false
+        }
+    }
+
+    @ViewBuilder
+    private var popoverContent: some View {
+        if context == "mail" {
+            mailPopoverView
+        } else {
+            screenPopoverView
+        }
+    }
+
+    private var mailPopoverView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let doc = model.document {
+                HStack {
+                    Label("현재 표시 문서", systemImage: "doc.text")
+                        .font(.headline)
+                    Spacer()
+                    Text(doc.subject ?? "제목 없는 문서")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Text("표시 중인 메일 문서가 없습니다.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        model.translateSelectedMail()
+                    } label: {
+                        Label("Mail에서 가져오기", systemImage: "envelope.badge")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(model.isLoading)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+            }
+
+            Divider()
+
+            HStack {
+                Text("표시")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                OriginalTranslateSwitch(displayMode: $model.displayMode)
+            }
+
+            HStack(spacing: 4) {
+                Picker("원본 언어", selection: $model.sourceLanguageID) {
+                    Text("자동 감지").tag("auto")
+                    Divider()
+                    ForEach(model.supportedLanguageIDs, id: \.self) { id in
+                        Text(AppModel.languageName(id)).tag(id)
+                    }
+                }
+                .frame(width: 120)
+
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+
+                Picker("대상 언어", selection: $model.targetLanguageID) {
+                    ForEach(model.supportedLanguageIDs.isEmpty ? ["ko"] : model.supportedLanguageIDs, id: \.self) { id in
+                        Text(AppModel.languageName(id)).tag(id)
+                    }
+                }
+                .frame(width: 120)
+            }
+            .labelsHidden()
+
+            Divider()
+
+            HStack {
+                Menu {
+                    Picker("표시 방식", selection: $model.displayMode) {
+                        ForEach(DisplayMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.inline)
+                    Divider()
+                    Toggle("HTML 메일 원본 서식 유지", isOn: $model.preferFormattedHTML)
+                    Toggle("이미지 번역 상세 목록 펼치기", isOn: $model.showOCRDetails)
+                    Toggle("인식 영역 번호 표시(디버그)", isOn: $model.showOCRBoxes)
+                    Toggle("창을 항상 위에 유지", isOn: $model.keepOnTop)
+                } label: {
+                    Label("보기", systemImage: "eye")
+                }
+
+                Spacer()
+
+                Button {
+                    model.copyTranslation()
+                } label: {
+                    Label("번역 복사", systemImage: "doc.on.doc")
+                }
+                .disabled(model.document == nil)
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+    }
+
+    private var screenPopoverView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("화면의 텍스트나 이미지를 드래그하여 실시간으로 캡처하고 번역합니다.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button {
+                MailWindowCoordinator.shared.startCaptureModeFromWorkbench()
+            } label: {
+                Label("캡처 모드 시작", systemImage: "viewfinder")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+        }
+        .padding(14)
+        .frame(width: 260)
+    }
+}
+
 /// 원문/번역 큰 전환 스위치(선택된 쪽은 강한 배경 + 굵은 글자). "번역 + 원문" 나란히 보기는 보기 메뉴의
-/// 기존 3단 선택에만 남겨 두고, 이 스위치는 가장 자주 쓰는 두 상태만 한눈에 보여주고 바로 누를 수 있게 한다.
-private struct OriginalTranslateSwitch: View {
+struct OriginalTranslateSwitch: View {
     @Binding var displayMode: DisplayMode
 
     var body: some View {

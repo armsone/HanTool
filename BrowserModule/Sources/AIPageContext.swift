@@ -984,8 +984,8 @@ final class AIPageComposerViewModel: ObservableObject {
         questionText = "이 페이지의 핵심 내용을 이해하기 쉽게 요약해 주세요."
     }
 
-    func executeAction(appModel: AppModel, tab: LoginBrowserModel, isHana: Bool) {
-        guard !isBusy else { return }
+    func executeAction(appModel: AppModel, tab: LoginBrowserModel, isHana: Bool, isBrowserVisible: @escaping () -> Bool = { false }) {
+        guard !isBusy && isBrowserVisible() else { return }
         cancelActiveTask()
         isBusy = true
         statusMessage = "페이지 본문 확인 중..."
@@ -1007,6 +1007,7 @@ final class AIPageComposerViewModel: ObservableObject {
             guard let self = self, let appModel = appModel, let tab = tab else {
                 return false
             }
+            guard isBrowserVisible() else { return false }
             guard !Task.isCancelled else { return false }
             guard self.taskGeneration == currentGen else { return false }
             guard appModel.selectedTab == .browser else { return false }
@@ -1128,6 +1129,7 @@ struct AIPageContextComposerView: View {
     let isHana: Bool
     let panelWidth: CGFloat
     @ObservedObject var agentCoordinator: WebPageAgentCoordinator
+    let isBrowserVisible: () -> Bool
 
     @StateObject private var viewModel = AIPageComposerViewModel()
     @State private var showingQuestionPopover: Bool = false
@@ -1138,13 +1140,15 @@ struct AIPageContextComposerView: View {
         tabModel: LoginBrowserModel,
         isHana: Bool,
         panelWidth: CGFloat,
-        agentCoordinator: WebPageAgentCoordinator? = nil
+        agentCoordinator: WebPageAgentCoordinator? = nil,
+        isBrowserVisible: @escaping () -> Bool = { false }
     ) {
         self.appModel = appModel
         self.tabModel = tabModel
         self.isHana = isHana
         self.panelWidth = panelWidth
         self._agentCoordinator = ObservedObject(wrappedValue: agentCoordinator ?? WebPageAgentCoordinator())
+        self.isBrowserVisible = isBrowserVisible
     }
 
     private var activeService: AIService {
@@ -1284,7 +1288,7 @@ struct AIPageContextComposerView: View {
                 // Summary Button
                 Button(action: {
                     viewModel.setSummaryQuestion()
-                    viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana)
+                    viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana, isBrowserVisible: isBrowserVisible)
                 }) {
                     Text("요약")
                         .font(.caption2.bold())
@@ -1325,7 +1329,7 @@ struct AIPageContextComposerView: View {
                                 guard !viewModel.isBusy,
                                       !viewModel.questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                                 showingQuestionPopover = false
-                                viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana)
+                                viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana, isBrowserVisible: isBrowserVisible)
                             }
 
                         HStack {
@@ -1340,7 +1344,7 @@ struct AIPageContextComposerView: View {
 
                             Button(action: {
                                 showingQuestionPopover = false
-                                viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana)
+                                viewModel.executeAction(appModel: appModel, tab: tabModel, isHana: isHana, isBrowserVisible: isBrowserVisible)
                             }) {
                                 Text(actionButtonTitle)
                                     .font(.caption.bold())

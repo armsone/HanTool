@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import HTTHTDCore
 
 // 앱 설정: HTT 정보·테마·Dock·Mail 버튼·로그인 자동 시작. 브라우저 설치는 같은 창의 브라우저 번역 섹션에 둔다.
 
@@ -11,6 +12,7 @@ struct AISettingsView: View {
     @State private var pageConsentRequest: WebTranslator?
     @ObservedObject private var diagnostics = AIBIDiagnosticsStore.shared
     @State private var dockVisibility = DockVisibilityStore.shared
+    @ObservedObject private var networkRateDisplay = NetworkRateDisplayStore.shared
     @State private var mailButtonEnabled = MailToolbarButton.shared.isEnabled
     @State private var confirmClear = false
     @State private var loginItem = LoginItemManager()
@@ -72,6 +74,23 @@ struct AISettingsView: View {
                 Text("Dock")
             } footer: {
                 Text("켜면 Dock에도 한툴 아이콘을 표시합니다.")
+            }
+
+            Section {
+                HStack {
+                    Text("네트워크 속도 표시 위치")
+                    Spacer()
+                    Picker("", selection: $networkRateDisplay.location) {
+                        Text("한툴 상단").tag(NetworkRateDisplayLocation.appTop)
+                        Text("macOS 메뉴 막대").tag(NetworkRateDisplayLocation.menuBar)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 170)
+                }
+            } header: {
+                Text("네트워크 속도")
+            } footer: {
+                Text("실시간 네트워크 속도를 한툴 상단 또는 macOS 메뉴 막대에 표시합니다.")
             }
 
             Section {

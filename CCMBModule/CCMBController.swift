@@ -1239,8 +1239,12 @@ private extension FileHandle {
 final class AppDelegate: NSObject, NSMenuDelegate {
     var callbacks = HTTCCMBRuntime.HostCallbacks()
     var isMenuBarVisible: Bool = true
-    private var isStopped = false
+    fileprivate(set) var isStopped = false
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private struct WeakInlineStatusView {
+        weak var value: CCMBInlineStatusContainerView?
+    }
+    private var inlineStatusViews: [WeakInlineStatusView] = []
 
     init(callbacks: HTTCCMBRuntime.HostCallbacks = .init(), showMenuBar: Bool = true) {
         self.callbacks = callbacks
@@ -1645,6 +1649,10 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     func stop() {
         guard !isStopped else { return }
         isStopped = true
+        for observer in inlineStatusViews {
+            observer.value?.apply(nil)
+        }
+        inlineStatusViews.removeAll()
         dataSourceGeneration += 1
         diagnosticLog.log("app_terminate")
         countdownTimer?.cancel()
@@ -3661,7 +3669,12 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             loginRequired: claudeLoginRequiredForDisplay,
             loginInProgress: claudeLoginInProgress
         )
-        guard let model = makePanelModel() else {
+        let panelModel = makePanelModel()
+        inlineStatusViews.removeAll { $0.value == nil }
+        for observer in inlineStatusViews {
+            observer.value?.apply(panelModel)
+        }
+        guard let model = panelModel else {
             splitPanelItem.isHidden = true
             return
         }
@@ -5596,6 +5609,78 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     private static func appLog(_ message: String) {
         writePrivateLog("app \(message)")
     }
+
+    func createInlineStatusView() -> NSView {
+        inlineStatusViews.removeAll { $0.value == nil }
+        let container = CCMBInlineStatusContainerView()
+        inlineStatusViews.append(WeakInlineStatusView(value: container))
+        let model = makePanelModel()
+        container.apply(model)
+        return container
+    }
+}
+
+@MainActor
+final class CCMBInlineStatusContainerView: NSView {
+    private let splitPanelView = SplitUsagePanelView()
+    private let unavailableLabel: NSTextField = {
+        let field = NSTextField(labelWithString: "아직 확인되지 않음/갱신 중")
+        field.font = .systemFont(ofSize: 13, weight: .medium)
+        field.textColor = .secondaryLabelColor
+        field.alignment = .center
+        field.lineBreakMode = .byWordWrapping
+        return field
+    }()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: 100))
+        addSubview(splitPanelView)
+        addSubview(unavailableLabel)
+        splitPanelView.isHidden = true
+        unavailableLabel.isHidden = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("서버 현황 패널")
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        if !splitPanelView.isHidden {
+            splitPanelView.frame = NSRect(origin: .zero, size: splitPanelView.frame.size)
+        } else {
+            unavailableLabel.frame = NSRect(x: 16, y: max(0, (bounds.height - 40) / 2), width: max(0, bounds.width - 32), height: 40)
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        if !splitPanelView.isHidden {
+            return splitPanelView.frame.size
+        }
+        return NSSize(width: UsagePanelLayout.viewWidth, height: 80)
+    }
+
+    func apply(_ model: UsagePanelModel?) {
+        if let model {
+            unavailableLabel.isHidden = true
+            splitPanelView.isHidden = false
+            splitPanelView.apply(model)
+            frame.size = splitPanelView.frame.size
+        } else {
+            splitPanelView.isHidden = true
+            unavailableLabel.isHidden = false
+            unavailableLabel.stringValue = "아직 확인되지 않음/갱신 중"
+            frame.size = NSSize(width: UsagePanelLayout.viewWidth, height: 80)
+        }
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        needsDisplay = true
+    }
 }
 
 @MainActor
@@ -5629,6 +5714,13 @@ public enum HTTCCMBRuntime {
 
     public static var isRunning: Bool {
         sharedController != nil
+    }
+
+    public static func makeInlineStatusView() -> NSView? {
+        guard let controller = sharedController, !controller.isStopped else {
+            return nil
+        }
+        return controller.createInlineStatusView()
     }
 
     public static func start(

@@ -1,12 +1,45 @@
 import SwiftUI
 import Darwin
 
+/// Display location choice for the network rate indicator.
+public enum NetworkRateDisplayLocation: String, CaseIterable, Identifiable {
+    case appTop
+    case menuBar
+
+    public var id: String { rawValue }
+}
+
+/// Persistent store managing the network rate display location preference.
+@MainActor
+public final class NetworkRateDisplayStore: ObservableObject {
+    public static let shared = NetworkRateDisplayStore()
+
+    private let userDefaultsKey = "HTTNetworkRateDisplayLocation"
+
+    @Published public var location: NetworkRateDisplayLocation {
+        didSet {
+            UserDefaults.standard.set(location.rawValue, forKey: userDefaultsKey)
+        }
+    }
+
+    public init() {
+        if let raw = UserDefaults.standard.string(forKey: userDefaultsKey),
+           let saved = NetworkRateDisplayLocation(rawValue: raw) {
+            self.location = saved
+        } else {
+            self.location = .appTop
+        }
+    }
+}
+
 /// Monitors real Darwin network interface byte rates (upload and download)
 /// for physical en-prefixed interfaces (Ethernet / Wi-Fi) avoiding VPN tunnel double counts.
 @MainActor
-final class NetworkRateMonitor: ObservableObject {
-    @Published var uploadRate: Double = 0
-    @Published var downloadRate: Double = 0
+public final class NetworkRateMonitor: ObservableObject {
+    public static let shared = NetworkRateMonitor()
+
+    @Published public var uploadRate: Double = 0
+    @Published public var downloadRate: Double = 0
 
     private struct InterfaceSample {
         let ibytes: UInt64
@@ -16,9 +49,26 @@ final class NetworkRateMonitor: ObservableObject {
 
     private var previousSamples: [String: InterfaceSample] = [:]
     private var hasSampledOnce = false
+    private var sampleTask: Task<Void, Never>?
+
+    public init() {}
+
+    public func start() {
+        guard sampleTask == nil else { return }
+        sampleTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.sample()
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    break
+                }
+            }
+        }
+    }
 
     /// Samples interface counters using `getifaddrs` filtering for AF_LINK and en* interfaces.
-    func sample() {
+    public func sample() {
         var ifap: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifap) == 0, let first = ifap else {
             return
@@ -94,15 +144,42 @@ final class NetworkRateMonitor: ObservableObject {
         self.downloadRate = totalDeltaIn
         self.uploadRate = totalDeltaOut
     }
+
+    public static func formatRate(_ bytesPerSecond: Double) -> (value: String, unit: String) {
+        guard bytesPerSecond > 0 else { return ("0", "B/s") }
+
+        if bytesPerSecond < 1024 {
+            return (String(format: "%.0f", bytesPerSecond), "B/s")
+        } else if bytesPerSecond < 1024 * 1024 {
+            let kb = bytesPerSecond / 1024.0
+            if kb < 100 {
+                return (String(format: "%.1f", kb), "KB/s")
+            } else {
+                return (String(format: "%.0f", kb), "KB/s")
+            }
+        } else if bytesPerSecond < 1024 * 1024 * 1024 {
+            let mb = bytesPerSecond / (1024.0 * 1024.0)
+            if mb < 100 {
+                return (String(format: "%.1f", mb), "MB/s")
+            } else {
+                return (String(format: "%.0f", mb), "MB/s")
+            }
+        } else {
+            let gb = bytesPerSecond / (1024.0 * 1024.0 * 1024.0)
+            return (String(format: "%.2f", gb), "GB/s")
+        }
+    }
 }
 
 /// Compact two-stacked-rows indicator displaying current network rate (Upload / Download).
 /// Red dot upload above blue dot download, monospaced digits, stable width, adaptive theme.
-struct NetworkRateIndicator: View {
-    @StateObject private var monitor = NetworkRateMonitor()
+public struct NetworkRateIndicator: View {
+    @ObservedObject private var monitor = NetworkRateMonitor.shared
     @Environment(\.bkPalette) private var palette
 
-    var body: some View {
+    public init() {}
+
+    public var body: some View {
         let upload = formatRate(monitor.uploadRate)
         let download = formatRate(monitor.downloadRate)
 
@@ -124,17 +201,6 @@ struct NetworkRateIndicator: View {
         .accessibilityLabel(
             "Mac 이더넷 및 Wi-Fi 전체 네트워크 속도: 업로드 \(upload.value) \(upload.unit), 다운로드 \(download.value) \(download.unit)"
         )
-        .task {
-            // Sample periodically while active; automatically cancelled when offscreen.
-            while !Task.isCancelled {
-                monitor.sample()
-                do {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
-                } catch {
-                    break
-                }
-            }
-        }
     }
 
     private func rateRow(color: Color, rate: (value: String, unit: String), label: String) -> some View {
@@ -161,27 +227,6 @@ struct NetworkRateIndicator: View {
     }
 
     private func formatRate(_ bytesPerSecond: Double) -> (value: String, unit: String) {
-        guard bytesPerSecond > 0 else { return ("0", "B/s") }
-
-        if bytesPerSecond < 1024 {
-            return (String(format: "%.0f", bytesPerSecond), "B/s")
-        } else if bytesPerSecond < 1024 * 1024 {
-            let kb = bytesPerSecond / 1024.0
-            if kb < 100 {
-                return (String(format: "%.1f", kb), "KB/s")
-            } else {
-                return (String(format: "%.0f", kb), "KB/s")
-            }
-        } else if bytesPerSecond < 1024 * 1024 * 1024 {
-            let mb = bytesPerSecond / (1024.0 * 1024.0)
-            if mb < 100 {
-                return (String(format: "%.1f", mb), "MB/s")
-            } else {
-                return (String(format: "%.0f", mb), "MB/s")
-            }
-        } else {
-            let gb = bytesPerSecond / (1024.0 * 1024.0 * 1024.0)
-            return (String(format: "%.2f", gb), "GB/s")
-        }
+        NetworkRateMonitor.formatRate(bytesPerSecond)
     }
 }
