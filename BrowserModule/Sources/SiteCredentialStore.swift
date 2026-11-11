@@ -164,15 +164,34 @@ public enum SiteCredentialStore {
         return true
     }
 
+    /// Returns errSecSuccess once the item is gone (or was already absent); otherwise the SecItemDelete status, index untouched.
     @discardableResult
-    public static func delete(origin: String, username: String) -> Bool {
+    public static func delete(origin: String, username: String) -> OSStatus {
         let trimmedOrigin = origin.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedOrigin.isEmpty, !trimmedUser.isEmpty else { return false }
+        guard !trimmedOrigin.isEmpty, !trimmedUser.isEmpty else { return errSecParam }
 
         let q = query(origin: trimmedOrigin, username: trimmedUser)
-        let status = SecItemDelete(q as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { return false }
+        var status = SecItemDelete(q as CFDictionary)
+
+        // Items created under a different code identity are not owned by this app, so SecItemDelete
+        // refuses them with errSecInvalidOwnerEdit. The legacy keychain still lets the item ref for the exact
+        // service/account be deleted (no password data requested, ACL untouched).
+        if status == errSecInvalidOwnerEdit {
+            let account = keychainAccountKey(origin: trimmedOrigin, username: trimmedUser)
+            var itemRef: SecKeychainItem?
+            let findStatus = SecKeychainFindGenericPassword(
+                nil,
+                UInt32(service.utf8.count), service,
+                UInt32(account.utf8.count), account,
+                nil, nil, &itemRef
+            )
+            if findStatus == errSecSuccess, let itemRef {
+                status = SecKeychainItemDelete(itemRef)
+            }
+        }
+
+        guard status == errSecSuccess || status == errSecItemNotFound else { return status }
 
         var idx = index
         if var userList = idx[trimmedOrigin] {
@@ -184,7 +203,7 @@ public enum SiteCredentialStore {
             }
             index = idx
         }
-        return true
+        return errSecSuccess
     }
 }
 
@@ -982,7 +1001,8 @@ struct SiteCredentialManagementSheet: View {
     }
 
     private func performDelete(origin: String, username: String) {
-        if SiteCredentialStore.delete(origin: origin, username: username) {
+        let status = SiteCredentialStore.delete(origin: origin, username: username)
+        if status == errSecSuccess {
             if origin == currentOrigin && username == selectedUsername {
                 usernameInput = ""
                 passwordInput = ""
@@ -991,7 +1011,7 @@ struct SiteCredentialManagementSheet: View {
             refreshData()
             noticeMessage = "삭제했습니다."
         } else {
-            noticeMessage = "삭제에 실패했습니다."
+            noticeMessage = "삭제에 실패했습니다. (OSStatus \(status))"
         }
     }
 

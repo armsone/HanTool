@@ -32,6 +32,19 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0 && el.offsetHeight > 0;
             }
 
+            // Flutter web collapses the last edited autofill input to 0x0 before clicking its submit button,
+            // so submit capture also accepts inputs the user actually typed into in this document.
+            var userEditedInputs = new WeakSet();
+            document.addEventListener('input', function(e) {
+                if (!e.isTrusted) return;
+                var target = e.target;
+                if (target && target.tagName === 'INPUT') userEditedInputs.add(target);
+            }, true);
+
+            function isVisibleOrUserEdited(el) {
+                return isVisible(el) || userEditedInputs.has(el);
+            }
+
             function isEligibleForm(form, submitter) {
                 if (!form) return false;
 
@@ -80,13 +93,13 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                     }
                 }
 
-                var pwInputs = Array.prototype.slice.call(form.querySelectorAll('input[type="password"]')).filter(function(input) { return input.form === form && isVisible(input); });
+                var pwInputs = Array.prototype.slice.call(form.querySelectorAll('input[type="password"]')).filter(function(input) { return input.form === form && isVisibleOrUserEdited(input); });
                 if (pwInputs.length !== 1) return null;
                 var passwordInput = pwInputs[0];
                 var password = passwordInput.value;
                 if (!password) return null;
 
-                var textInputs = Array.prototype.slice.call(form.querySelectorAll('input[type="text"], input[type="email"], input:not([type])')).filter(function(input) { return input.form === form && isVisible(input); });
+                var textInputs = Array.prototype.slice.call(form.querySelectorAll('input[type="text"], input[type="email"], input:not([type])')).filter(function(input) { return input.form === form && isVisibleOrUserEdited(input); });
                 // Exclude search inputs or explicit non-username
                 textInputs = textInputs.filter(function(inp) {
                     var t = (inp.getAttribute('type') || '').toLowerCase();
@@ -242,19 +255,19 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
         guard let currentURL = webView.url,
               let scheme = currentURL.scheme?.lowercased(),
               (scheme == "https" || scheme == "http"),
-              let popupURL = model.popupCommittedURL,
-              popupURL == currentURL else { return }
+              let popupURL = model.popupCommittedURL else { return }
 
         guard let body = message.body as? [String: Any],
               let type = body["type"] as? String,
               let href = body["href"] as? String,
               let messageURL = URL(string: href),
-              popupURL == messageURL,
               currentURL == messageURL else { return }
 
         guard let currentOrigin = SiteCredentialStore.canonicalOrigin(for: currentURL),
               let messageOrigin = SiteCredentialStore.canonicalOrigin(for: messageURL),
               currentOrigin == messageOrigin else { return }
+
+        guard Self.isCommittedDocument(currentURL, committedURL: popupURL) else { return }
 
         let securityOrigin = message.frameInfo.securityOrigin
         let normalizedSecurityPort = securityOrigin.port == 0 ? (securityOrigin.protocol.lowercased() == "https" ? 443 : (securityOrigin.protocol.lowercased() == "http" ? 80 : 0)) : securityOrigin.port
@@ -385,7 +398,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                           (scheme == "https" || scheme == "http"),
                           let targetCommitted = committedURL,
                           model.popupCommittedURL == targetCommitted,
-                          currentURL == targetCommitted,
+                          SiteCredentialCapture.isCommittedDocument(currentURL, committedURL: targetCommitted),
                           let urlOrigin = SiteCredentialStore.canonicalOrigin(for: currentURL),
                           urlOrigin == origin else { return false }
                     return true
@@ -470,6 +483,16 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
         sheetWindow = alert.window
     }
 
+    /// popupCommittedURL only changes on didCommit, so SPA history (pushState/replaceState, e.g. ipTIME Flutter
+    /// /ui/ipTIMEFlutter -> /ui/) leaves it stale. Same-document URL changes cannot leave the committed origin, and a real
+    /// navigation clears popupCommittedURL on provisional start, so origin equality still pins the committed document.
+    static func isCommittedDocument(_ currentURL: URL?, committedURL: URL?) -> Bool {
+        guard committedURL != nil,
+              let committedOrigin = SiteCredentialStore.canonicalOrigin(for: committedURL),
+              let currentOrigin = SiteCredentialStore.canonicalOrigin(for: currentURL) else { return false }
+        return committedOrigin == currentOrigin
+    }
+
     static func triggerManualFill(model: LoginBrowserModel) {
         guard let appModel = model.appModel,
               appModel.selectedTab == .browser,
@@ -481,8 +504,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
               let currentURL = webView.url,
               let scheme = currentURL.scheme?.lowercased(),
               (scheme == "https" || scheme == "http"),
-              let popupURL = model.popupCommittedURL,
-              popupURL == currentURL,
+              isCommittedDocument(currentURL, committedURL: model.popupCommittedURL),
               let origin = SiteCredentialStore.canonicalOrigin(for: currentURL) else { return }
 
         let accounts = SiteCredentialStore.accounts(forOrigin: origin)

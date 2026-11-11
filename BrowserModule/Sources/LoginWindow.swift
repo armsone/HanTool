@@ -2605,7 +2605,8 @@ final class LinkMenuWebView: WKWebView {
         let credentialItemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.fillSavedAccount")
         for old in menu.items where old.identifier == credentialItemID { menu.removeItem(old) }
         if let model = owner, let app = model.appModel, app.selectedTab == .browser,
-           app.browser === model, model.webView === self, model.popupCommittedURL == url,
+           app.browser === model, model.webView === self,
+           SiteCredentialCapture.isCommittedDocument(url, committedURL: model.popupCommittedURL),
            let origin = SiteCredentialStore.canonicalOrigin(for: url),
            SiteCredentialStore.hasSavedCredential(forOrigin: origin) {
             let fillItem = NSMenuItem(title: "저장된 계정 채우기",
