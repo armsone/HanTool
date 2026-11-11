@@ -87,6 +87,9 @@ function originOf(url) {
 const translatedTabs = new Set();
 const tabParents = new Map(); // tabId -> parentId (-1 if evaluated without parent)
 const tabEpochs = new Map(); // tabId -> epoch
+// HTD: 번역 ON 탭에서 사용자가 고른 외부 엔진(google·deepl). 없으면 Mac 기본 번역. 이동·새로 고침한 새 문서에는 새 토큰으로
+// 같은 엔진을 다시 시작하고, 부모에서 연 자식 탭은 이 엔진을 함께 물려받는다. 원문 보기·일반 번역·중지·탭 닫기 때 지운다.
+const tabEngines = new Map(); // tabId -> engine
 
 async function getStoredTranslatedTabs() {
   if (!api.storage?.session) return translatedTabs;
@@ -164,6 +167,46 @@ async function removeTabParent(tabId) {
       await api.storage.session.set({ htdTabParents: obj });
     } catch {}
   }
+}
+
+async function getStoredTabEngines() {
+  if (!api.storage?.session) return tabEngines;
+  try {
+    const stored = await api.storage.session.get("htdTabEngines");
+    const map = stored?.htdTabEngines;
+    if (map && typeof map === "object") {
+      for (const [k, v] of Object.entries(map)) {
+        const tid = Number(k);
+        if (Number.isInteger(tid) && PAGE_ENGINES.includes(v) && !tabEngines.has(tid)) tabEngines.set(tid, v);
+      }
+    }
+  } catch {}
+  return tabEngines;
+}
+
+async function tabEngineOf(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  await getStoredTabEngines();
+  return tabEngines.get(tabId) ?? null;
+}
+
+async function setTabEngine(tabId, engine) {
+  if (!Number.isInteger(tabId)) return;
+  await getStoredTabEngines();
+  if (PAGE_ENGINES.includes(engine)) tabEngines.set(tabId, engine);
+  else if (!tabEngines.delete(tabId)) return;
+  if (api.storage?.session) {
+    try {
+      await api.storage.session.set({ htdTabEngines: Object.fromEntries(tabEngines) });
+    } catch {}
+  }
+}
+
+/** 부모가 번역 ON이면 자식 탭도 ON으로 두고 부모의 외부 엔진(있으면)을 함께 물려준다. */
+async function inheritFromParent(tabId, parentId) {
+  if (!(await isTabTranslated(parentId))) return;
+  await setTabTranslated(tabId, true);
+  await setTabEngine(tabId, await tabEngineOf(parentId));
 }
 
 function getTabEpoch(tabId) {
@@ -1525,7 +1568,37 @@ async function applyAutoToTab(tabId, epoch) {
   // 주입을 기다리는 사이 원문 보기·권한 철회·설정 변경이 있었을 수 있으므로 보내기 직전에 다시 확인한다.
   const settings = await autoStillAllowed(epoch, origin, tabId);
   if (!settings) return null;
+  const engine = IS_HTD ? await tabEngineOf(tabId) : null;
+  if (engine) {
+    // 이 탭에서 고른 외부 엔진을 이 문서에 새 토큰으로 다시 시작한다(이미 이 문서에 걸려 있으면 그대로 둔다).
+    let url = null;
+    try { url = (await api.tabs.get(tabId)).url; } catch { return null; }
+    const entry = externalPages.get(tabId);
+    if (entry && entry.engine === engine && entry.url === url) return sendToTab(tabId, { cmd: "state" });
+    return startExternalOnTab(tabId, engine, settings.target, Date.now(), epoch, url);
+  }
   return sendIfCurrent(tabId, epoch, configureMessage(settings, epoch));
+}
+
+/** 이 탭의 지금 문서에만 고른 외부 엔진의 허용(토큰)을 새로 만들고 내용 스크립트에 시작을 보낸다. 실패하면 허용을 거둔다. */
+async function startExternalOnTab(tabId, engine, target, clickedAt, epoch, url) {
+  // 이 탭의 이전 1회성 허용(다른 엔진 포함)은 새 토큰으로 바뀌며 끝난다. 이전 엔진으로 보낸 요청도 취소한다.
+  if (externalPages.has(tabId)) native.cancelTab(tabId);
+  const token = crypto.randomUUID();
+  externalPages.set(tabId, { engine, url, token, documentId: null });
+  // 이 동작 id와 시작 시각. DeepL은 지금 바로 전체 시간 한도를 시작한다(주입·이전 패스 정리 시간도 포함).
+  const now = Date.now();
+  const startedAt = Number.isFinite(clickedAt) && clickedAt <= now && clickedAt >= now - 60000 ? clickedAt : now;
+  const action = `c${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  dropDeadline(tabId);
+  startDeadline(tabId, engine, token, action, startedAt);
+  const page = await sendIfCurrent(tabId, epoch, { cmd: "startExternalPage", epoch, engine, target, token,
+                                                  action, clickedAt: startedAt });
+  if (!page) {
+    if (externalPages.get(tabId)?.token === token) externalPages.delete(tabId);
+    if (deadlines.get(tabId)?.token === token) dropDeadline(tabId);
+  }
+  return page;
 }
 
 /** 이미 열려 있는 http/https 탭(exceptTabId 제외)에도 자동 번역·언어·이미지 설정을 반영한다. HTD에서는 번역 ON 탭에만 반영한다. */
@@ -1553,8 +1626,9 @@ function globalStop() {
     translatedTabs.clear();
     tabParents.clear();
     tabEpochs.clear();
+    tabEngines.clear();
     if (api.storage?.session) {
-      await api.storage.session.remove(["htdTranslatedTabs", "htdTabParents"]).catch(() => {});
+      await api.storage.session.remove(["htdTranslatedTabs", "htdTabParents", "htdTabEngines"]).catch(() => {});
     }
     const tabs = await queryAllTabs();
     const pages = new Map();
@@ -1576,6 +1650,7 @@ async function reconcile() {
     if (legacy.automaticEnabled === true) await api.storage.local.set({ automaticEnabled: false }).catch(() => {});
     await getStoredTranslatedTabs();
     await getStoredTabParents();
+    await getStoredTabEngines();
     return true;
   }
   const epoch = control.epoch;
@@ -1605,7 +1680,15 @@ async function reconfigure(tabId, origin) {
   let page = null;
   if (tabId !== null && origin) {
     const tabAuto = global !== null && (await originPermitted(origin));
-    page = await sendIfCurrent(tabId, epoch, configureMessage({ ...latest, automaticEnabled: tabAuto }, epoch));
+    const engine = IS_HTD && tabAuto ? await tabEngineOf(tabId) : null;
+    if (engine) {
+      // 외부 엔진 탭은 Mac 기본 번역으로 바꾸지 않고, 바뀐 언어로 같은 엔진을 이 문서에 다시 시작한다.
+      let url = null;
+      try { url = (await api.tabs.get(tabId)).url; } catch {}
+      page = url ? await startExternalOnTab(tabId, engine, latest.target, Date.now(), epoch, url) : null;
+    } else {
+      page = await sendIfCurrent(tabId, epoch, configureMessage({ ...latest, automaticEnabled: tabAuto }, epoch));
+    }
   }
   if (!IS_HTD && global && epoch === control.epoch) configureAllTabs(epoch, tabId).catch(() => {});
   return page;
@@ -1707,6 +1790,7 @@ async function handlePopup(message) {
       let epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
       if (IS_HTD) {
         await setTabTranslated(tabId, true);
+        await setTabEngine(tabId, null);
         if (!origin) {
           return { ok: true, page: null, automatic: true, restricted: true };
         }
@@ -1775,6 +1859,7 @@ async function handlePopup(message) {
     case "toggleOriginal": {
       if (IS_HTD && tabId !== null) {
         await setTabTranslated(tabId, false);
+        await setTabEngine(tabId, null);
         captures.delete(tabId);
         externalPages.delete(tabId);
         dropDeadline(tabId);
@@ -1806,30 +1891,20 @@ async function handlePopup(message) {
       if (tabId === null || !origin) throw codedError("restricted_page", "이 페이지는 번역할 수 없습니다.");
       await injectContent(tabId, origin);
       const currentTab = await api.tabs.get(tabId);
-      // 이 탭의 이전 1회성 허용(다른 엔진 포함)은 새 토큰으로 바뀌며 끝난다. 이전 엔진으로 보낸 요청도 취소한다.
-      if (externalPages.has(tabId)) native.cancelTab(tabId);
-      const token = crypto.randomUUID();
-      externalPages.set(tabId, { engine, url: currentTab.url, token, documentId: null });
-      // 이 클릭의 동작 id와 클릭 시각. DeepL은 지금 바로 전체 시간 한도를 시작한다(주입·이전 패스 정리 시간도 포함).
-      const now = Date.now();
-      const clickedAt = Number.isFinite(message.clickedAt) && message.clickedAt <= now && message.clickedAt >= now - 60000
-        ? message.clickedAt : now;
-      const action = `c${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
-      dropDeadline(tabId);
-      startDeadline(tabId, engine, token, action, clickedAt);
       const epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
-      const page = await sendIfCurrent(tabId, epoch, { cmd: "startExternalPage", epoch, engine, target: settings.target, token,
-                                                      action, clickedAt });
-      if (!page) {
-        if (externalPages.get(tabId)?.token === token) externalPages.delete(tabId);
-        if (deadlines.get(tabId)?.token === token) dropDeadline(tabId);
-        throw codedError("bad_response", "한툴 확장과 통신하지 못했습니다.");
+      if (IS_HTD) {
+        // HTD: 이 탭을 번역 ON으로 두고 고른 엔진을 기억해, 원문 보기·닫기 전까지 이동·새로 고침과 자식 탭에도 같은 엔진을 쓴다.
+        await setTabTranslated(tabId, true);
+        await setTabEngine(tabId, engine);
       }
+      const page = await startExternalOnTab(tabId, engine, settings.target, message.clickedAt, epoch, currentTab.url);
+      if (!page) throw codedError("bad_response", "한툴 확장과 통신하지 못했습니다.");
       return { ok: true, page };
     }
     case "stopPageOnce":
     case "stopPageGoogleOnce": {
       if (tabId === null) throw codedError("bad_request", "탭을 찾을 수 없습니다.");
+      if (IS_HTD) await setTabEngine(tabId, null);
       externalPages.delete(tabId);
       dropDeadline(tabId);
       native.cancelTab(tabId);
@@ -1874,9 +1949,7 @@ if (api.tabs?.onCreated) {
     const parentId = await resolveParentTabId(tab);
     if (Number.isInteger(parentId)) {
       await recordTabParent(tab.id, parentId);
-      if (await isTabTranslated(parentId)) {
-        await setTabTranslated(tab.id, true);
-      }
+      await inheritFromParent(tab.id, parentId);
     } else {
       await recordTabParent(tab.id, -1);
     }
@@ -1907,9 +1980,7 @@ api.tabs.onUpdated.addListener(async (tabId, info, tab) => {
         const parentId = await resolveParentTabId(tab);
         if (Number.isInteger(parentId)) {
           await recordTabParent(tabId, parentId);
-          if (await isTabTranslated(parentId)) {
-            await setTabTranslated(tabId, true);
-          }
+          await inheritFromParent(tabId, parentId);
         } else {
           await recordTabParent(tabId, -1);
         }
@@ -1923,9 +1994,7 @@ api.tabs.onUpdated.addListener(async (tabId, info, tab) => {
       const parentId = await resolveParentTabId(tab);
       if (Number.isInteger(parentId)) {
         await recordTabParent(tabId, parentId);
-        if (await isTabTranslated(parentId)) {
-          await setTabTranslated(tabId, true);
-        }
+        await inheritFromParent(tabId, parentId);
       } else {
         await recordTabParent(tabId, -1);
       }
@@ -1951,6 +2020,7 @@ api.tabs.onRemoved.addListener(async (tabId) => {
   tabEpochs.delete(tabId);
   if (IS_HTD) {
     await setTabTranslated(tabId, false).catch(() => {});
+    await setTabEngine(tabId, null).catch(() => {});
     await removeTabParent(tabId).catch(() => {});
     return;
   }

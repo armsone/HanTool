@@ -853,7 +853,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
             return "확장에서 번역 메뉴를 준비하지 못했습니다. 브라우저 추가 기능에서 확장을 다시 불러와 주세요."
         }
         ctx.userGesturePerformed(in: tab)
-        translateIntentAt = nil
+        translateIntentAt = Date()
         popupTargetTabID = app.browser.tabID
         popupTargetURL = app.browser.currentURL
         ctx.performAction(for: tab)
@@ -1462,9 +1462,9 @@ struct ExtensionActionButton: NSViewRepresentable {
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton()
         button.bezelStyle = .rounded
-        button.imagePosition = .imageLeading
-        button.imageHugsTitle = true
-        button.title = "페이지 번역"
+        button.imagePosition = .imageOnly
+        button.imageHugsTitle = false
+        button.title = ""
         button.target = context.coordinator
         button.action = #selector(Coordinator.clicked(_:))
         manager.setAnchor(button)
@@ -1476,11 +1476,12 @@ struct ExtensionActionButton: NSViewRepresentable {
         context.coordinator.manager = manager
         manager.setAnchor(button)
         let isConn = manager.isConnected
-        button.attributedTitle = NSAttributedString(string: "페이지 번역", attributes: [.foregroundColor: NSColor(palette.textColor)])
+        button.attributedTitle = NSAttributedString(string: "", attributes: [.foregroundColor: NSColor(palette.textColor)])
+        button.title = ""
         button.image = (isConn ? manager.toolbarIcon() : nil)
             ?? NSImage(systemSymbolName: "character.bubble", accessibilityDescription: "번역")
-        button.imagePosition = .imageLeading
-        button.imageHugsTitle = true
+        button.imagePosition = .imageOnly
+        button.imageHugsTitle = false
         if isConn {
             let label = manager.toolbarLabel
             let tip = label.isEmpty ? "한툴 번역" : label
