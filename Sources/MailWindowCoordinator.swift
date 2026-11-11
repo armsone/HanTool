@@ -126,6 +126,11 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         store.showLanguagePackSheet = true
     }
 
+    /// 기존 메인 창과 선택(store/뷰)을 온전히 보존한 채 창만 전면으로 가져온다.
+    func presentWorkbenchPreservingSelection() {
+        presentWorkbenchWindow()
+    }
+
     /// forceLayout: 숨김 웹 보기를 붙일 호스트가 이 창에 곧바로 실제 크기로 붙도록 한 번 레이아웃을 끝낸다.
     private func presentWorkbenchWindow(forceLayout: Bool = false) {
         guard !isTerminating else { return }

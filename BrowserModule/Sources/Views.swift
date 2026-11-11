@@ -163,6 +163,7 @@ public struct MainView: View {
     @ObservedObject var appModel: AppModel
     @EnvironmentObject private var appearance: AppearanceStore
     @Environment(\.bkPalette) private var palette
+    @State private var actualRootWidth: CGFloat = 1120
     #if HTT_HOST
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     #else
@@ -200,15 +201,12 @@ public struct MainView: View {
         HSplitView {
             HierarchicalSidebarView(appModel: appModel, navModel: navModel, onRequestDownloadInput: {
                 appModel.requestDownloadInputFocus()
-            })
-            .frame(minWidth: isExpanded ? 200 : 0,
-                   idealWidth: isExpanded ? 220 : 0,
-                   maxWidth: isExpanded ? 260 : 0,
+            }, isCompact: !isExpanded)
+            .frame(minWidth: isExpanded ? 200 : 55,
+                   idealWidth: isExpanded ? 220 : 60,
+                   maxWidth: isExpanded ? 260 : 68,
                    maxHeight: .infinity)
-            .opacity(isExpanded ? 1 : 0)
             .clipped()
-            .allowsHitTesting(isExpanded)
-            .accessibilityHidden(!isExpanded)
 
             detailContentView
                 .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -217,6 +215,17 @@ public struct MainView: View {
         }
         .frame(minWidth: 860, idealWidth: 1120, maxWidth: .infinity,
                minHeight: 560, idealHeight: 760, maxHeight: .infinity)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        actualRootWidth = geo.size.width
+                    }
+                    .onChange(of: geo.size.width) { newWidth in
+                        actualRootWidth = newWidth
+                    }
+            }
+        )
         .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -225,21 +234,14 @@ public struct MainView: View {
                 } label: {
                     Image(systemName: "sidebar.left")
                 }
-                .help(columnVisibility == .detailOnly ? "사이드바 보이기" : "사이드바 가리기")
-                .accessibilityLabel(columnVisibility == .detailOnly ? "사이드바 보이기" : "사이드바 가리기")
+                .help(columnVisibility == .detailOnly ? "사이드바 펼치기" : "사이드바 접기")
+                .accessibilityLabel(columnVisibility == .detailOnly ? "사이드바 펼치기" : "사이드바 접기")
             }
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
-                ToolbarItem(placement: .primaryAction) {
-                    AIPanelSwitch(appModel: appModel)
-                }
-                .sharedBackgroundVisibility(.hidden)
             } else {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
-                ToolbarItem(placement: .primaryAction) {
-                    AIPanelSwitch(appModel: appModel)
-                }
             }
         }
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
@@ -302,20 +304,24 @@ public struct MainView: View {
                 GlobalAssistantDock(appModel: appModel)
             }
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear {
+                        actualRootWidth = geo.size.width
+                    }
+                    .onChange(of: geo.size.width) { newWidth in
+                        actualRootWidth = newWidth
+                    }
+            }
+        )
         .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
         .toolbar {
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
-                ToolbarItem(placement: .primaryAction) {
-                    AIPanelSwitch(appModel: appModel)
-                }
-                .sharedBackgroundVisibility(.hidden)
             } else {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
-                ToolbarItem(placement: .primaryAction) {
-                    AIPanelSwitch(appModel: appModel)
-                }
             }
         }
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
@@ -391,24 +397,37 @@ public struct MainView: View {
                     HeaderAddressBar(appModel: appModel)
                     Divider()
                 } else if navModel.destination == .settings {
-                    SettingsHubHeaderView(
-                        activeTab: $navModel.settingsTab,
-                        onTabChanged: { tab in
-                            navModel.selectSettingsTab(tab, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                        },
-                        onOpenInputTool: { toolID in
-                            selectTool(toolID)
-                        },
-                        onOpenMacManagement: {
-                            selectTool("macManagement")
-                        },
-                        onOpenBrowser: {
-                            navModel.navigateTo(destination: .browser, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
-                        },
-                        onOpenBrowserSetup: {
-                            selectTool("browser")
+                    HStack(spacing: 8) {
+                        Button {
+                            navModel.returnFromSettings(
+                                appModel: appModel,
+                                selectTool: selectTool,
+                                clearTool: clearHostedTool
+                            )
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.backward")
+                                Text("작업 복귀")
+                            }
+                            .font(.caption)
+                            .foregroundColor(palette.textColor)
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
+                            .background(Capsule().fill(palette.surfaceColor))
                         }
-                    )
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("작업으로 복귀")
+
+                        let ownerTitle = (navModel.settingsOwner ?? .browser).rawValue
+                        Text("\(ownerTitle) > 설정")
+                            .font(.caption.bold())
+                            .foregroundColor(palette.textColor)
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(palette.cardColor)
                     Divider()
                 } else if navModel.destination == .translation {
                     TranslationHeaderView(
@@ -527,12 +546,27 @@ public struct MainView: View {
                     .allowsHitTesting(isDownloadsActive)
                     .accessibilityHidden(!isDownloadsActive)
 
-                    let isWebSettingsActive = navModel.destination == .settings && navModel.settingsTab == .webSettings && hostedToolID == nil
-                    SettingsView(appModel: appModel)
+                    let currentSettingsOwner = navModel.settingsOwner ?? .browser
+                    let isWebSettingsActive = navModel.destination == .settings && (currentSettingsOwner == .browser || navModel.settingsTab == .webSettings) && hostedToolID == nil
+                    SettingsView(appModel: appModel, owner: .browser)
                         .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
                         .opacity(isWebSettingsActive ? 1 : 0)
                         .allowsHitTesting(isWebSettingsActive)
                         .accessibilityHidden(!isWebSettingsActive)
+
+                    let isDownloadSettingsActive = navModel.destination == .settings && (currentSettingsOwner == .downloads || navModel.settingsTab == .downloadSettings) && hostedToolID == nil
+                    SettingsView(appModel: appModel, owner: .downloads)
+                        .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                        .opacity(isDownloadSettingsActive ? 1 : 0)
+                        .allowsHitTesting(isDownloadSettingsActive)
+                        .accessibilityHidden(!isDownloadSettingsActive)
+
+                    let isPlannerSettingsActive = navModel.destination == .settings && (currentSettingsOwner == .planner || navModel.settingsTab == .plannerSettings) && hostedToolID == nil
+                    SettingsView(appModel: appModel, owner: .planner)
+                        .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
+                        .opacity(isPlannerSettingsActive ? 1 : 0)
+                        .allowsHitTesting(isPlannerSettingsActive)
+                        .accessibilityHidden(!isPlannerSettingsActive)
 
                     let isHostToolActive = hostedToolID != nil
                     if let hostTool = toolView {
@@ -556,96 +590,183 @@ public struct MainView: View {
         }
     }
 
+    private var isNarrowToolbar: Bool {
+        actualRootWidth <= 1200
+    }
+
     private var browserControlBar: some View {
         HStack(spacing: 4) {
-            PageAudioControls(appModel: appModel)
-                .fixedSize()
-            if rateDisplay.location == .appTop {
-                Button {
-                    navModel.isSpeedTestPresented = true
-                } label: {
-                    NetworkRateIndicator()
+            if isNarrowToolbar {
+                // Narrow layout: [현재 context 단일 번역/AI Menu+Toggle/Theme/명시 도구 Menu]
+                #if HTT_HOST
+                if (hostedToolID == "mail" || hostedToolID == "screen"),
+                   let toolID = hostedToolID,
+                   let button = hostExport.hostedTranslationControl?(toolID) {
+                    button
+                        .font(.caption.bold())
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(Capsule().fill(palette.surfaceColor))
                 }
-                .buttonStyle(.plain)
-                .accessibilityHint("속도 테스트 열기")
-                .help("속도 테스트 열기")
-            }
+                #endif
 
-            if navModel.destination == .browser && appModel.selectedTab == .browser && hostedToolID == nil {
-                ExtensionActionButton(manager: appModel.extensions)
-                    .fixedSize()
-            }
-            #if HTT_HOST
-            if (hostedToolID == "mail" || hostedToolID == "screen"),
-               let toolID = hostedToolID,
-               let button = hostExport.hostedTranslationControl?(toolID) {
-                button
-                    .font(.caption.bold())
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 8)
-                    .frame(height: 26)
-                    .background(Capsule().fill(palette.surfaceColor))
-            }
-            #endif
+                AIPanelSwitch(appModel: appModel)
 
-            Button(action: selectDestinationFolder) {
-                HStack(spacing: 4) {
-                    Text(URL(fileURLWithPath: appModel.destinationFolder).lastPathComponent)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .foregroundColor(palette.textColor)
-                .padding(.horizontal, 14)
-                .frame(height: 26)
-                .fixedSize(horizontal: true, vertical: false)
-                .background(Capsule().fill(palette.surfaceColor))
-            }
-            .buttonStyle(.plain)
-            .help("저장 폴더 변경")
-            .accessibilityLabel("저장 폴더 변경")
+                ThemeButton(store: appearance)
+                    .frame(width: 26, height: 26)
 
-            HStack(spacing: 6) {
-                Button {
-                    BrowserAdHideManager.shared.toggle(appModel: appModel, model: appModel.browser)
-                } label: {
-                    Text("광고").fixedSize()
-                    .font(.caption.bold())
-                    .foregroundColor(adHide.isEditing ? palette.accentColor : palette.textColor)
-                }
-                .buttonStyle(.plain)
-                .help("광고 숨기기 편집: 이 페이지에서 숨길 부분을 드래그하거나, 이미 숨긴 영역(점선)을 클릭해 해제합니다. 선택한 요소만 숨기며(안정적으로 찾을 수 있으면 같은 사이트의 다른 페이지에서도 숨김) 네트워크 요청은 바뀌지 않습니다. 오른쪽 스위치와는 별개입니다.")
-                .accessibilityLabel("광고 숨기기 편집")
-                Toggle("광고 차단", isOn: Binding(
-                    get: { appModel.preferences.adBlockingEnabled },
-                    set: { newValue in
-                        appModel.preferences.setAdBlockingEnabled(newValue)
-                        for tab in appModel.tabs {
-                            tab.setAdBlockingEnabled(newValue)
+                // 명시 도구 Menu (접근 보존)
+                Menu {
+                    // Audio
+                    Section("오디오") {
+                        Button {
+                            PageAudioController.shared.toggleGlobalMute()
+                        } label: {
+                            Text(PageAudioController.shared.isGlobalMuted ? "전체 음소거 해제" : "전체 음소거")
                         }
-                    }))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                    }
+
+                    // Network Rate
+                    if rateDisplay.location == .appTop {
+                        Section("네트워크") {
+                            Button("속도 테스트 열기") {
+                                navModel.isSpeedTestPresented = true
+                            }
+                        }
+                    }
+
+                    // Folder
+                    Section("저장 폴더") {
+                        Button("저장 폴더 변경…") {
+                            selectDestinationFolder()
+                        }
+                    }
+
+                    // Ad
+                    Section("광고") {
+                        Button(adHide.isEditing ? "광고 숨기기 완료" : "광고 숨기기 편집") {
+                            BrowserAdHideManager.shared.toggle(appModel: appModel, model: appModel.browser)
+                        }
+                        Button(appModel.preferences.adBlockingEnabled ? "광고 차단 끄기" : "광고 차단 켜기") {
+                            let newVal = !appModel.preferences.adBlockingEnabled
+                            appModel.preferences.setAdBlockingEnabled(newVal)
+                            for tab in appModel.tabs {
+                                tab.setAdBlockingEnabled(newVal)
+                            }
+                        }
+                    }
+
+                    // Connection Help
+                    Section("연결 도움") {
+                        Button(appModel.connection.enabled ? "HTTPS 연결 도움 끄기" : "HTTPS 연결 도움 켜기") {
+                            appModel.setConnectionAssist(!appModel.connection.enabled)
+                        }
+                        .disabled(appModel.hasActiveRun || appModel.isMeasuringSpeed)
+                    }
+
+                    // Popup
+                    Section("팝업") {
+                        BrowserPopupSwitch(appModel: appModel, browser: appModel.browser, asMenuItem: true)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(palette.textColor)
+                        .frame(width: 26, height: 26)
+                        .background(Capsule().fill(palette.surfaceColor))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("추가 브라우저 도구")
+                .accessibilityLabel("추가 브라우저 도구")
+            } else {
+                PageAudioControls(appModel: appModel)
                     .fixedSize()
-                    .help("웹 페이지 안의 주요 서드파티 광고 도메인 연결을 차단합니다. 브라우저 화면에만 적용되며 외부 전송이나 추가 다운로드 없이 동작합니다.")
-                    .accessibilityLabel("광고 차단")
+                if rateDisplay.location == .appTop {
+                    Button {
+                        navModel.isSpeedTestPresented = true
+                    } label: {
+                        NetworkRateIndicator()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("속도 테스트 열기")
+                    .help("속도 테스트 열기")
+                }
+
+                #if HTT_HOST
+                if (hostedToolID == "mail" || hostedToolID == "screen"),
+                   let toolID = hostedToolID,
+                   let button = hostExport.hostedTranslationControl?(toolID) {
+                    button
+                        .font(.caption.bold())
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(Capsule().fill(palette.surfaceColor))
+                }
+                #endif
+
+                Button(action: selectDestinationFolder) {
+                    HStack(spacing: 4) {
+                        Text(URL(fileURLWithPath: appModel.destinationFolder).lastPathComponent)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .foregroundColor(palette.textColor)
+                    .padding(.horizontal, 14)
+                    .frame(height: 26)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .background(Capsule().fill(palette.surfaceColor))
+                }
+                .buttonStyle(.plain)
+                .help("저장 폴더 변경")
+                .accessibilityLabel("저장 폴더 변경")
+
+                HStack(spacing: 6) {
+                    Button {
+                        BrowserAdHideManager.shared.toggle(appModel: appModel, model: appModel.browser)
+                    } label: {
+                        Text("광고").fixedSize()
+                        .font(.caption.bold())
+                        .foregroundColor(adHide.isEditing ? palette.accentColor : palette.textColor)
+                    }
+                    .buttonStyle(.plain)
+                    .help("광고 숨기기 편집: 이 페이지에서 숨길 부분을 드래그하거나, 이미 숨긴 영역(점선)을 클릭해 해제합니다. 선택한 요소만 숨기며(안정적으로 찾을 수 있으면 같은 사이트의 다른 페이지에서도 숨김) 네트워크 요청은 바뀌지 않습니다. 오른쪽 스위치와는 별개입니다.")
+                    .accessibilityLabel("광고 숨기기 편집")
+                    Toggle("광고 차단", isOn: Binding(
+                        get: { appModel.preferences.adBlockingEnabled },
+                        set: { newValue in
+                            appModel.preferences.setAdBlockingEnabled(newValue)
+                            for tab in appModel.tabs {
+                                tab.setAdBlockingEnabled(newValue)
+                            }
+                        }))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .help("웹 페이지 안의 주요 서드파티 광고 도메인 연결을 차단합니다. 브라우저 화면에만 적용되며 외부 전송이나 추가 다운로드 없이 동작합니다.")
+                        .accessibilityLabel("광고 차단")
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .background(Capsule().fill(palette.surfaceColor))
+                .fixedSize()
+
+                ConnectionHelpSwitch(appModel: appModel, connection: appModel.connection)
+                    .fixedSize()
+
+                BrowserPopupSwitch(appModel: appModel, browser: appModel.browser)
+                    .fixedSize()
+
+                AIPanelSwitch(appModel: appModel)
+
+                ThemeButton(store: appearance)
+                    .frame(width: 26, height: 26)
             }
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(Capsule().fill(palette.surfaceColor))
-            .fixedSize()
-
-            ConnectionHelpSwitch(appModel: appModel, connection: appModel.connection)
-                .fixedSize()
-
-            BrowserPopupSwitch(appModel: appModel, browser: appModel.browser)
-                .fixedSize()
-
-
-
-            ThemeButton(store: appearance)
-                .frame(width: 26, height: 26)
         }
         .padding(4)
         .modifier(BrowserControlBarBackground())
@@ -1057,6 +1178,7 @@ struct BrowserPopupSwitch: View {
     @ObservedObject var appModel: AppModel
     @ObservedObject var browser: LoginBrowserModel
     @ObservedObject var permissions = PopupSitePermissions.shared
+    var asMenuItem: Bool = false
     @Environment(\.bkPalette) var palette
 
     private var currentHost: String? {
@@ -1074,32 +1196,39 @@ struct BrowserPopupSwitch: View {
 
     var body: some View {
         let host = currentHost
-        HStack(spacing: 6) {
-            Text("팝업").fixedSize()
-                .font(.caption.bold())
-                .foregroundColor(palette.textColor)
-            Toggle("팝업 허용", isOn: Binding(
-                get: {
-                    guard let host = host else { return false }
-                    return permissions.isAllowed(host: host)
-                },
-                set: { allow in
-                    guard let host = host, host == currentHost else { return }
-                    if allow {
-                        permissions.add(input: host)
-                    } else {
-                        permissions.remove(host: host)
-                    }
-                }))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
+        let binding = Binding<Bool>(
+            get: {
+                guard let host = host else { return false }
+                return permissions.isAllowed(host: host)
+            },
+            set: { allow in
+                guard let host = host, host == currentHost else { return }
+                if allow {
+                    permissions.add(input: host)
+                } else {
+                    permissions.remove(host: host)
+                }
+            })
+
+        if asMenuItem {
+            Toggle("이 사이트 팝업 허용", isOn: binding)
                 .disabled(host == nil)
+        } else {
+            HStack(spacing: 6) {
+                Text("팝업").fixedSize()
+                    .font(.caption.bold())
+                    .foregroundColor(palette.textColor)
+                Toggle("팝업 허용", isOn: binding)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(host == nil)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(Capsule().fill(palette.surfaceColor))
+            .help("현재 도메인에만 적용되며 새로고침 후 반영됩니다.")
         }
-        .padding(.horizontal, 8)
-        .frame(height: 26)
-        .background(Capsule().fill(palette.surfaceColor))
-        .help("현재 도메인에만 적용되며 새로고침 후 반영됩니다.")
     }
 }
 
@@ -1110,9 +1239,11 @@ struct AIPanelSwitch: View {
     @Environment(\.bkPalette) var palette
 
     #if HTT_HOST
+    private var hostedToolID: String? { HTDHostExport.shared.hostedToolID }
     private func selectTool(_ id: String) { HTDHostExport.shared.selectToolFromSidebar(id) }
     private func clearHostedTool() { HTDHostExport.shared.clearHostedTool() }
     #else
+    private var hostedToolID: String? { nil }
     private func selectTool(_ id: String) {}
     private func clearHostedTool() {}
     #endif
@@ -1132,7 +1263,7 @@ struct AIPanelSwitch: View {
 
     private func setPanelOpen(_ val: Bool) {
         if val && !hasAnyEnabled {
-            navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+            navModel.openAISettings(appModel: appModel, currentToolID: hostedToolID, selectTool: selectTool, clearTool: clearHostedTool)
         } else {
             appModel.setAIPanelOpen(val)
         }
@@ -1174,9 +1305,9 @@ struct AIPanelSwitch: View {
                 }
 
                 Button {
-                    navModel.selectSettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearHostedTool)
+                    navModel.openAISettings(appModel: appModel, currentToolID: hostedToolID, selectTool: selectTool, clearTool: clearHostedTool)
                 } label: {
-                    Label("AI 연결 설정…", systemImage: "gearshape")
+                    Label("설정", systemImage: "gearshape")
                 }
             } label: {
                 Text("비서").fixedSize()
@@ -1211,7 +1342,6 @@ struct AIPanelSwitch: View {
     private func chooseService(_ id: String) {
         aiStore.selectService(id: id)
         appModel.temporaryShowHanaPanel = false
-        appModel.selectedTab = .browser
         appModel.setAIPanelOpen(true)
     }
 }
@@ -2119,167 +2249,175 @@ struct HistoryCardView: View {
 
 struct SettingsView: View {
     @ObservedObject var appModel: AppModel
+    var owner: SettingsOwner = .browser
     @Environment(\.bkPalette) var palette
+    @State private var showingPlannerToolSettings: Bool = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // Section: Address search & shortcuts
-                GroupBox("주소창·검색") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("브라우저 주소창에서 사이트 이름·단축어·검색어를 통한 빠른 탐색 및 길찾기 설정을 관리합니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        AddressSearchSettingsView(store: appModel.preferences.addressSearch)
-                            .frame(minHeight: 280, maxHeight: 420)
-                    }
-                    .padding(8)
-                }
-
-                // Section: Browser translation extension
-                GroupBox("번역 확장 연동") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Safari, Chrome, Whale 등 외부 브라우저와 한툴 번역 엔진을 연결하는 확장 프로그램 연동 설정입니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Button("번역 확장 프로그램 설정 열기 ↗") {
-                            #if HTT_HOST
-                            HTDHostExport.shared.showTool("browser")
-                            #endif
+                switch owner {
+                case .browser:
+                    // Section: Address search & shortcuts
+                    GroupBox("주소창·검색") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("브라우저 주소창에서 사이트 이름·단축어·검색어를 통한 빠른 탐색 및 길찾기 설정을 관리합니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            AddressSearchSettingsView(store: appModel.preferences.addressSearch)
+                                .frame(minHeight: 280, maxHeight: 420)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .help("브라우저 번역 확장 프로그램 연동 화면을 엽니다.")
+                        .padding(8)
                     }
-                    .padding(8)
-                }
 
-                // Section 1b: Video queue concurrency & fragment concurrency
-                GroupBox("다운로드") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("동시에 처리할 동영상 개수:")
-                                .font(.subheadline.bold())
-                            Spacer()
-                            Stepper("\(appModel.maxConcurrentJobs)개", value: $appModel.maxConcurrentJobs, in: 1...8)
-                                .accessibilityLabel("동시에 처리할 동영상 개수")
+                    // Section 2: Connection assist
+                    ConnectionSettingsSection(appModel: appModel, connection: appModel.connection)
+
+                    // Section 3: Login session
+                    LoginSettingsSection(appModel: appModel, session: appModel.session)
+
+                    // Section 3a: Cache cleanup
+                    CacheSettingsSection(appModel: appModel)
+
+                    // Section 3b: Popups & Redirection
+                    PopupSitePermissionsSection()
+
+                    GroupBox("명령줄로 사이트 열기") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("터미널에서 아래 명령으로 사이트를 바로 엽니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            HStack {
+                                Text(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Spacer()
+                                Button("복사") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#, forType: .string)
+                                }
+                                .buttonStyle(.bordered)
+                            }
                         }
-                        Text("동시에 처리할 동영상 수입니다 (1~8개, 기본값 3개). 값을 낮추면 다음 시작부터 적용되며 이미 실행 중인 동영상은 중단되지 않습니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-
-                        Divider()
-
-                        Text("조각 수신 자동 최적화")
-                            .font(.subheadline.bold())
-                        Text("HLS·DASH 조각 영상은 동시 수신 1개로 시작해, 실제 측정한 전체 수신 속도가 의미 있게 빨라질 때만 1개씩 늘립니다. 속도가 나아지지 않거나 오류가 나면 직전의 안정된 개수로 돌아가 더 늘리지 않습니다. 짧은 영상은 측정할 자료가 부족해 1개로 끝날 수 있습니다. 일반 단일 파일과 실시간 녹화에는 적용되지 않습니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        .padding(8)
                     }
-                    .padding(8)
-                }
 
-                // Section 2: Connection assist
-                ConnectionSettingsSection(appModel: appModel, connection: appModel.connection)
+                    #if HTT_HOST
+                    if let hostedSettings = HTDHostExport.shared.hostedFeatureSettings?("browser") {
+                        hostedSettings
+                    }
+                    #endif
 
-                // Section 3: Login session
-                LoginSettingsSection(appModel: appModel, session: appModel.session)
+                case .downloads:
+                    // Section 1b: Video queue concurrency & fragment concurrency
+                    GroupBox("다운로드") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("동시에 처리할 동영상 개수:")
+                                    .font(.subheadline.bold())
+                                Spacer()
+                                Stepper("\(appModel.maxConcurrentJobs)개", value: $appModel.maxConcurrentJobs, in: 1...8)
+                                    .accessibilityLabel("동시에 처리할 동영상 개수")
+                            }
+                            Text("동시에 처리할 동영상 수입니다 (1~8개, 기본값 3개). 값을 낮추면 다음 시작부터 적용되며 이미 실행 중인 동영상은 중단되지 않습니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
 
-                // Section 3a: Cache cleanup
-                CacheSettingsSection(appModel: appModel)
+                            Divider()
 
-                // Section 3b: Popups & Redirection
-                PopupSitePermissionsSection()
-
-                // Section 5: Engine status & diagnostics (below actionable groups)
-                GroupBox("엔진 상태 및 진단") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("전체 엔진 상태:")
+                            Text("조각 수신 자동 최적화")
                                 .font(.subheadline.bold())
-                            if !appModel.engineHealth.checked {
-                                Label("확인 중...", systemImage: "hourglass")
-                                    .foregroundStyle(.secondary)
-                            } else if appModel.engineHealth.healthy {
-                                Label("정상 작동 가능", systemImage: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
+                            Text("HLS·DASH 조각 영상은 동시 수신 1개로 시작해, 실제 측정한 전체 수신 속도가 의미 있게 빨라질 때만 1개씩 늘립니다. 속도가 나아지지 않거나 오류가 나면 직전의 안정된 개수로 돌아가 더 늘리지 않습니다. 짧은 영상은 측정할 자료가 부족해 1개로 끝날 수 있습니다. 일반 단일 파일과 실시간 녹화에는 적용되지 않습니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                    }
+
+                    // Section 5: Engine status & diagnostics
+                    GroupBox("엔진 상태 및 진단") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("전체 엔진 상태:")
+                                    .font(.subheadline.bold())
+                                if !appModel.engineHealth.checked {
+                                    Label("확인 중...", systemImage: "hourglass")
+                                        .foregroundStyle(.secondary)
+                                } else if appModel.engineHealth.healthy {
+                                    Label("정상 작동 가능", systemImage: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                } else {
+                                    Label(appModel.engineHealth.failureReason ?? "점검 필요", systemImage: "exclamationmark.triangle.fill")
+                                        .foregroundColor(palette.warnColor)
+                                }
+                            }
+
+                            Divider()
+
+                            let h = appModel.engineHealth
+                            LabeledContent("엔진 분류", value: h.engineType)
+                            LabeledContent("Python 실행기", value: h.pythonPath)
+                            LabeledContent("Python 버전", value: h.pythonVersion.isEmpty ? "확인 중" : h.pythonVersion)
+                            LabeledContent("yt-dlp", value: h.ytdlpAvailable ? "사용 가능 (버전 \(h.ytdlpVersion))" : "미설치/로드 실패")
+                            LabeledContent("FFmpeg", value: h.ffmpegAvailable ? "\(h.ffmpegVersion) · \(h.ffmpegPath ?? "")" : "미설치")
+                            LabeledContent("ffprobe", value: h.ffprobeAvailable ? (h.ffprobePath ?? "사용 가능") : "미설치")
+                            LabeledContent("Deno (JS 런타임)", value: h.denoAvailable ? "\(h.denoVersion) · \(h.denoPath ?? "")" : "미설치 (일부 사이트에서 필요)")
+                            LabeledContent("EJS (yt-dlp-ejs)", value: h.ejsAvailable ? "설치됨" : "미설치 (일부 사이트에서 필요)")
+                            Text(BrowserExtensionManager.embeddingHTTApp != nil
+                                 ? "통합 한툴이 엔진, yt-dlp, FFmpeg, ffprobe, Deno를 하나의 번들로 함께 제공합니다. 별도로 내려받거나 설치할 필요가 없으며, 이 번들의 업데이트는 한툴 메뉴의 '업데이트 확인…'으로 합니다."
+                                 : "독립 실행 중입니다. 엔진은 자동으로 업데이트되거나 설치되지 않으며, 필요한 도구는 직접 준비해야 합니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+
+                            HStack {
+                                Spacer()
+                                Button("엔진 상태 다시 확인") {
+                                    appModel.refreshEngineHealth()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            Text("앱에 문제가 생겼을 때 개발자에게 보여 줄 진단 정보를 ZIP 파일 하나로 저장합니다. 단계·오류 종류·도구 버전 같은 기록만 담기고 영상, 제목, 파일 이름, 주소의 경로·쿼리, 로그인 정보는 담기지 않습니다. 저장만 하며 자동으로 전송하지 않습니다.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(8)
+                    }
+
+                case .planner:
+                    SAWTeamSettingsSection(workspace: appModel.sawWorkspace)
+
+                    GroupBox("도구 설정") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if appModel.sawWorkspace.selectedProjectID != nil {
+                                HStack {
+                                    Text("선택된 프로젝트의 도구 설정을 확인하고 관리합니다.")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("도구 설정 열기") {
+                                        showingPlannerToolSettings = true
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .accessibilityLabel("도구 설정 열기")
+                                }
                             } else {
-                                Label(appModel.engineHealth.failureReason ?? "점검 필요", systemImage: "exclamationmark.triangle.fill")
-                                    .foregroundColor(palette.warnColor)
+                                Text("선택된 프로젝트가 없습니다. 플래너에서 프로젝트를 선택해 주세요.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-
-                        Divider()
-
-                        let h = appModel.engineHealth
-                        LabeledContent("엔진 분류", value: h.engineType)
-                        LabeledContent("Python 실행기", value: h.pythonPath)
-                        LabeledContent("Python 버전", value: h.pythonVersion.isEmpty ? "확인 중" : h.pythonVersion)
-                        LabeledContent("yt-dlp", value: h.ytdlpAvailable ? "사용 가능 (버전 \(h.ytdlpVersion))" : "미설치/로드 실패")
-                        LabeledContent("FFmpeg", value: h.ffmpegAvailable ? "\(h.ffmpegVersion) · \(h.ffmpegPath ?? "")" : "미설치")
-                        LabeledContent("ffprobe", value: h.ffprobeAvailable ? (h.ffprobePath ?? "사용 가능") : "미설치")
-                        LabeledContent("Deno (JS 런타임)", value: h.denoAvailable ? "\(h.denoVersion) · \(h.denoPath ?? "")" : "미설치 (일부 사이트에서 필요)")
-                        LabeledContent("EJS (yt-dlp-ejs)", value: h.ejsAvailable ? "설치됨" : "미설치 (일부 사이트에서 필요)")
-                        Text(BrowserExtensionManager.embeddingHTTApp != nil
-                             ? "통합 한툴이 엔진, yt-dlp, FFmpeg, ffprobe, Deno를 하나의 번들로 함께 제공합니다. 별도로 내려받거나 설치할 필요가 없으며, 이 번들의 업데이트는 한툴 메뉴의 '업데이트 확인…'으로 합니다."
-                             : "독립 실행 중입니다. 엔진은 자동으로 업데이트되거나 설치되지 않으며, 필요한 도구는 직접 준비해야 합니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-
-                        HStack {
-                            Spacer()
-                            Button("엔진 상태 다시 확인") {
-                                appModel.refreshEngineHealth()
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                        Text("앱에 문제가 생겼을 때 개발자에게 보여 줄 진단 정보를 ZIP 파일 하나로 저장합니다. 단계·오류 종류·도구 버전 같은 기록만 담기고 영상, 제목, 파일 이름, 주소의 경로·쿼리, 로그인 정보는 담기지 않습니다. 저장만 하며 자동으로 전송하지 않습니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        .padding(8)
                     }
-                    .padding(8)
-                }
-
-                GroupBox("명령줄로 사이트 열기") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("터미널에서 아래 명령으로 사이트를 바로 엽니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Text(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                            Spacer()
-                            Button("복사") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#, forType: .string)
-                            }
-                            .buttonStyle(.bordered)
+                    .sheet(isPresented: $showingPlannerToolSettings) {
+                        if let projectID = appModel.sawWorkspace.selectedProjectID {
+                            let session = appModel.sawWorkspace.session(for: projectID)
+                            SAWToolSettingsView(workspace: appModel.sawWorkspace, session: session)
                         }
                     }
-                    .padding(8)
-                }
 
-                // Section 4: About
-                GroupBox("\(AppIdentity.displayName) 정보") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        let shortVer = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.9.1"
-                        let buildNum = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? "20"
-                        let buildStamp = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String)
-                            ?? (Bundle.main.infoDictionary?["HTDBuildStamp"] as? String)
-                            ?? (Bundle.main.infoDictionary?["BarobogiBuildStamp"] as? String)
-                            ?? buildNum
-                        LabeledContent("버전", value: "\(shortVer) (\(buildNum))")
-                        LabeledContent("빌드", value: buildStamp)
-#if HTT_HOST
-                        LabeledContent("배포 형태", value: "한툴 통합 기능")
-#else
-                        LabeledContent("배포 형태", value: "한툴 통합 브라우저")
-#endif
-                        LabeledContent("저작권", value: "Copyright © 2026 Hanstree")
-                    }
-                    .padding(8)
+                default:
+                    EmptyView()
                 }
             }
             .padding(20)

@@ -240,8 +240,34 @@ public final class SiteAutofill {
         var secretPassword: String? = rec.password
         let fillUsername = rec.username
 
+        // Pages like Flutter web drop their text-editing connection while the window is unfocused (e.g. while a sheet
+        // is attached) and rebuild the inputs from their own state on refocus, discarding values written meanwhile.
+        // So wait (bounded) for the document to regain focus before filling, and report success only if the values
+        // are still in the same inputs one frame later.
         let script = """
-        return (function() {
+        function nextFrame() {
+            return new Promise(function(resolve) {
+                setTimeout(resolve, 200);
+                requestAnimationFrame(function() { setTimeout(resolve, 0); });
+            });
+        }
+        if (!document.hasFocus()) {
+            await new Promise(function(resolve) {
+                var done = false;
+                function finish() {
+                    if (done) return;
+                    done = true;
+                    window.removeEventListener('focus', finish, true);
+                    resolve();
+                }
+                window.addEventListener('focus', finish, true);
+                setTimeout(finish, 1200);
+            });
+            await nextFrame();
+            await nextFrame();
+        }
+        var filledInputs = null;
+        var code = (function() {
             try {
                 if (window !== window.top) return 0;
                 if (location.origin !== expectedOrigin) return 0;
@@ -386,6 +412,29 @@ public final class SiteAutofill {
                     };
                 }
 
+                // Helper to collect elements across document and open shadow roots
+                function queryAllDeep(selector) {
+                    var results = [];
+                    function search(root) {
+                        if (!root) return;
+                        var found = root.querySelectorAll(selector);
+                        for (var i = 0; i < found.length; i++) {
+                            if (results.indexOf(found[i]) === -1) {
+                                results.push(found[i]);
+                            }
+                        }
+                        var allEls = root.querySelectorAll('*');
+                        for (var j = 0; j < allEls.length; j++) {
+                            var el = allEls[j];
+                            if (el.shadowRoot) {
+                                search(el.shadowRoot);
+                            }
+                        }
+                    }
+                    search(document);
+                    return results;
+                }
+
                 // Check focused element's form first
                 var targetFormInfo = null;
                 var activeEl = document.activeElement;
@@ -396,9 +445,9 @@ public final class SiteAutofill {
                     }
                 }
 
-                // If no focused eligible form, find unique eligible form across all forms in document
+                // If no focused eligible form, find unique eligible form across all forms in document and open shadow roots
                 if (!targetFormInfo) {
-                    var docForms = document.querySelectorAll('form');
+                    var docForms = queryAllDeep('form');
                     var eligibleForms = [];
                     for (var f = 0; f < docForms.length; f++) {
                         var info = checkEligibleForm(docForms[f]);
@@ -423,8 +472,8 @@ public final class SiteAutofill {
                     if (eligibleForms.length === 1) {
                         targetFormInfo = eligibleForms[0];
                     } else {
-                        // Check if there are visible passwords anywhere to return appropriate code
-                        var allPwInputs = document.querySelectorAll('input[type=password]');
+                        // Check if there are visible passwords anywhere (including open shadow roots) to return appropriate code
+                        var allPwInputs = queryAllDeep('input[type=password]');
                         var anyVisiblePw = false;
                         for (var i = 0; i < allPwInputs.length; i++) {
                             if (isCandidateInput(allPwInputs[i])) {
@@ -468,11 +517,20 @@ public final class SiteAutofill {
                     return 4;
                 }
 
+                filledInputs = [candidateUsername, pwInput];
                 return 2;
             } catch(e) {
                 return -1;
             }
         })();
+        if (code === 2) {
+            await nextFrame();
+            if (!filledInputs[0].isConnected || !filledInputs[1].isConnected ||
+                filledInputs[0].value !== userVal || filledInputs[1].value !== passVal) {
+                return 5;
+            }
+        }
+        return code;
         """
 
         webView.callAsyncJavaScript(
@@ -502,6 +560,8 @@ public final class SiteAutofill {
                             onNotice("페이지에서 비밀번호 입력 칸을 찾지 못했습니다.")
                         } else if c == 3 {
                             onNotice("전송 주소(Action)가 사이트 주소와 달라 안전을 위해 입력을 취소했습니다.")
+                        } else if c == 5 {
+                            onNotice("페이지가 입력한 값을 유지하지 않아 채우지 못했습니다.")
                         } else {
                             onNotice("안전을 위해 입력을 건너뛰었습니다.")
                         }

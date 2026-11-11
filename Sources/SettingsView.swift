@@ -7,6 +7,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
     case mail
     case screen
     case browser
+    case translationSettings
     case input
     case macManagement
     case macManagementSettings
@@ -24,12 +25,13 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .mail: return "메일 번역"
         case .screen: return "화면 번역"
         case .browser: return "번역 확장"
+        case .translationSettings: return "번역 설정"
         case .input: return "입력 도우미"
         case .macManagement, .macManagementSettings: return "Mac 관리"
         case .cleanUSB: return "USB 드라이브"
         case .serverStatus, .serverStatusSettings: return "서버 현황"
         case .help: return "사용 안내"
-        case .general: return "앱 설정"
+        case .general: return "브라우저 설정"
         }
     }
 
@@ -39,6 +41,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .mail: return "mail"
         case .screen: return "screen"
         case .browser: return "browser"
+        case .translationSettings: return "settings"
         case .input: return "edit"
         case .macManagement, .cleanUSB, .serverStatus: return "device_files"
         case .macManagementSettings, .serverStatusSettings: return "settings"
@@ -49,7 +52,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
 
     /// 사이드바 카테고리 묶음
     static let overviewSections: [SettingsSection] = [.home]
-    static let translationSections: [SettingsSection] = [.mail, .screen, .browser]
+    static let translationSections: [SettingsSection] = [.mail, .screen, .browser, .translationSettings]
     static let supportSections: [SettingsSection] = [.help, .general]
 
 }
@@ -330,6 +333,8 @@ public struct SettingsView: View {
             ScreenTranslationPane()
         case .browser:
             BrowserSetupView(settingsStore: store)
+        case .translationSettings:
+            AISettingsView(scope: .translation)
         case .input:
             InputMateSettingsView(page: store.inputPage)
         case .macManagement, .macManagementSettings:
@@ -344,7 +349,7 @@ public struct SettingsView: View {
         case .help:
             HTTGuideView(settingsStore: store)
         case .general:
-            AISettingsView()
+            AISettingsView(scope: .browser)
         }
     }
 
@@ -403,7 +408,11 @@ private struct MacManagementPane: View {
             if store.section == .macManagement {
                 DetailView(model: integration.model)
             } else {
-                BTNSettingsView(integration: integration, onShowStatus: { store.section = .macManagement })
+                VStack(spacing: 0) {
+                    BTNSettingsView(integration: integration, onShowStatus: { store.section = .macManagement })
+                    Divider()
+                    AISettingsView(scope: .macManagement)
+                }
             }
         }
         .onAppear { integration.prepareForDisplay() }

@@ -55,6 +55,10 @@ public final class UnifiedBrowserManager {
             guard id == "mail" || id == "screen" else { return nil }
             return AnyView(HostedTranslationToolbarButton(context: id))
         }
+        HTDHostExport.shared.hostedFeatureSettings = { key in
+            guard key == "browser" else { return nil }
+            return AnyView(AISettingsView(scope: .browser))
+        }
         return HTDHostExport.shared.makeMainBrowserViewController(toolView: toolView) { [weak self] toolID in
             self?.handleToolSelectedFromModule(toolID)
         }
@@ -92,6 +96,8 @@ public final class UnifiedBrowserManager {
             MailWindowCoordinator.shared.selectSectionFromModule(.screen)
         case "browser":
             MailWindowCoordinator.shared.selectSectionFromModule(.browser)
+        case "translationSettings":
+            MailWindowCoordinator.shared.selectSectionFromModule(.translationSettings)
         case "input.appLanguage":
             MailWindowCoordinator.shared.selectInputPageFromModule(.appLanguage)
         case "input.koreanTypo":
@@ -128,6 +134,7 @@ public final class UnifiedBrowserManager {
         case .mail: return "mail"
         case .screen: return "screen"
         case .browser: return "browser"
+        case .translationSettings: return "translationSettings"
         case .input:
             switch inputPage {
             case .appLanguage: return "input.appLanguage"

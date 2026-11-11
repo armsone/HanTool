@@ -40,8 +40,89 @@ public enum SettingsHubTab: String, CaseIterable, Identifiable {
     case inputSettings = "입력 도우미"
     case macSettings = "Mac 관리"
     case serverSettings = "서버 현황"
+    case downloadSettings = "다운로드"
+    case plannerSettings = "플래너"
+    case translationSettings = "번역"
 
     public var id: String { rawValue }
+}
+
+public enum SettingsOwner: String, CaseIterable, Identifiable {
+    case browser = "브라우저"
+    case downloads = "다운로드"
+    case planner = "플래너"
+    case translation = "번역"
+    case inputHelper = "입력 도우미"
+    case macManagement = "Mac 관리"
+    case server = "서버 현황"
+    case ai = "비서"
+
+    public var id: String { rawValue }
+
+    public var correspondingDestination: MainNavDestination {
+        switch self {
+        case .browser: return .browser
+        case .downloads: return .downloads
+        case .planner: return .planner
+        case .translation: return .translation
+        case .inputHelper: return .inputHelper
+        case .macManagement: return .macManagement
+        case .server: return .server
+        case .ai: return .settings
+        }
+    }
+
+    public var defaultSettingsTab: SettingsHubTab {
+        switch self {
+        case .browser: return .webSettings
+        case .downloads: return .downloadSettings
+        case .planner: return .plannerSettings
+        case .translation: return .translationSettings
+        case .inputHelper: return .inputSettings
+        case .macManagement: return .macSettings
+        case .server: return .serverSettings
+        case .ai: return .aiConnections
+        }
+    }
+}
+
+public enum SettingsLeaf: String, CaseIterable, Identifiable {
+    case browserSettings = "browserSettings"
+    case downloadSettings = "downloadSettings"
+    case plannerSettings = "plannerSettings"
+    case translationSettings = "translationSettings"
+    case inputSettings = "inputSettings"
+    case macSettings = "macSettings"
+    case serverSettings = "serverSettings"
+    case aiConnections = "aiConnections"
+
+    public var id: String { rawValue }
+
+    public var owner: SettingsOwner {
+        switch self {
+        case .browserSettings: return .browser
+        case .downloadSettings: return .downloads
+        case .plannerSettings: return .planner
+        case .translationSettings: return .translation
+        case .inputSettings: return .inputHelper
+        case .macSettings: return .macManagement
+        case .serverSettings: return .server
+        case .aiConnections: return .ai
+        }
+    }
+
+    public var legacyTab: SettingsHubTab {
+        switch self {
+        case .browserSettings: return .webSettings
+        case .downloadSettings: return .downloadSettings
+        case .plannerSettings: return .plannerSettings
+        case .translationSettings: return .translationSettings
+        case .inputSettings: return .inputSettings
+        case .macSettings: return .macSettings
+        case .serverSettings: return .serverSettings
+        case .aiConnections: return .aiConnections
+        }
+    }
 }
 
 public enum DownloadHubTab: String, CaseIterable, Identifiable {
@@ -230,6 +311,13 @@ public final class UnifiedNavigationModel: ObservableObject {
     @Published public var isToolsHubRoot: Bool = false
     @Published public var activeToolLeafID: String? = nil
 
+    // Context restoration & active leaf identification
+    @Published public var settingsOwner: SettingsOwner? = nil
+    @Published public var activeSettingsLeaf: SettingsLeaf? = nil
+    @Published public var returnDestination: MainNavDestination? = nil
+    @Published public var returnTabSelection: TabSelection? = nil
+    @Published public var returnToolID: String? = nil
+
     public init() {}
 
     public func syncFromExternal(hostedToolID: String?, selectedTab: TabSelection) {
@@ -237,63 +325,118 @@ public final class UnifiedNavigationModel: ObservableObject {
             switch toolID {
             case "serverStatus":
                 destination = .server
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "serverStatusSettings":
                 destination = .settings
                 settingsTab = .serverSettings
+                settingsOwner = .server
+                activeSettingsLeaf = .serverSettings
+            case "translationSettings":
+                destination = .settings
+                settingsTab = .translationSettings
+                settingsOwner = .translation
+                activeSettingsLeaf = .translationSettings
             case "help", "home":
                 destination = .help
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "general":
                 destination = .settings
                 settingsTab = .general
+                settingsOwner = .browser
+                activeSettingsLeaf = .browserSettings
             case "input.general":
                 destination = .settings
                 settingsTab = .inputSettings
+                settingsOwner = .inputHelper
+                activeSettingsLeaf = .inputSettings
             case "macManagementSettings":
                 destination = .settings
                 settingsTab = .macSettings
+                settingsOwner = .macManagement
+                activeSettingsLeaf = .macSettings
             case "browser":
                 destination = .translation
                 activeTranslationChild = "browser"
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "mail", "screen":
                 destination = .translation
                 activeTranslationChild = toolID
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "input.appLanguage", "input.koreanTypo", "input.personalDictionary", "input.trackpad":
                 destination = .inputHelper
                 activeInputChild = toolID
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "macManagement":
                 destination = .macManagement
                 activeMacManagementChild = "macManagement"
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case "cleanUSB":
                 destination = .usbDrives
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             default:
                 destination = .browser
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             }
         } else {
             switch selectedTab {
             case .browser:
                 destination = .browser
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case .ai:
                 destination = .settings
                 settingsTab = .aiConnections
+                settingsOwner = .ai
+                activeSettingsLeaf = .aiConnections
             case .saw:
                 destination = .planner
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case .queue:
                 destination = .downloads
                 downloadTab = .queue
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case .history:
                 destination = .downloads
                 downloadTab = .history
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case .settings:
                 destination = .settings
-                settingsTab = .webSettings
+                if settingsOwner == .downloads {
+                    settingsTab = .downloadSettings
+                    activeSettingsLeaf = .downloadSettings
+                } else if settingsOwner == .planner {
+                    settingsTab = .plannerSettings
+                    activeSettingsLeaf = .plannerSettings
+                } else {
+                    settingsTab = .webSettings
+                    settingsOwner = .browser
+                    activeSettingsLeaf = .browserSettings
+                }
             case .pageVideos:
                 destination = .browser
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             case .addressSearch:
                 destination = .settings
                 settingsTab = .webSettings
+                settingsOwner = .browser
+                activeSettingsLeaf = .browserSettings
             case .speed:
                 destination = .browser
                 isSpeedTestPresented = true
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             }
         }
     }
@@ -308,35 +451,53 @@ public final class UnifiedNavigationModel: ObservableObject {
         switch dest {
         case .browser:
             clearTool()
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             appModel.selectedTab = .browser
 
         case .downloads:
             clearTool()
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             appModel.selectedTab = (downloadTab == .history ? .history : .queue)
 
         case .planner:
             clearTool()
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             appModel.selectedTab = .saw
 
         case .translation:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool(activeTranslationChild)
 
         case .inputHelper:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool(activeInputChild)
 
         case .macManagement:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool(activeMacManagementChild)
 
         case .usbDrives:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool("cleanUSB")
 
         case .server:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool("serverStatus")
 
         case .settings:
             applySettingsTab(settingsTab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
 
         case .help:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
             selectTool("help")
         }
     }
@@ -345,6 +506,8 @@ public final class UnifiedNavigationModel: ObservableObject {
         _ childID: String,
         selectTool: (String) -> Void
     ) {
+        self.settingsOwner = nil
+        self.activeSettingsLeaf = nil
         self.activeTranslationChild = childID
         self.destination = .translation
         selectTool(childID)
@@ -354,6 +517,8 @@ public final class UnifiedNavigationModel: ObservableObject {
         _ childID: String,
         selectTool: (String) -> Void
     ) {
+        self.settingsOwner = nil
+        self.activeSettingsLeaf = nil
         self.activeInputChild = childID
         self.destination = .inputHelper
         selectTool(childID)
@@ -363,6 +528,8 @@ public final class UnifiedNavigationModel: ObservableObject {
         _ childID: String,
         selectTool: (String) -> Void
     ) {
+        self.settingsOwner = nil
+        self.activeSettingsLeaf = nil
         if childID == "cleanUSB" {
             self.destination = .usbDrives
             selectTool("cleanUSB")
@@ -381,7 +548,183 @@ public final class UnifiedNavigationModel: ObservableObject {
     ) {
         self.settingsTab = tab
         self.destination = .settings
+        switch tab {
+        case .webSettings:
+            self.settingsOwner = .browser
+            self.activeSettingsLeaf = .browserSettings
+        case .downloadSettings:
+            self.settingsOwner = .downloads
+            self.activeSettingsLeaf = .downloadSettings
+        case .plannerSettings:
+            self.settingsOwner = .planner
+            self.activeSettingsLeaf = .plannerSettings
+        case .translationSettings:
+            self.settingsOwner = .translation
+            self.activeSettingsLeaf = .translationSettings
+        case .inputSettings:
+            self.settingsOwner = .inputHelper
+            self.activeSettingsLeaf = .inputSettings
+        case .macSettings:
+            self.settingsOwner = .macManagement
+            self.activeSettingsLeaf = .macSettings
+        case .serverSettings:
+            self.settingsOwner = .server
+            self.activeSettingsLeaf = .serverSettings
+        case .aiConnections:
+            self.settingsOwner = .ai
+            self.activeSettingsLeaf = .aiConnections
+        case .general:
+            self.settingsOwner = .browser
+            self.activeSettingsLeaf = .browserSettings
+        }
         applySettingsTab(tab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
+    }
+
+    public func openFeatureSettings(
+        for owner: SettingsOwner,
+        appModel: AppModel,
+        currentToolID: String? = nil,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        // Save current context for return
+        if self.destination != .settings {
+            self.returnDestination = self.destination
+            self.returnTabSelection = appModel.selectedTab
+            self.returnToolID = currentToolID
+        }
+        self.settingsOwner = owner
+        let targetTab = owner.defaultSettingsTab
+        self.settingsTab = targetTab
+        switch targetTab {
+        case .webSettings: self.activeSettingsLeaf = .browserSettings
+        case .downloadSettings: self.activeSettingsLeaf = .downloadSettings
+        case .plannerSettings: self.activeSettingsLeaf = .plannerSettings
+        case .translationSettings: self.activeSettingsLeaf = .translationSettings
+        case .inputSettings: self.activeSettingsLeaf = .inputSettings
+        case .macSettings: self.activeSettingsLeaf = .macSettings
+        case .serverSettings: self.activeSettingsLeaf = .serverSettings
+        case .aiConnections: self.activeSettingsLeaf = .aiConnections
+        case .general: self.activeSettingsLeaf = .browserSettings
+        }
+        self.destination = .settings
+        applySettingsTab(targetTab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
+    }
+
+    public func openAISettings(
+        appModel: AppModel,
+        currentToolID: String? = nil,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        // Save prior context if not already in settings
+        if self.destination != .settings {
+            self.returnDestination = self.destination
+            self.returnTabSelection = appModel.selectedTab
+            self.returnToolID = currentToolID
+        }
+        self.settingsOwner = .ai
+        self.activeSettingsLeaf = .aiConnections
+        self.settingsTab = .aiConnections
+        self.destination = .settings
+        applySettingsTab(.aiConnections, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
+    }
+
+    public func openCurrentContextSettings(
+        appModel: AppModel,
+        currentToolID: String? = nil,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        let currentOwner: SettingsOwner
+        switch self.destination {
+        case .browser:
+            currentOwner = .browser
+        case .downloads:
+            currentOwner = .downloads
+        case .planner:
+            currentOwner = .planner
+        case .translation:
+            currentOwner = .translation
+        case .inputHelper:
+            currentOwner = .inputHelper
+        case .macManagement:
+            currentOwner = .macManagement
+        case .server:
+            currentOwner = .server
+        case .usbDrives:
+            currentOwner = .macManagement
+        case .settings:
+            currentOwner = self.settingsOwner ?? .browser
+        case .help:
+            currentOwner = .browser
+        }
+        openFeatureSettings(
+            for: currentOwner,
+            appModel: appModel,
+            currentToolID: currentToolID,
+            selectTool: selectTool,
+            clearTool: clearTool
+        )
+    }
+
+    public func returnFromSettings(
+        appModel: AppModel,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        let targetDest = self.returnDestination ?? (self.settingsOwner?.correspondingDestination ?? .browser)
+        let priorTab = self.returnTabSelection
+        let priorTool = self.returnToolID
+
+        self.destination = targetDest
+        self.settingsOwner = nil
+        self.activeSettingsLeaf = nil
+        self.returnDestination = nil
+        self.returnTabSelection = nil
+        self.returnToolID = nil
+
+        switch targetDest {
+        case .browser:
+            clearTool()
+            appModel.selectedTab = (priorTab == .browser || priorTab == nil) ? .browser : priorTab!
+        case .downloads:
+            clearTool()
+            appModel.selectedTab = (downloadTab == .history ? .history : .queue)
+        case .planner:
+            clearTool()
+            appModel.selectedTab = .saw
+        case .translation:
+            if let tool = priorTool, !tool.isEmpty {
+                self.activeTranslationChild = tool
+                selectTool(tool)
+            } else {
+                selectTool(activeTranslationChild)
+            }
+        case .inputHelper:
+            if let tool = priorTool, !tool.isEmpty {
+                self.activeInputChild = tool
+                selectTool(tool)
+            } else {
+                selectTool(activeInputChild)
+            }
+        case .macManagement:
+            if let tool = priorTool, !tool.isEmpty {
+                self.activeMacManagementChild = tool
+                selectTool(tool)
+            } else {
+                selectTool(activeMacManagementChild)
+            }
+        case .usbDrives:
+            selectTool("cleanUSB")
+        case .server:
+            selectTool("serverStatus")
+        case .help:
+            selectTool("help")
+        case .settings:
+            clearTool()
+            appModel.selectedTab = .browser
+        }
     }
 
     private func applySettingsTab(
@@ -407,7 +750,24 @@ public final class UnifiedNavigationModel: ObservableObject {
             selectTool("macManagementSettings")
         case .serverSettings:
             selectTool("serverStatusSettings")
+        case .downloadSettings:
+            clearTool()
+            appModel.selectedTab = .settings
+        case .plannerSettings:
+            clearTool()
+            appModel.selectedTab = .settings
+        case .translationSettings:
+            selectTool("translationSettings")
         }
+    }
+
+    public func selectDestination(
+        _ dest: MainNavDestination,
+        appModel: AppModel,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        navigateTo(destination: dest, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
     }
 
     public func selectDownloadTab(_ tab: DownloadHubTab, appModel: AppModel, clearTool: () -> Void) {
@@ -748,13 +1108,6 @@ public struct TranslationHeaderView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(palette.surface2Color)
             )
-
-            Button("번역 확장 연동 설정 ↗") {
-                onOpenWebSettings()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("설정 > 웹 설정에서 브라우저 번역 확장 프로그램을 연동합니다.")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
@@ -829,13 +1182,6 @@ public struct InputHelperHeaderView: View {
                 }
 
                 Spacer()
-
-                Button("입력 설정 ↗") {
-                    onOpenInputSettings()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("설정 > 입력 설정으로 이동합니다.")
             }
         }
         .padding(.horizontal, 20)
@@ -904,13 +1250,6 @@ public struct MacManagementHeaderView: View {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(palette.surface2Color)
             )
-
-            Button("Mac 관리 설정 ↗") {
-                onOpenMacSettings()
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("설정 > Mac 관리 설정으로 이동합니다.")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)

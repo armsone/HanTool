@@ -595,7 +595,7 @@ struct BrowserPane: View {
             appModel.temporaryShowHanaPanel = false
             if appModel.aiServices.enabledServices.isEmpty {
                 appModel.selectedTab = .ai
-                model.notice = "설정 > AI 연결에서 사용할 AI를 켜 주세요."
+                model.notice = "상단 비서 메뉴 > 설정에서 사용할 AI를 켜 주세요."
             } else {
                 appModel.setAIPanelOpen(true)
             }
@@ -785,6 +785,10 @@ struct BrowserPane: View {
             .disabled(model.isShowingHome || model.webView == nil)
             .help("화면 캡처")
             .accessibilityLabel("화면 캡처")
+
+            ExtensionActionButton(manager: extensions)
+                .fixedSize()
+                .foregroundStyle(palette.textColor)
 
             Button(action: {
                 appModel.isMediaCandidatePresented.toggle()

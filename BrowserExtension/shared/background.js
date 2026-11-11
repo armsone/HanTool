@@ -83,35 +83,139 @@ function originOf(url) {
   }
 }
 
-// HTD: 번역 버튼으로 켠 자동 번역은 '이번 앱 실행 동안만' 유지한다. 저장소(local)에는 쓰지 않고 storage.session(확장이 내려가거나
-// 앱이 끝나면 사라짐)에만 둔다. 이벤트 페이지가 잠들었다 깨어나도 유지되도록 변수가 아니라 session에서 읽는다.
-const HTD_SESSION_KEY = "htdSessionTranslate";
-let htdSessionFallback = false;
+// HTD: 번역은 각 탭/페이지별로 ON/OFF를 관리하며(translatedTabs), 부모가 번역 ON 상태에서 연 자식 탭은 그 속성을 상속받는다.
+const translatedTabs = new Set();
+const tabParents = new Map(); // tabId -> parentId (-1 if evaluated without parent)
+const tabEpochs = new Map(); // tabId -> epoch
 
-async function readAutomatic() {
-  if (!api.storage.session) return htdSessionFallback;
-  try { return (await api.storage.session.get(HTD_SESSION_KEY))[HTD_SESSION_KEY] === true; } catch { return htdSessionFallback; }
+async function getStoredTranslatedTabs() {
+  if (!api.storage?.session) return translatedTabs;
+  try {
+    const stored = await api.storage.session.get("htdTranslatedTabs");
+    const list = stored?.htdTranslatedTabs;
+    if (Array.isArray(list)) {
+      for (const id of list) {
+        if (Number.isInteger(id)) translatedTabs.add(id);
+      }
+    }
+  } catch {}
+  return translatedTabs;
 }
 
-async function writeAutomatic(on) {
-  if (!IS_HTD) return api.storage.local.set({ automaticEnabled: on });
-  htdSessionFallback = on;
-  if (api.storage.session) await api.storage.session.set({ [HTD_SESSION_KEY]: on });
+async function isTabTranslated(tabId) {
+  if (!Number.isInteger(tabId)) return false;
+  if (translatedTabs.has(tabId)) return true;
+  await getStoredTranslatedTabs();
+  return translatedTabs.has(tabId);
 }
 
-async function loadSettings() {
+async function setTabTranslated(tabId, on) {
+  if (!Number.isInteger(tabId)) return;
+  await getStoredTranslatedTabs();
+  if (on) {
+    translatedTabs.add(tabId);
+  } else {
+    translatedTabs.delete(tabId);
+  }
+  if (api.storage?.session) {
+    try {
+      await api.storage.session.set({ htdTranslatedTabs: Array.from(translatedTabs) });
+    } catch {}
+  }
+}
+
+async function getStoredTabParents() {
+  if (!api.storage?.session) return tabParents;
+  try {
+    const stored = await api.storage.session.get("htdTabParents");
+    const map = stored?.htdTabParents;
+    if (map && typeof map === "object") {
+      for (const [k, v] of Object.entries(map)) {
+        const tid = Number(k);
+        const pid = Number(v);
+        if (Number.isInteger(tid) && Number.isInteger(pid)) tabParents.set(tid, pid);
+      }
+    }
+  } catch {}
+  return tabParents;
+}
+
+async function recordTabParent(tabId, parentId) {
+  if (!Number.isInteger(tabId)) return;
+  await getStoredTabParents();
+  tabParents.set(tabId, Number.isInteger(parentId) ? parentId : -1);
+  if (api.storage?.session) {
+    try {
+      const obj = {};
+      for (const [k, v] of tabParents) obj[k] = v;
+      await api.storage.session.set({ htdTabParents: obj });
+    } catch {}
+  }
+}
+
+async function removeTabParent(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await getStoredTabParents();
+  tabParents.delete(tabId);
+  if (api.storage?.session) {
+    try {
+      const obj = {};
+      for (const [k, v] of tabParents) obj[k] = v;
+      await api.storage.session.set({ htdTabParents: obj });
+    } catch {}
+  }
+}
+
+function getTabEpoch(tabId) {
+  return (Number.isInteger(tabId) && tabEpochs.has(tabId)) ? tabEpochs.get(tabId) : control.epoch;
+}
+
+function nextTabEpoch(tabId) {
+  const next = Math.max(Date.now(), getTabEpoch(tabId) + 1, control.epoch + 1);
+  if (Number.isInteger(tabId)) tabEpochs.set(tabId, next);
+  return next;
+}
+
+async function resolveParentTabId(tab) {
+  if (!tab) return null;
+  if (Number.isInteger(tab.openerTabId)) {
+    return tab.openerTabId;
+  }
+  if (IS_HTD && Number.isInteger(tab.index)) {
+    try {
+      const reply = await api.runtime.sendNativeMessage(SAFARI_APP_ID, {
+        v: 1, type: "htdTabParentIndex", id: native.nextId("pi"), index: tab.index
+      });
+      if (reply?.ok && reply?.hasOpener && Number.isInteger(reply?.openerIndex)) {
+        const allTabs = await queryAllTabs();
+        const parent = allTabs.find((t) => t.index === reply.openerIndex);
+        if (parent && Number.isInteger(parent.id)) {
+          return parent.id;
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function loadSettings(tabId = null) {
   const stored = await api.storage.local.get(DEFAULTS);
   const engineConsents = Array.isArray(stored.engineConsents)
     ? stored.engineConsents.filter((engine) => ["deepl", "google", "papago"].includes(engine))
     : [];
   // 웹 번역 엔진은 이 브라우저에서 지원하고 그 엔진에 동의했을 때만 쓴다. 아니면 Mac 기본 번역.
   const engine = EXTERNAL_ENGINES.includes(stored.engine) && engineConsents.includes(stored.engine) ? stored.engine : LOCAL_ENGINE;
+  let automaticEnabled = false;
+  if (IS_HTD) {
+    automaticEnabled = Number.isInteger(tabId) ? await isTabTranslated(tabId) : false;
+  } else {
+    automaticEnabled = stored.automaticEnabled === true;
+  }
   return {
     consent: stored.consent === true,
     target: TARGETS.includes(stored.target) ? stored.target : "ko",
     images: stored.images !== false,
-    // HTD는 기본이 원문: 번역 버튼을 누른 뒤 이번 실행 동안만 켜짐(session). 저장된 local 켜짐 값은 읽지 않는다.
-    automaticEnabled: IS_HTD ? await readAutomatic() : stored.automaticEnabled === true,
+    automaticEnabled,
     engine,
     engineConsents,
     fontStyle: FONT_STYLES.includes(stored.fontStyle) ? stored.fontStyle : "auto"
@@ -160,16 +264,17 @@ function nextEpoch() {
 
 /** 지금도 자동 번역을 이어 가도 되면 최신 설정을, 아니면 null. 세대가 바뀌었거나(끄기) 동의·자동·권한이 없으면 null.
  * 저장값은 켜짐인데 전체 권한이 없으면 전역으로 끈다. */
-async function autoStillAllowed(epoch, origin = null) {
-  if (epoch !== control.epoch) return null;
-  const settings = await loadSettings();
+async function autoStillAllowed(epoch, origin = null, tabId = null) {
+  const currentEpoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+  if (epoch !== currentEpoch) return null;
+  const settings = await loadSettings(tabId);
   if (!settings.consent || !settings.automaticEnabled) return null;
   if (!(await hasGlobalGrant())) {
-    if (control.armed && epoch === control.epoch) globalStop().catch(() => {});
+    if (!IS_HTD && control.armed && epoch === control.epoch) globalStop().catch(() => {});
     return null;
   }
   if (origin && !(await originPermitted(origin))) return null;
-  return epoch === control.epoch ? settings : null;
+  return epoch === ((IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch) ? settings : null;
 }
 
 // MARK: - 네이티브 연결
@@ -1378,7 +1483,8 @@ async function sendToTab(tabId, message) {
 
 /** 세대가 그대로일 때만 보낸다. 확인과 보내기 사이에 await가 없어서, 그 뒤에 들어온 끄기는 이 메시지보다 늦게 도착한다. */
 function sendIfCurrent(tabId, epoch, message) {
-  if (epoch !== control.epoch) return Promise.resolve(null);
+  const currentEpoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+  if (epoch !== currentEpoch) return Promise.resolve(null);
   return sendToTab(tabId, message);
 }
 
@@ -1403,11 +1509,11 @@ async function queryAllTabs() {
   }
 }
 
-/** 전역 자동 번역이 켜진 상태에서 이 탭에 자동 번역을 적용한다(필요하면 주입). 주입 전후로 세대·동의·자동·권한을 다시 확인한다. */
+/** 전역 또는 탭별 자동 번역이 켜진 상태에서 이 탭에 번역을 적용한다(필요하면 주입). 주입 전후로 세대·동의·자동·권한을 다시 확인한다. */
 async function applyAutoToTab(tabId, epoch) {
   let origin = null;
   try { origin = originOf((await api.tabs.get(tabId)).url); } catch { return null; }
-  if (!origin || !(await autoStillAllowed(epoch, origin))) return null;
+  if (!origin || !(await autoStillAllowed(epoch, origin, tabId))) return null;
   const present = await sendToTab(tabId, { cmd: "state" });
   if (!present) {
     try {
@@ -1417,15 +1523,19 @@ async function applyAutoToTab(tabId, epoch) {
     }
   }
   // 주입을 기다리는 사이 원문 보기·권한 철회·설정 변경이 있었을 수 있으므로 보내기 직전에 다시 확인한다.
-  const settings = await autoStillAllowed(epoch, origin);
+  const settings = await autoStillAllowed(epoch, origin, tabId);
   if (!settings) return null;
   return sendIfCurrent(tabId, epoch, configureMessage(settings, epoch));
 }
 
-/** 이미 열려 있는 http/https 탭(exceptTabId 제외)에도 전역 자동 번역·언어·이미지 설정을 반영한다. */
+/** 이미 열려 있는 http/https 탭(exceptTabId 제외)에도 자동 번역·언어·이미지 설정을 반영한다. HTD에서는 번역 ON 탭에만 반영한다. */
 async function configureAllTabs(epoch, exceptTabId = null) {
   const tabs = await queryAllTabs();
-  await Promise.all(tabs.filter((tab) => tab.id !== exceptTabId).map((tab) => applyAutoToTab(tab.id, epoch)));
+  if (IS_HTD) {
+    await Promise.all(tabs.filter((tab) => tab.id !== exceptTabId && translatedTabs.has(tab.id)).map((tab) => applyAutoToTab(tab.id, getTabEpoch(tab.id))));
+  } else {
+    await Promise.all(tabs.filter((tab) => tab.id !== exceptTabId).map((tab) => applyAutoToTab(tab.id, epoch)));
+  }
 }
 
 /** 전역 자동 번역을 끈다. 요청 즉시 세대를 올려 진행 중인 모든 켜기·설정·주입 흐름이 더는 보내지 않게 하고,
@@ -1439,7 +1549,13 @@ function globalStop() {
   externalPages.clear();
   clearDeadlines();
   return serially(async () => {
-    await writeAutomatic(false).catch(() => {});
+    if (!IS_HTD) await api.storage.local.set({ automaticEnabled: false });
+    translatedTabs.clear();
+    tabParents.clear();
+    tabEpochs.clear();
+    if (api.storage?.session) {
+      await api.storage.session.remove(["htdTranslatedTabs", "htdTabParents"]).catch(() => {});
+    }
     const tabs = await queryAllTabs();
     const pages = new Map();
     await Promise.all(tabs.map(async (tab) => {
@@ -1455,12 +1571,12 @@ function globalStop() {
 /** 저장된 상태와 실제 권한을 맞춘다(워커 시작·브라우저 시작·설치/업데이트·팝업 열기). 켜짐인데 동의나 전체 권한이
  * 없으면 false를 저장하고 전역으로 끈다. 반환: 지금 전역 자동 번역을 이어 가도 되는지. */
 async function reconcile() {
-  // HTD: 이전 버전이 local에 남긴 켜짐 값만 지운다. 켜짐 여부의 기준은 이번 실행의 session 값이다(앱을 다시 켜면 꺼진 상태).
   if (IS_HTD) {
     const legacy = await api.storage.local.get({ automaticEnabled: false }).catch(() => ({}));
     if (legacy.automaticEnabled === true) await api.storage.local.set({ automaticEnabled: false }).catch(() => {});
-    control.armed = await readAutomatic();
-    return control.armed;
+    await getStoredTranslatedTabs();
+    await getStoredTabParents();
+    return true;
   }
   const epoch = control.epoch;
   const verdict = await serially(async () => {
@@ -1483,15 +1599,15 @@ async function reconcile() {
 
 /** 언어·이미지 설정을 바꾼 뒤: 현재 탭과(전역이 실제로 유효하면) 다른 탭에 반영한다. 저장된 켜짐 값만으로 자동을 켜지 않는다. */
 async function reconfigure(tabId, origin) {
-  const epoch = control.epoch;
-  const latest = await loadSettings();
-  const global = latest.automaticEnabled ? await autoStillAllowed(epoch) : null;
+  const epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+  const latest = await loadSettings(tabId);
+  const global = latest.automaticEnabled ? await autoStillAllowed(epoch, null, tabId) : null;
   let page = null;
   if (tabId !== null && origin) {
     const tabAuto = global !== null && (await originPermitted(origin));
     page = await sendIfCurrent(tabId, epoch, configureMessage({ ...latest, automaticEnabled: tabAuto }, epoch));
   }
-  if (global && epoch === control.epoch) configureAllTabs(epoch, tabId).catch(() => {});
+  if (!IS_HTD && global && epoch === control.epoch) configureAllTabs(epoch, tabId).catch(() => {});
   return page;
 }
 
@@ -1506,7 +1622,7 @@ async function handlePopup(message) {
     case "popupState": {
       // 저장값과 실제 권한이 어긋나 있으면(예: 브라우저 설정에서 권한 철회) 여기서 바로 끈다.
       await reconcile();
-      settings = await loadSettings();
+      settings = await loadSettings(tabId);
       const grant = await hasGlobalGrant();
       // 동의 전에는 Barobogi를 실행하거나 연결하지 않는다.
       let engine = { ok: false, message: "동의하면 한툴에 연결합니다." };
@@ -1588,7 +1704,30 @@ async function handlePopup(message) {
       // 일반 번역을 누르면 이 탭의 1회성 Google·DeepL 번역 허용은 끝난다(내용 스크립트도 translateNow에서 스스로 끈다).
       externalPages.delete(tabId);
       dropDeadline(tabId);
-      let epoch = control.epoch;
+      let epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+      if (IS_HTD) {
+        await setTabTranslated(tabId, true);
+        if (!origin) {
+          return { ok: true, page: null, automatic: true, restricted: true };
+        }
+        try {
+          await injectContent(tabId, origin);
+        } catch (error) {
+          return { ok: true, page: null, automatic: true, restricted: true, message: error.message };
+        }
+        if (!(await isTabTranslated(tabId))) {
+          return { ok: true, page: null, automatic: false, superseded: true };
+        }
+        const latest = await loadSettings(tabId);
+        if (epoch !== getTabEpoch(tabId) || !latest.consent || !latest.automaticEnabled) {
+          return { ok: true, page: null, automatic: false, superseded: true };
+        }
+        const next = { ...latest, automaticEnabled: true };
+        const page = await sendIfCurrent(tabId, epoch, configureMessage(next, epoch, {
+          translateNow: true, trigger: message.trigger === "button" ? "button" : "open",
+          ...(Number.isFinite(message.clickedAt) ? { clickedAt: message.clickedAt } : {}) }));
+        return { ok: true, page, automatic: true };
+      }
       const wantAuto = message.automatic === true;
       const outcome = await serially(async () => {
         if (epoch !== control.epoch) return "superseded";
@@ -1596,7 +1735,7 @@ async function handlePopup(message) {
         if (epoch !== control.epoch) return "superseded";
         if (granted) {
           control.armed = true;
-          await writeAutomatic(true);
+          await api.storage.local.set({ automaticEnabled: true });
           return "auto";
         }
         // tabOnly(팝업 열 때 한 번 토글)는 이 탭 하나만 수동으로 번역하려는 뜻이라, 전역 자동 번역이 이미
@@ -1634,6 +1773,22 @@ async function handlePopup(message) {
       return { ok: true, page, automatic };
     }
     case "toggleOriginal": {
+      if (IS_HTD && tabId !== null) {
+        await setTabTranslated(tabId, false);
+        captures.delete(tabId);
+        externalPages.delete(tabId);
+        dropDeadline(tabId);
+        native.cancelTab(tabId);
+        const epoch = nextTabEpoch(tabId);
+        const page = await sendToTab(tabId, { cmd: "toggleOriginal", epoch });
+        const info = tabProgress.get(tabId) || { timer: 0, frame: 0 };
+        info.view = "original";
+        info.running = false;
+        stopSpinner(info);
+        tabProgress.set(tabId, info);
+        updateTabIcon(tabId).catch(() => {});
+        return { ok: true, page };
+      }
       // 원문 보기는 전역 자동 번역을 끄고, 열려 있는 모든 탭에서 진행 중인 요청을 취소하며 각 탭을 원문으로 되돌린다.
       // 현재 탭이 번역된 적이 없거나 보호된 페이지여도 전역 끄기 자체는 항상 성공한다.
       const { pages } = await globalStop();
@@ -1662,7 +1817,7 @@ async function handlePopup(message) {
       const action = `c${now.toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
       dropDeadline(tabId);
       startDeadline(tabId, engine, token, action, clickedAt);
-      const epoch = control.epoch;
+      const epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
       const page = await sendIfCurrent(tabId, epoch, { cmd: "startExternalPage", epoch, engine, target: settings.target, token,
                                                       action, clickedAt });
       if (!page) {
@@ -1711,7 +1866,24 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // MARK: - 탭 수명: 이동·닫기 때 그 탭의 요청만 취소, 전역 자동 번역이 유효하면 내용 스크립트를 넣는다.
 
-api.tabs.onUpdated.addListener((tabId, info, tab) => {
+if (api.tabs?.onCreated) {
+  api.tabs.onCreated.addListener(async (tab) => {
+    if (!Number.isInteger(tab?.id)) return;
+    await getStoredTabParents();
+    if (tabParents.has(tab.id)) return;
+    const parentId = await resolveParentTabId(tab);
+    if (Number.isInteger(parentId)) {
+      await recordTabParent(tab.id, parentId);
+      if (await isTabTranslated(parentId)) {
+        await setTabTranslated(tab.id, true);
+      }
+    } else {
+      await recordTabParent(tab.id, -1);
+    }
+  });
+}
+
+api.tabs.onUpdated.addListener(async (tabId, info, tab) => {
   // 주소가 바뀌면(기록 API 이동 포함) 그 탭의 1회성 Google·DeepL 번역 허용은 끝난다.
   if (typeof info.url === "string") { externalPages.delete(tabId); dropDeadline(tabId); }
   if (info.status === "loading") {
@@ -1729,12 +1901,41 @@ api.tabs.onUpdated.addListener((tabId, info, tab) => {
     if (previous) stopSpinner(previous);
     tabProgress.delete(tabId);
     updateTabIcon(tabId).catch(() => {});
+    if (IS_HTD) {
+      await getStoredTabParents();
+      if (!tabParents.has(tabId)) {
+        const parentId = await resolveParentTabId(tab);
+        if (Number.isInteger(parentId)) {
+          await recordTabParent(tabId, parentId);
+          if (await isTabTranslated(parentId)) {
+            await setTabTranslated(tabId, true);
+          }
+        } else {
+          await recordTabParent(tabId, -1);
+        }
+      }
+    }
   }
   if (info.status !== "complete" || !tab?.url || !originOf(tab.url)) return;
-  applyAutoToTab(tabId, control.epoch).catch(() => {});
+  if (IS_HTD) {
+    await getStoredTabParents();
+    if (!tabParents.has(tabId)) {
+      const parentId = await resolveParentTabId(tab);
+      if (Number.isInteger(parentId)) {
+        await recordTabParent(tabId, parentId);
+        if (await isTabTranslated(parentId)) {
+          await setTabTranslated(tabId, true);
+        }
+      } else {
+        await recordTabParent(tabId, -1);
+      }
+    }
+  }
+  const epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+  applyAutoToTab(tabId, epoch).catch(() => {});
 });
 
-api.tabs.onRemoved.addListener((tabId) => {
+api.tabs.onRemoved.addListener(async (tabId) => {
   fxTabs.delete(tabId);
   externalPages.delete(tabId);
   captures.delete(tabId);
@@ -1747,6 +1948,12 @@ api.tabs.onRemoved.addListener((tabId) => {
   const previous = tabProgress.get(tabId);
   if (previous) stopSpinner(previous);
   tabProgress.delete(tabId);
+  tabEpochs.delete(tabId);
+  if (IS_HTD) {
+    await setTabTranslated(tabId, false).catch(() => {});
+    await removeTabParent(tabId).catch(() => {});
+    return;
+  }
   // 자동 번역 중이던 번역 창(탭)이 모두 닫히면 자동 번역도 함께 끈다(다음에 새로 여는 탭에서는 다시 켜지지 않음).
   // 남은 탭이 없는지는 다음 실행 루프에서 확인한다(onRemoved 시점에는 닫히는 탭이 아직 목록에 남아 있을 수 있음).
   if (!control.armed) return;
@@ -1761,7 +1968,8 @@ api.tabs.onRemoved.addListener((tabId) => {
 // 탭을 바꿔 들어갈 때, 전역 자동 번역이 유효한데 아직 주입·설정되지 않았으면(예: 켜기 전부터 열려 있던 탭) 이어받는다.
 api.tabs.onActivated.addListener(({ tabId }) => {
   fx?.refresh("foreground", false).catch(() => {});
-  applyAutoToTab(tabId, control.epoch).catch(() => {});
+  const epoch = (IS_HTD && tabId !== null) ? getTabEpoch(tabId) : control.epoch;
+  applyAutoToTab(tabId, epoch).catch(() => {});
 });
 
 // 권한 철회(어느 호스트든)는 전역 자동 번역을 끄고 모든 탭을 원문으로 되돌린다. 다시 켜려면 번역 버튼을 누른다.

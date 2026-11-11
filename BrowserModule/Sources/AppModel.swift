@@ -229,6 +229,11 @@ public final class AppModel: ObservableObject {
         pendingPopupBurstFocusTask = nil
         pendingPopupBurstFirstTabID = nil
     }
+    /// Tab opener relationships (child tabID -> opener tabID).
+    private var tabOpeners: [UUID: UUID] = [:]
+    func setTabOpener(childID: UUID, openerID: UUID) { tabOpeners[childID] = openerID }
+    func tabOpener(for childID: UUID) -> UUID? { tabOpeners[childID] }
+
     /// The ACTIVE browser tab. Everything that used the app's single browser (the browser screen, the video list,
     /// recovery, job context) keeps working through this accessor; changing the selection republishes the AppModel.
     var browser: LoginBrowserModel { tabs.first(where: { $0.tabID == selectedTabID }) ?? tabs[0] }
@@ -1147,6 +1152,7 @@ public final class AppModel: ObservableObject {
               let index = tabs.firstIndex(where: { $0 === opener }) else { return nil }
         let tab = LoginBrowserModel()
         tab.appModel = self
+        setTabOpener(childID: tab.tabID, openerID: opener.tabID)
         tab.startOnRoute(url, route: route)
         if keepOpenerSelected {
             tabs.insert(tab, at: index + 1)
@@ -1235,6 +1241,7 @@ public final class AppModel: ObservableObject {
         if id == pendingPopupBurstFirstTabID {
             cancelPendingPopupBurstFocus()
         }
+        tabOpeners.removeValue(forKey: id)
         guard let index = tabs.firstIndex(where: { $0.tabID == id }) else { return }
         let closing = tabs[index]
         if tabs.count == 1 && closing.isShowingHome {
@@ -1375,6 +1382,7 @@ public final class AppModel: ObservableObject {
               let index = tabs.firstIndex(where: { $0 === opener }) else { return nil }
         let tab = LoginBrowserModel()
         tab.appModel = self
+        setTabOpener(childID: tab.tabID, openerID: opener.tabID)
         guard tab.adoptPopup(configuration: configuration, openerUCC: opener.contentController,
                              targetURL: targetURL, mode: mode, route: route,
                              primaryStore: primaryStore) != nil else { return nil }

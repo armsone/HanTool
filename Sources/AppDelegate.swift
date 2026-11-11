@@ -327,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         // MARK: 설정 / 업데이트 / 종료
-        let settingsItem = item("앱 설정", #selector(showSettings), symbol: "gearshape")
+        let settingsItem = item("현재 메뉴 설정…", #selector(showSettings), symbol: "gearshape")
         applyKeyEquivalent(settingsItem, ",", .command)
         menu.addItem(settingsItem)
         let diagnostics = item("권한·연결 상태", nil, symbol: "info.circle")
@@ -480,7 +480,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showSettings() {
-        MailWindowCoordinator.shared.showWorkbench(section: .general)
+        MailWindowCoordinator.shared.presentWorkbenchPreservingSelection()
+        let nav = UnifiedNavigationModel.shared
+        nav.openCurrentContextSettings(
+            appModel: HTDHostExport.shared.appModel,
+            currentToolID: HTDHostExport.shared.hostedToolID,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
+    }
+
+    @objc private func toggleDockIcon(_ sender: NSMenuItem? = nil) {
+        DockVisibilityStore.shared.showDockIcon.toggle()
+        sender?.state = DockVisibilityStore.shared.showDockIcon ? .on : .off
+    }
+
+    @objc private func selectIconStyle(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let style = HTTIconStyle(rawValue: rawValue) else { return }
+        HTTAppearanceStore.shared.iconStyle = style
+        if let parentMenu = sender.menu {
+            for item in parentMenu.items {
+                if let itemRaw = item.representedObject as? String {
+                    item.state = (itemRaw == rawValue) ? .on : .off
+                }
+            }
+        }
     }
 
     @objc private func openEmbeddedBrowser() {
@@ -488,23 +513,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showBrowserSetup() {
-        MailWindowCoordinator.shared.showWorkbench(section: .browser)
+        MailWindowCoordinator.shared.presentWorkbenchPreservingSelection()
+        UnifiedNavigationModel.shared.openFeatureSettings(
+            for: .browser,
+            appModel: HTDHostExport.shared.appModel,
+            currentToolID: HTDHostExport.shared.hostedToolID,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     @objc private func showInputSettings() {
-        MailWindowCoordinator.shared.showWorkbench(section: .input)
+        MailWindowCoordinator.shared.presentWorkbenchPreservingSelection()
+        UnifiedNavigationModel.shared.openFeatureSettings(
+            for: .inputHelper,
+            appModel: HTDHostExport.shared.appModel,
+            currentToolID: HTDHostExport.shared.hostedToolID,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     @objc private func showMacManagement() {
-        MailWindowCoordinator.shared.showWorkbench(section: .macManagement)
+        MailWindowCoordinator.shared.openBrowserMain()
+        UnifiedNavigationModel.shared.selectDestination(
+            .macManagement,
+            appModel: HTDHostExport.shared.appModel,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     @objc private func showMacManagementSettings() {
-        MailWindowCoordinator.shared.showWorkbench(section: .macManagementSettings)
+        MailWindowCoordinator.shared.presentWorkbenchPreservingSelection()
+        UnifiedNavigationModel.shared.openFeatureSettings(
+            for: .macManagement,
+            appModel: HTDHostExport.shared.appModel,
+            currentToolID: HTDHostExport.shared.hostedToolID,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     @objc private func showCleanUSB() {
-        MailWindowCoordinator.shared.showWorkbench(section: .cleanUSB)
+        MailWindowCoordinator.shared.openBrowserMain()
+        UnifiedNavigationModel.shared.selectDestination(
+            .usbDrives,
+            appModel: HTDHostExport.shared.appModel,
+            selectTool: HTDHostExport.shared.selectToolFromSidebar,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     @objc private func toggleInputMateEnabled() {
@@ -540,9 +598,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updater.setAutomaticallyUpdates(!updater.automaticallyUpdates)
     }
 
-    /// HTT 정보: 표준 정보 패널 대신 메인 창의 앱 설정(맨 위 'HTT 정보')으로 이동한다.
+    /// HTT 정보: 표준 정보 패널로 version 기능을 표시한다.
     @objc private func showAbout() {
-        MailWindowCoordinator.shared.showWorkbench(section: .general)
+        NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     // MARK: - 앱 메뉴
@@ -559,9 +617,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(item("USB 정리·추출", #selector(showCleanUSB)))
         appMenu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement)))
-        let settings = NSMenuItem(title: "앱 설정", action: #selector(showSettings), keyEquivalent: ",")
+        let settings = NSMenuItem(title: "현재 메뉴 설정…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         appMenu.addItem(settings)
+        let dockItem = NSMenuItem(title: "Dock 아이콘 표시", action: #selector(toggleDockIcon(_:)), keyEquivalent: "")
+        dockItem.target = self
+        dockItem.state = DockVisibilityStore.shared.showDockIcon ? .on : .off
+        appMenu.addItem(dockItem)
+
+        let iconStyleMenu = NSMenu()
+        let currentIconStyle = HTTAppearanceStore.shared.iconStyle
+        for style in HTTIconStyle.allCases {
+            let styleItem = NSMenuItem(title: style.displayName, action: #selector(selectIconStyle(_:)), keyEquivalent: "")
+            styleItem.target = self
+            styleItem.representedObject = style.rawValue
+            styleItem.state = (style == currentIconStyle) ? .on : .off
+            iconStyleMenu.addItem(styleItem)
+        }
+        let iconStyleItem = NSMenuItem(title: "아이콘 스타일", action: nil, keyEquivalent: "")
+        iconStyleItem.submenu = iconStyleMenu
+        appMenu.addItem(iconStyleItem)
         let browserSettings = NSMenuItem(title: "브라우저 번역", action: #selector(showBrowserSetup), keyEquivalent: "")
         browserSettings.target = self
         appMenu.addItem(browserSettings)

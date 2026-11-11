@@ -216,7 +216,7 @@ final class BrowserExtensionManager: ObservableObject {
         #if HTT_HOST
         guard HTDHostExport.shared.hostedToolID == nil else { return false }
         #endif
-        return app.browser.usesPrimaryStore && app.browser.webView != nil && !app.browser.isShowingHome
+        return app.browser.webView != nil && !app.browser.isShowingHome
     }
 
     var canPerformAction: Bool {
@@ -232,7 +232,7 @@ final class BrowserExtensionManager: ObservableObject {
     /// controller is bound to the same app-owned persistent store as the pages.
     func attach(to config: WKWebViewConfiguration, store: WKWebsiteDataStore) {
         guard #available(macOS 15.4, *) else { return }
-        guard let rt = runtime(for: store) else { return }
+        guard let rt = (runtimeObject as? ExtensionRuntime) ?? runtime(for: store) else { return }
         config.webExtensionController = rt.controller
     }
 
@@ -546,8 +546,7 @@ final class BrowserExtensionManager: ObservableObject {
     func tabActivated(_ tab: LoginBrowserModel, previous: LoginBrowserModel?) {
         guard #available(macOS 15.4, *), let rt = currentRuntime else { return }
         actionRevision += 1
-        guard tab.usesPrimaryStore else { return }
-        rt.controller.didActivateTab(rt.adapter(for: tab), previousActiveTab: previous.flatMap { $0.usesPrimaryStore ? rt.adapter(for: $0) : nil })
+        rt.controller.didActivateTab(rt.adapter(for: tab), previousActiveTab: previous.map { rt.adapter(for: $0) })
     }
 
     func tabClosed(_ tab: LoginBrowserModel) {
@@ -557,7 +556,7 @@ final class BrowserExtensionManager: ObservableObject {
     }
 
     func tabChanged(_ tab: LoginBrowserModel, _ change: ExtensionTabChange) {
-        guard #available(macOS 15.4, *), let rt = currentRuntime, tab.usesPrimaryStore else { return }
+        guard #available(macOS 15.4, *), let rt = currentRuntime else { return }
         let props: WKWebExtension.TabChangedProperties
         switch change {
         case .title: props = .title
@@ -795,7 +794,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
                 self.manager?.setIssues(self.currentIssues())
             }
         }
-        if let app = appModel, app.browser.usesPrimaryStore {
+        if let app = appModel {
             controller.didActivateTab(adapter(for: app.browser), previousActiveTab: nil)
         }
     }
@@ -829,7 +828,7 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
     // MARK: Action
 
     private func activeAdapter() -> ExtensionTabAdapter? {
-        guard let app = appModel, app.browser.usesPrimaryStore else { return nil }
+        guard let app = appModel else { return nil }
         return adapter(for: app.browser)
     }
 
@@ -844,8 +843,8 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
         guard let manager = manager, manager.isBrowserVisiblyActive, let tab = activeAdapter() else {
             return "브라우저 화면에서 실행해 주세요."
         }
-        guard let app = appModel, app.browser.usesPrimaryStore else {
-            return "이 탭은 사이트별 다른 연결로 열려 있어 번역 확장을 사용할 수 없습니다. 연결을 전체 설정과 같게 하면 쓸 수 있습니다."
+        guard let app = appModel else {
+            return "브라우저 화면에서 실행해 주세요."
         }
         guard app.browser.webView != nil, !app.browser.isShowingHome else {
             return "먼저 번역할 웹 페이지를 열어 주세요."
@@ -1044,6 +1043,20 @@ final class ExtensionRuntime: NSObject, WKWebExtensionControllerDelegate {
             replyHandler(["id": id, "ok": true, "enabled": false], nil)
             return
         }
+        if dict["type"] as? String == "htdTabParentIndex" {
+            guard let app = appModel, let index = dict["index"] as? Int, index >= 0, index < app.tabs.count else {
+                replyHandler(["id": id, "ok": false], nil)
+                return
+            }
+            let tab = app.tabs[index]
+            if let openerID = app.tabOpener(for: tab.tabID),
+               let openerIndex = app.tabs.firstIndex(where: { $0.tabID == openerID }) {
+                replyHandler(["id": id, "ok": true, "hasOpener": true, "openerIndex": openerIndex], nil)
+            } else {
+                replyHandler(["id": id, "ok": true, "hasOpener": false], nil)
+            }
+            return
+        }
         if dict["type"] as? String == "htdTranslationProgress" {
             replyHandler(["id": id, "ok": true, "items": partialTranslations.removeValue(forKey: id) ?? []], nil)
             return
@@ -1185,16 +1198,30 @@ final class ExtensionTabAdapter: NSObject, WKWebExtensionTab {
         app?.tabs.firstIndex(where: { $0 === model }) ?? 0
     }
 
+    func parentTab(for context: WKWebExtensionContext) -> (any WKWebExtensionTab)? {
+        guard let app = model.appModel,
+              let openerID = app.tabOpener(for: model.tabID),
+              let openerModel = app.tabs.first(where: { $0.tabID == openerID }),
+              let rt = runtime else { return nil }
+        return rt.adapter(for: openerModel)
+    }
+
     func webView(for context: WKWebExtensionContext) -> WKWebView? {
-        model.usesPrimaryStore ? model.webView : nil
+        guard let wv = model.webView else { return nil }
+        // 데이터스토어 경계 보존: 확장의 런타임 컨트롤러가 부착된 웹 뷰만 반환하거나
+        // 기본 영구 데이터스토어(primaryStore) 탭만 허용하여 스토어 간 세션/쿠키 격리를 엄격히 유지
+        if #available(macOS 15.4, *), wv.configuration.webExtensionController === context.webExtensionController {
+            return wv
+        }
+        return model.usesPrimaryStore ? wv : nil
     }
 
     func title(for context: WKWebExtensionContext) -> String? {
-        model.isShowingHome || !model.usesPrimaryStore ? nil : model.pageTitle
+        model.isShowingHome ? nil : model.pageTitle
     }
 
     func url(for context: WKWebExtensionContext) -> URL? {
-        guard model.usesPrimaryStore, !model.isShowingHome, let url = model.currentURL,
+        guard !model.isShowingHome, let url = model.currentURL,
               ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
         return url
     }
@@ -1268,9 +1295,9 @@ final class ExtensionTabAdapter: NSObject, WKWebExtensionTab {
         }
         guard let app = app,
               app.selectedTab == .browser,
-              model.usesPrimaryStore,
-              app.selectedTabID == model.tabID,
               let webView = model.webView,
+              (model.usesPrimaryStore || webView.configuration.webExtensionController === context.webExtensionController),
+              app.selectedTabID == model.tabID,
               !model.isShowingHome,
               let currentURL = model.currentURL,
               ["http", "https"].contains(currentURL.scheme?.lowercased() ?? ""),
@@ -1377,11 +1404,11 @@ final class ExtensionWindowAdapter: NSObject, WKWebExtensionWindow {
 
     func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] {
         guard let app = app, let runtime = runtime else { return [] }
-        return app.tabs.filter { $0.usesPrimaryStore }.map { runtime.adapter(for: $0) }
+        return app.tabs.map { runtime.adapter(for: $0) }
     }
 
     func activeTab(for context: WKWebExtensionContext) -> (any WKWebExtensionTab)? {
-        guard let app = app, let runtime = runtime, app.browser.usesPrimaryStore else { return nil }
+        guard let app = app, let runtime = runtime else { return nil }
         return runtime.adapter(for: app.browser)
     }
 
