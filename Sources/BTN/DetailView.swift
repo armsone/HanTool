@@ -193,6 +193,16 @@ struct DetailView: View {
                     }
                     .disabled(!model.canRunMonitoring || model.isCleanupBusy || model.isClearingDerivedData)
                     Button {
+                        model.scanDevelopmentCleanupCandidates()
+                    } label: {
+                        Label(
+                            model.isScanningCleanup ? "개발 정리 찾는 중" : "개발 정리 찾기",
+                            systemImage: "hammer"
+                        )
+                    }
+                    .disabled(!model.canRunMonitoring || model.isCleanupBusy || model.isClearingDerivedData)
+                    .help("Xcode 컴파일 중간물, 완료된 Git worktree, 과거 앱 백업, Homebrew 다운로드 아카이브를 수동으로 찾습니다. 자동 정리에서는 실행되지 않습니다.")
+                    Button {
                         model.runAutomaticCleanup()
                     } label: {
                         Label("자동 정리", systemImage: "wand.and.stars")
@@ -334,6 +344,32 @@ struct DetailView: View {
                     )
                 }
 
+                if let receipt = model.latestReceipt {
+                    CleanupReceiptCardView(receipt: receipt)
+                }
+
+                if !model.preservedDevelopmentTargets.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("보존 원칙에 따라 제외된 개발 항목 \(model.preservedDevelopmentTargets.count)개 (읽기 전용)", systemImage: "lock.shield")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                        ForEach(model.preservedDevelopmentTargets.prefix(5), id: \.path) { preserved in
+                            HStack {
+                                Text(preserved.path)
+                                    .font(.caption2.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text(preserved.reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+                }
+
                 if let impact = model.cleanupImpact {
                     CleanupImpactView(impact: impact)
                 }
@@ -465,6 +501,13 @@ private struct CleanupCandidateRow: View {
                         Spacer()
                         Text(DiagnosticEngine.formatBytes(candidate.estimatedBytes))
                             .monospacedDigit()
+                    }
+                    if let path = candidate.targetPath {
+                        Text(path)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Text(candidate.koreanReason)
                         .font(.caption)
@@ -672,11 +715,30 @@ private struct CleanupConfirmationView: View {
             List {
                 ForEach(model.selectedCandidates) { candidate in
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("\(candidate.kind.koreanLabel) — \(candidate.targetIdentifier)")
-                            .bold()
-                        Text(candidate.recoveryMethod.koreanLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        HStack {
+                            Text("\(candidate.kind.koreanLabel) — \(candidate.targetIdentifier)")
+                                .bold()
+                            Spacer()
+                            Text(DiagnosticEngine.formatBytes(candidate.estimatedBytes))
+                                .font(.caption.monospacedDigit())
+                        }
+                        if let path = candidate.targetPath {
+                            Text("경로: \(path)")
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        HStack(spacing: 8) {
+                            Text("방식: \(candidate.recoveryMethod.koreanLabel)")
+                            Text("·")
+                            Text(candidate.isRecoverable ? "복구 가능" : "복구 불가")
+                                .foregroundStyle(candidate.isRecoverable ? .green : .orange)
+                            Text("·")
+                            Text("위험도: \(candidate.risk.koreanLabel)")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                     }
                 }
                 ForEach(model.selectedProcessCandidates) { candidate in
@@ -747,5 +809,65 @@ private struct ProcessRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+private struct CleanupReceiptCardView: View {
+    let receipt: CleanupReceipt
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("정리 영수증", systemImage: "doc.text.fill")
+                    .font(.caption.bold())
+                Spacer()
+                Text(receipt.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Text("완료 \(receipt.cleanedCount)건")
+                    .foregroundStyle(.green)
+                if receipt.blockedCount > 0 {
+                    Text("차단 \(receipt.blockedCount)건")
+                        .foregroundStyle(.orange)
+                }
+                if receipt.failedCount > 0 {
+                    Text("실패 \(receipt.failedCount)건")
+                        .foregroundStyle(.red)
+                }
+                if receipt.skippedCount > 0 {
+                    Text("건너뜀 \(receipt.skippedCount)건")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption.bold())
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                GridRow {
+                    Text("정리 대상 할당 용량")
+                    Text(DiagnosticEngine.formatBytes(receipt.totalAllocatedBytes))
+                }
+                GridRow {
+                    Text("실제 볼륨 여유 확보")
+                    Text("\(DiagnosticEngine.formatBytes(UInt64(max(0, receipt.actualFreedBytes)))) (휴지통 이동 확보량: 0B)")
+                }
+            }
+            .font(.caption2.monospacedDigit())
+
+            ForEach(receipt.items) { item in
+                HStack(alignment: .firstTextBaseline) {
+                    Text("[\(item.status.koreanLabel)] \(item.kind): \(item.path ?? item.id)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text(DiagnosticEngine.formatBytes(item.allocatedBytes))
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2.monospaced())
+            }
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 }

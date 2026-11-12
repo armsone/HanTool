@@ -130,6 +130,14 @@ public enum CleanupCandidateKind: String, Sendable, Equatable, CaseIterable {
     case simulatorDataErase
     case derivedDataProject
     case xctestDeviceDirectory
+    /// 전용 compile 중간물 (DerivedData allowlist 하위).
+    case compileArtifacts
+    /// 완료된 Git 작업 사본 (worktree).
+    case completedGitWorktree
+    /// 과거 순수 앱 백업 (.app).
+    case legacyAppBackup
+    /// 설치 완료 Homebrew 다운로드 아카이브.
+    case homebrewDownloadArchive
 
     public var koreanLabel: String {
         switch self {
@@ -139,6 +147,10 @@ public enum CleanupCandidateKind: String, Sendable, Equatable, CaseIterable {
         case .simulatorDataErase: return "시뮬레이터 데이터 초기화"
         case .derivedDataProject: return "DerivedData 프로젝트"
         case .xctestDeviceDirectory: return "XCTest 기기 데이터"
+        case .compileArtifacts: return "컴파일 중간물"
+        case .completedGitWorktree: return "완료된 Git 작업 사본"
+        case .legacyAppBackup: return "과거 앱 백업"
+        case .homebrewDownloadArchive: return "Homebrew 다운로드 아카이브"
         }
     }
 
@@ -148,7 +160,9 @@ public enum CleanupCandidateKind: String, Sendable, Equatable, CaseIterable {
         case .bootedSimulatorShutdown, .unavailableSimulatorDevice,
              .ephemeralCloneSimulatorDevice, .simulatorDataErase:
             return true
-        case .derivedDataProject, .xctestDeviceDirectory:
+        case .derivedDataProject, .xctestDeviceDirectory,
+             .compileArtifacts, .completedGitWorktree,
+             .legacyAppBackup, .homebrewDownloadArchive:
             return false
         }
     }
@@ -259,10 +273,19 @@ public struct AutomaticCleanupPlan: Sendable, Equatable {
 
 public enum AutomaticCleanupPolicy {
     public static func isEligible(_ candidate: CleanupCandidate) -> Bool {
-        !candidate.kind.targetsSimulator
-            && candidate.risk == .low
-            && candidate.isRecoverable
-            && candidate.recoveryMethod == .userTrash
+        // 신규 4종은 recoveryMethod에 무관하게 명시적으로 false (수동 전용)
+        switch candidate.kind {
+        case .compileArtifacts, .completedGitWorktree,
+             .legacyAppBackup, .homebrewDownloadArchive:
+            return false
+        case .bootedSimulatorShutdown, .unavailableSimulatorDevice,
+             .ephemeralCloneSimulatorDevice, .simulatorDataErase:
+            return false
+        case .derivedDataProject, .xctestDeviceDirectory:
+            return candidate.risk == .low
+                && candidate.isRecoverable
+                && candidate.recoveryMethod == .userTrash
+        }
     }
 
     public static func makePlan(

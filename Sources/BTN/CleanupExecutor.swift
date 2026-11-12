@@ -4,12 +4,14 @@ enum CleanupExecutionStatus: String, Sendable, Equatable, Codable {
     case cleaned
     case blocked
     case failed
+    case skipped
 
     var koreanLabel: String {
         switch self {
         case .cleaned: return "정리 완료"
         case .blocked: return "안전 조건 변경으로 중단"
         case .failed: return "정리 실패"
+        case .skipped: return "미실행(건너뜀)"
         }
     }
 }
@@ -24,23 +26,32 @@ struct CleanupExecutionResult: Identifiable, Sendable {
 /// 허용 목록에 있는 작업만 수행하고, 각 항목을 실행 직전에 다시 수집·검증한다.
 enum CleanupExecutor {
     static func execute(_ candidate: CleanupCandidate) -> CleanupExecutionResult {
-        let freshInput = CleanupEvidenceCollector.collect(for: candidate.kind, measureSizes: false)
-        let validation = CleanupRevalidation.revalidate(candidate: candidate, against: freshInput)
-        guard validation.isAllowed else {
-            return result(candidate, .blocked, validation.koreanReason)
-        }
-
         switch candidate.kind {
-        case .bootedSimulatorShutdown:
-            return shutdownSimulator(candidate)
-        case .unavailableSimulatorDevice, .ephemeralCloneSimulatorDevice:
-            return deleteSimulator(candidate)
-        case .simulatorDataErase:
-            return eraseSimulator(candidate)
-        case .derivedDataProject:
-            return moveToTrash(candidate, allowedRoot: CleanupEvidenceCollector.derivedDataRoot)
-        case .xctestDeviceDirectory:
-            return moveToTrash(candidate, allowedRoot: CleanupEvidenceCollector.xctestDevicesRoot)
+        case .bootedSimulatorShutdown, .unavailableSimulatorDevice,
+             .ephemeralCloneSimulatorDevice, .simulatorDataErase,
+             .derivedDataProject, .xctestDeviceDirectory:
+            let freshInput = CleanupEvidenceCollector.collect(for: candidate.kind, measureSizes: false)
+            let validation = CleanupRevalidation.revalidate(candidate: candidate, against: freshInput)
+            guard validation.isAllowed else {
+                return result(candidate, .blocked, validation.koreanReason)
+            }
+
+            switch candidate.kind {
+            case .bootedSimulatorShutdown:
+                return shutdownSimulator(candidate)
+            case .unavailableSimulatorDevice, .ephemeralCloneSimulatorDevice:
+                return deleteSimulator(candidate)
+            case .simulatorDataErase:
+                return eraseSimulator(candidate)
+            case .derivedDataProject:
+                return moveToTrash(candidate, allowedRoot: CleanupEvidenceCollector.derivedDataRoot)
+            case .xctestDeviceDirectory:
+                return moveToTrash(candidate, allowedRoot: CleanupEvidenceCollector.xctestDevicesRoot)
+            default:
+                return result(candidate, .blocked, "알 수 없는 시뮬레이터 또는 디스크 대상입니다.")
+            }
+        case .compileArtifacts, .completedGitWorktree, .legacyAppBackup, .homebrewDownloadArchive:
+            return DevelopmentCleanupExecutor.execute(candidate)
         }
     }
 
@@ -156,7 +167,7 @@ enum CleanupExecutor {
 }
 
 /// 앱이 명시적으로 허용한 단일 도구를 제한 시간 안에서 실행한다.
-private enum ControlledCommand {
+enum ControlledCommand {
     static func run(
         executable: String,
         arguments: [String],

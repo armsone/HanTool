@@ -8,6 +8,17 @@ enum CleanupActivity: Equatable {
     case autoCleaning
 }
 
+extension CleanupCandidateKind {
+    var isDevelopmentKind: Bool {
+        switch self {
+        case .compileArtifacts, .completedGitWorktree, .legacyAppBackup, .homebrewDownloadArchive:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 private final class CleanupBatchGate: @unchecked Sendable {
     private let lock = NSLock()
     private var allowNextUnit = true
@@ -43,6 +54,8 @@ final class MonitorViewModel: ObservableObject {
     @Published var isShowingCleanupConfirmation = false
     @Published private(set) var cleanupImpact: CleanupImpactSummary?
     @Published private(set) var cleanupHistory: [CleanupAuditEntry] = []
+    @Published private(set) var preservedDevelopmentTargets: [PreservedTargetEvidence] = []
+    @Published private(set) var latestReceipt: CleanupReceipt?
     @Published private(set) var protectedCleanupIDs: Set<String> = []
     @Published private(set) var automaticCleanupSummary: String?
     @Published private(set) var isClearingDerivedData = false
@@ -281,6 +294,40 @@ final class MonitorViewModel: ObservableObject {
         }
     }
 
+    /// 신규 개발 정리 대상 4종(컴파일 중간물, Git worktree, 앱 백업, Homebrew 아카이브)을 수동으로 스캔한다.
+    /// autoRefresh 및 무확인 자동 정리에서는 절대 호출되지 않는다.
+    func scanDevelopmentCleanupCandidates() {
+        if evaluateConflictBeforeWork?() == true { return }
+        guard canRunMonitoring, !isClearingDerivedData, cleanupActivity == .idle else { return }
+        cleanupActivity = .scanning
+        cleanupResults = []
+        processCleanupResults = []
+        automaticCleanupSummary = nil
+        let capturedMonitoringGeneration = monitoringGeneration
+        let capturedScanGeneration = scanGeneration
+
+        Task.detached(priority: .utility) {
+            let input = DevelopmentCleanupCollector.collect(measureSizes: true)
+            let candidates = DevelopmentCleanupPolicy.propose(input)
+            let preserved = input.preservedTargets
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.canRunMonitoring,
+                      self.monitoringGeneration == capturedMonitoringGeneration,
+                      self.scanGeneration == capturedScanGeneration
+                else { return }
+                self.preservedDevelopmentTargets = preserved
+                let filtered = candidates.filter { !self.protectedCleanupIDs.contains($0.id) }
+                // 기존 일반 정리 후보 중 개발 정리 후보가 아닌 것은 유지하고 개발 정리 후보는 최신으로 갱신
+                let nonDev = self.cleanupCandidates.filter { !$0.kind.isDevelopmentKind }
+                self.cleanupCandidates = nonDev + filtered
+                // 새 개발 정리 후보는 항상 기본 미선택으로 시작한다 (명시적 선택 필수)
+                self.selectedCleanupIDs.subtract(filtered.map(\.id))
+                self.cleanupActivity = .idle
+            }
+        }
+    }
+
     /// 신선한 근거를 수집해 저위험이면서 휴지통 복구 가능한 파일만 무확인으로 정리한다.
     /// 그 후 시뮬레이터 정리 후보(데이터 초기화·사용 불가·임시 복제)가 남아 있으면
     /// 목록에 기본 미선택으로 남긴다. 확인 없이는 어떤 시뮬레이터도 지우지 않으며,
@@ -513,20 +560,113 @@ final class MonitorViewModel: ObservableObject {
         activeBatchGate = gate
 
         Task.detached(priority: .utility) {
+            let startedAt = Date()
             let beforeImpact = gate.canStartNextUnit ? SystemImpactCollector.collect() : nil
             var results: [CleanupExecutionResult] = []
+            var executedTargetIDs = Set<String>()
             for target in targets {
                 guard gate.canStartNextUnit else { break }
-                results.append(CleanupExecutor.execute(target))
+                let res = CleanupExecutor.execute(target)
+                results.append(res)
+                executedTargetIDs.insert(target.id)
             }
             var processResults: [ProcessCleanupExecutionResult] = []
+            var executedProcessIDs = Set<String>()
             for processTarget in processTargets {
                 guard gate.canStartNextUnit else { break }
-                processResults.append(ProcessCleanupExecutor.execute(processTarget))
+                let pres = ProcessCleanupExecutor.execute(processTarget)
+                processResults.append(pres)
+                executedProcessIDs.insert(processTarget.id)
+            }
+            let finishedAt = Date()
+
+            let skippedTargets = targets.filter { !executedTargetIDs.contains($0.id) }
+            let skippedProcessTargets = processTargets.filter { !executedProcessIDs.contains($0.id) }
+
+            let didExecuteAny = !results.isEmpty || !processResults.isEmpty || !skippedTargets.isEmpty || !skippedProcessTargets.isEmpty
+            let afterImpact = ((!results.isEmpty || !processResults.isEmpty) && beforeImpact != nil) ? SystemImpactCollector.collect() : nil
+
+            // 영수증 생성:
+            // 휴지통 이동(userTrash)은 볼륨 여유가 실제로 늘지 않으므로 확보량 0으로 기록.
+            let hasNonTrashFreed = results.contains {
+                $0.status == .cleaned && $0.candidate.recoveryMethod != .userTrash
+            }
+            let actualFreed: Int64
+            if hasNonTrashFreed,
+               let beforeDisk = beforeImpact?.diskAvailableBytes,
+               let afterDisk = afterImpact?.diskAvailableBytes,
+               afterDisk > beforeDisk {
+                actualFreed = Int64(afterDisk - beforeDisk)
+            } else {
+                actualFreed = 0
             }
 
-            let didExecuteAny = !results.isEmpty || !processResults.isEmpty
-            let afterImpact = (didExecuteAny && beforeImpact != nil) ? SystemImpactCollector.collect() : nil
+            var receiptItems = results.map { res in
+                CleanupReceiptItem(
+                    id: res.candidate.id,
+                    kind: res.candidate.kind.rawValue,
+                    path: res.candidate.targetPath,
+                    identityAtApproval: res.candidate.filesystemObjectIdentifier,
+                    identityAtExecution: res.candidate.filesystemObjectIdentifier,
+                    status: res.status,
+                    message: res.message,
+                    allocatedBytes: res.candidate.estimatedBytes,
+                    method: res.candidate.recoveryMethod.koreanLabel
+                )
+            }
+            receiptItems.append(contentsOf: processResults.map { pres in
+                CleanupReceiptItem(
+                    id: pres.candidate.id,
+                    kind: pres.candidate.kind.rawValue,
+                    path: "PID \(pres.candidate.pid)",
+                    identityAtApproval: pres.candidate.startTimeIdentifier,
+                    identityAtExecution: pres.candidate.startTimeIdentifier,
+                    status: pres.status,
+                    message: pres.message,
+                    allocatedBytes: pres.candidate.residentBytes,
+                    method: "SIGTERM"
+                )
+            })
+            receiptItems.append(contentsOf: skippedTargets.map { target in
+                CleanupReceiptItem(
+                    id: target.id,
+                    kind: target.kind.rawValue,
+                    path: target.targetPath,
+                    identityAtApproval: target.filesystemObjectIdentifier,
+                    identityAtExecution: nil,
+                    status: .skipped,
+                    message: "작업 중단으로 실행되지 않고 건너뜀",
+                    allocatedBytes: target.estimatedBytes,
+                    method: target.recoveryMethod.koreanLabel
+                )
+            })
+            receiptItems.append(contentsOf: skippedProcessTargets.map { pTarget in
+                CleanupReceiptItem(
+                    id: pTarget.id,
+                    kind: pTarget.kind.rawValue,
+                    path: "PID \(pTarget.pid)",
+                    identityAtApproval: pTarget.startTimeIdentifier,
+                    identityAtExecution: nil,
+                    status: .skipped,
+                    message: "작업 중단으로 실행되지 않고 건너뜀",
+                    allocatedBytes: pTarget.residentBytes,
+                    method: "SIGTERM"
+                )
+            })
+
+            let receipt = didExecuteAny ? CleanupReceipt(
+                id: UUID(),
+                startedAt: startedAt,
+                finishedAt: finishedAt,
+                approvedIds: targets.map(\.id) + processTargets.map(\.id),
+                items: receiptItems,
+                dfBeforeBytes: beforeImpact?.diskAvailableBytes,
+                dfAfterBytes: afterImpact?.diskAvailableBytes,
+                actualFreedBytes: actualFreed,
+                preserved: [],
+                notes: ["수동 정리 영수증", "휴지통 이동 항목의 실제 df 여유 확보량은 0으로 계산됨"]
+            ) : nil
+
             let impact = beforeImpact.flatMap { before in
                 afterImpact.map { after in
                     CleanupImpactSummary(
@@ -534,7 +674,8 @@ final class MonitorViewModel: ObservableObject {
                         afterMetrics: after.metrics,
                         beforeDiskAvailableBytes: before.diskAvailableBytes,
                         afterDiskAvailableBytes: after.diskAvailableBytes,
-                        completedAt: Date()
+                        completedAt: finishedAt,
+                        receipt: receipt
                     )
                 }
             }
@@ -562,11 +703,33 @@ final class MonitorViewModel: ObservableObject {
                 if let impact {
                     self.cleanupImpact = impact
                 }
+                if let receipt {
+                    let preservedItems = self.preservedDevelopmentTargets.map {
+                        CleanupPreservedItem(path: $0.path, reason: $0.reason)
+                    }
+                    self.latestReceipt = CleanupReceipt(
+                        id: receipt.id,
+                        startedAt: receipt.startedAt,
+                        finishedAt: receipt.finishedAt,
+                        approvedIds: receipt.approvedIds,
+                        items: receipt.items,
+                        dfBeforeBytes: receipt.dfBeforeBytes,
+                        dfAfterBytes: receipt.dfAfterBytes,
+                        actualFreedBytes: receipt.actualFreedBytes,
+                        preserved: preservedItems,
+                        notes: receipt.notes
+                    )
+                }
                 if !auditEntries.isEmpty {
                     self.cleanupHistory = self.auditStore.append(auditEntries, to: self.cleanupHistory)
                 }
                 if self.canRunMonitoring, let refreshedCandidates, let refreshedProcessCandidates {
-                    self.cleanupCandidates = refreshedCandidates.filter { !self.protectedCleanupIDs.contains($0.id) }
+                    // 개발 정리 후보 중 실행 완료되지 않고 남은 항목은 보존
+                    let remainingDev = self.cleanupCandidates.filter { cand in
+                        cand.kind.isDevelopmentKind && !results.contains(where: { $0.candidate.id == cand.id && $0.status == .cleaned })
+                    }
+                    let newGeneral = refreshedCandidates.filter { !self.protectedCleanupIDs.contains($0.id) }
+                    self.cleanupCandidates = newGeneral + remainingDev
                     self.processCleanupCandidates = refreshedProcessCandidates.filter {
                         !self.protectedCleanupIDs.contains($0.protectionIdentifier)
                     }
@@ -589,15 +752,35 @@ final class MonitorViewModel: ObservableObject {
         processResults: [ProcessCleanupExecutionResult]
     ) -> [CleanupAuditEntry] {
         let now = Date()
-        return results.map {
-            CleanupAuditEntry(
-                id: UUID(), timestamp: now, category: $0.candidate.kind.koreanLabel,
-                target: $0.candidate.targetIdentifier, status: $0.status, message: $0.message
+        return results.map { res in
+            let actualFreed: Int64 = (res.status == .cleaned && res.candidate.recoveryMethod != .userTrash)
+                ? Int64(res.candidate.estimatedBytes) : 0
+            return CleanupAuditEntry(
+                id: UUID(),
+                timestamp: now,
+                category: res.candidate.kind.koreanLabel,
+                target: res.candidate.targetIdentifier,
+                status: res.status,
+                message: res.message,
+                path: res.candidate.targetPath,
+                logicalBytes: res.candidate.estimatedBytes,
+                allocatedBytes: res.candidate.estimatedBytes,
+                actualFreedBytes: actualFreed,
+                recoveryMethod: res.candidate.recoveryMethod.rawValue
             )
         } + processResults.map {
             CleanupAuditEntry(
-                id: UUID(), timestamp: now, category: $0.candidate.kind.koreanLabel,
-                target: "pid \($0.candidate.pid)", status: $0.status, message: $0.message
+                id: UUID(),
+                timestamp: now,
+                category: $0.candidate.kind.koreanLabel,
+                target: "pid \($0.candidate.pid)",
+                status: $0.status,
+                message: $0.message,
+                path: nil,
+                logicalBytes: nil,
+                allocatedBytes: nil,
+                actualFreedBytes: 0,
+                recoveryMethod: "SIGTERM"
             )
         }
     }
