@@ -259,7 +259,7 @@ struct ClipboardHistoryContentView: View {
                 .foregroundColor(.white.opacity(0.7))
                 .padding(.leading, 16)
 
-            TextField("", text: $controller.searchQuery, prompt: Text("Search clipboard...").foregroundColor(.white.opacity(0.4)))
+            TextField("", text: $controller.searchQuery, prompt: Text("클립보드 검색...").foregroundColor(.white.opacity(0.4)))
                 .textFieldStyle(PlainTextFieldStyle())
                 .font(.system(size: 26, weight: .light))
                 .foregroundColor(.white)
@@ -455,8 +455,11 @@ struct ClipboardHistoryContentView: View {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .padding(16)
+                        .frame(
+                            width: max(0, geo.size.width - 32),
+                            height: max(0, geo.size.height - 32)
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
                 VStack(spacing: 8) {
