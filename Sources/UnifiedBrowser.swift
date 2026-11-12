@@ -124,6 +124,8 @@ public final class UnifiedBrowserManager {
             MailWindowCoordinator.shared.selectSectionFromModule(.serverStatus)
         case "serverStatusSettings":
             MailWindowCoordinator.shared.selectSectionFromModule(.serverStatusSettings)
+        case "clipboardHistory":
+            MailWindowCoordinator.shared.selectSectionFromModule(.clipboardHistory)
         case "help":
             MailWindowCoordinator.shared.selectSectionFromModule(.help)
         case "general":
@@ -154,6 +156,7 @@ public final class UnifiedBrowserManager {
         case .cleanUSB: return "cleanUSB"
         case .serverStatus: return "serverStatus"
         case .serverStatusSettings: return "serverStatusSettings"
+        case .clipboardHistory: return "clipboardHistory"
         case .help: return "help"
         case .general: return "general"
         }

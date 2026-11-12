@@ -14,6 +14,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
     case cleanUSB
     case serverStatus
     case serverStatusSettings
+    case clipboardHistory
     case help
     case general
 
@@ -30,6 +31,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .macManagement, .macManagementSettings: return "Mac 관리"
         case .cleanUSB: return "USB 드라이브"
         case .serverStatus, .serverStatusSettings: return "서버 현황"
+        case .clipboardHistory: return "클립보드 기록"
         case .help: return "사용 안내"
         case .general: return "브라우저 설정"
         }
@@ -45,6 +47,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .input: return "edit"
         case .macManagement, .cleanUSB, .serverStatus: return "device_files"
         case .macManagementSettings, .serverStatusSettings: return "settings"
+        case .clipboardHistory: return "device_files"
         case .help: return "help"
         case .general: return "settings"
         }
@@ -209,6 +212,7 @@ public struct SettingsView: View {
                     sidebarRow(.cleanUSB)
                     sidebarRow(.serverStatus)
                     sidebarRow(.serverStatusSettings)
+                    sidebarRow(.clipboardHistory)
                 }
                 Section("지원 및 설정") {
                     ForEach(SettingsSection.supportSections) { sidebarRow($0) }
@@ -346,6 +350,8 @@ public struct SettingsView: View {
             CCMBStatusView(onOpenSettings: { store.section = .serverStatusSettings })
         case .serverStatusSettings:
             CCMBSettingsView()
+        case .clipboardHistory:
+            ClipboardHistorySettingsView()
         case .help:
             HTTGuideView(settingsStore: store)
         case .general:

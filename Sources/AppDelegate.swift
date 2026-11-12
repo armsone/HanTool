@@ -227,6 +227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // 보조키 더블탭(Command 2회 또는 Shift 2회) 브라우저 호출 감시 시작
         BrowserDoubleTapShortcut.shared.start()
+        // 클립보드 히스토리 및 단축키(Shift 유지 + Command 2회 탭) 감시 시작
+        ClipboardHistoryStore.shared.start()
+        ClipboardHistoryShortcut.shared.start()
 
         // 메일 번역: Mail › 서비스 메뉴, Mail 위 번역 버튼(기본 켜짐)
         MailWindowCoordinator.shared.start()
@@ -327,6 +330,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         BrowserDoubleTapShortcut.shared.stop()
+        ClipboardHistoryShortcut.shared.stop()
+        ClipboardHistoryStore.shared.stop()
         MailWindowCoordinator.shared.prepareForTermination()
         InputMateCoordinator.shared.stop()
         BTNIntegration.shared.stop()
@@ -531,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // MARK: Mac 관리
         menu.addItem(item("USB 정리·추출", #selector(showCleanUSB), symbol: "externaldrive"))
+        menu.addItem(item("클립보드 히스토리", #selector(showClipboardHistory), symbol: "doc.on.clipboard"))
 
         menu.addItem(.separator())
 
@@ -807,6 +813,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
     }
 
+    @objc func showClipboardHistory() {
+        ClipboardHistoryPanelController.shared.toggle()
+    }
+
     @objc private func toggleInputMateEnabled() {
         InputMateCoordinator.shared.toggleEnabled()
     }
@@ -911,6 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(item("업데이트 확인…", #selector(checkForUpdates)))
         appMenu.addItem(.separator())
         appMenu.addItem(item("USB 정리·추출", #selector(showCleanUSB)))
+        appMenu.addItem(item("클립보드 히스토리", #selector(showClipboardHistory)))
         appMenu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement)))
         let settings = NSMenuItem(title: "현재 메뉴 설정…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
