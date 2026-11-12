@@ -238,6 +238,12 @@ public struct MainView: View {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
             }
         }
+        .background(
+            ToolbarCustomizationConfigurator()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        )
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
             SpeedTestView(appModel: appModel, connection: appModel.connection) {
                 navModel.isSpeedTestPresented = false
@@ -1344,6 +1350,88 @@ struct AIPanelSwitch: View {
 
 // MARK: - Page Audio Controls
 
+fileprivate struct RightClickBlockerView: NSViewRepresentable {
+    var onRightClick: () -> Void
+
+    func makeNSView(context: Context) -> RightClickCatcherView {
+        let view = RightClickCatcherView()
+        view.onRightClick = onRightClick
+        return view
+    }
+
+    func updateNSView(_ nsView: RightClickCatcherView, context: Context) {
+        nsView.onRightClick = onRightClick
+    }
+
+    final class RightClickCatcherView: NSView {
+        var onRightClick: (() -> Void)?
+        private var localMonitor: Any?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                setupMonitor()
+            } else {
+                teardownMonitor()
+            }
+        }
+
+        private func setupMonitor() {
+            teardownMonitor()
+            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] event in
+                guard let self = self,
+                      let targetWindow = self.window,
+                      let eventWindow = event.window,
+                      eventWindow === targetWindow else {
+                    return event
+                }
+                let rectInWindow = self.convert(self.bounds, to: nil)
+                if rectInWindow.contains(event.locationInWindow) {
+                    self.onRightClick?()
+                    return nil
+                }
+                return event
+            }
+        }
+
+        private func teardownMonitor() {
+            if let monitor = localMonitor {
+                NSEvent.removeMonitor(monitor)
+                localMonitor = nil
+            }
+        }
+
+        deinit {
+            teardownMonitor()
+        }
+    }
+}
+
+fileprivate struct ToolbarCustomizationConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in
+            guard let toolbar = view?.window?.toolbar else { return }
+            toolbar.allowsUserCustomization = false
+            if #available(macOS 15.0, *) {
+                toolbar.allowsDisplayModeCustomization = false
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if let toolbar = nsView.window?.toolbar {
+            toolbar.allowsUserCustomization = false
+            if #available(macOS 15.0, *) {
+                toolbar.allowsDisplayModeCustomization = false
+            }
+        }
+    }
+}
+
 struct PageAudioControls: View {
     @ObservedObject var appModel: AppModel
     @ObservedObject private var audioController = PageAudioController.shared
@@ -1389,11 +1477,16 @@ struct PageAudioControls: View {
             .frame(height: 26)
             .background(Capsule().fill(palette.surfaceColor))
         }
+        .overlay(
+            RightClickBlockerView {
+                audioController.toggleGlobalMute()
+            }
+        )
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .help((audioController.isGlobalMuted ? "전체 음소거 해제 (재생 유지)" : "모든 웹 페이지 전체 음소거 (재생 유지)") + " · 웹 오디오·통화 소리는 지원되지 않을 수 있습니다")
+        .help((audioController.isGlobalMuted ? "전체 음소거 해제 (재생 유지)" : "모든 웹 페이지 전체 음소거 (재생 유지)") + " · 우클릭: 전체 음소거 즉시 토글")
         .accessibilityLabel("페이지 소리 관리")
-        .accessibilityHint(audioController.isGlobalMuted ? "메뉴 열기, 현재 전체 음소거 상태" : "메뉴 열기, 현재 소리 켜짐 상태")
+        .accessibilityHint(audioController.isGlobalMuted ? "클릭 시 메뉴 열기, 우클릭 시 전체 음소거 즉시 해제" : "클릭 시 메뉴 열기, 우클릭 시 전체 음소거 즉시 적용")
     }
 }
 

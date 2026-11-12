@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 /// HTT 내부에 통합된 HTTHTDCore 브라우저 모듈 인터페이스.
 /// - 기존 NSWorkspace 자식 프로세스 실행 대신 모듈 내부로 직접 라우팅한다.
@@ -23,7 +24,7 @@ public enum EmbeddedBrowser {
             return
         }
 
-        let validURLs = urls.isEmpty ? [] : forwardableWebURLs(urls)
+        let validURLs = urls.isEmpty ? [] : forwardableURLs(urls)
         MailWindowCoordinator.shared.openBrowserMain(urls: validURLs)
     }
 
@@ -31,6 +32,45 @@ public enum EmbeddedBrowser {
     private static func hasUnsupportedPrivateFlag(_ arguments: [String]) -> Bool {
         let flags: Set<String> = ["--private", "-private", "--inprivate"]
         return arguments.dropFirst().contains { flags.contains($0.lowercased()) }
+    }
+
+    /// 전달 가능한 브라우저 대상 URL(웹 주소 및 안전한 로컬 HTML 파일)을 고른다.
+    /// 앞쪽 64개만 검사해 최대 10개까지 허용한다.
+    public static func forwardableURLs(_ urls: [URL]) -> [URL] {
+        var result: [URL] = []
+        for url in urls.prefix(64) {
+            if let htmlFile = forwardableHTMLFileURL(url) {
+                result.append(htmlFile)
+            } else if let web = forwardableWebURLs([url]).first {
+                result.append(web)
+            }
+            if result.count == 10 { break }
+        }
+        return result
+    }
+
+    /// 안전하게 열 수 있는 로컬 HTML 파일 URL인지 검증한다:
+    /// - file: 스킴 및 로컬 일반 파일 존재
+    /// - .html, .htm, .xhtml 확장자 (또는 public.html UTType 적합)
+    /// - 읽기 범위는 해당 파일 자체로 한정(디스크 전체나 홈 디렉터리 전체 임의 접근 불가)
+    /// - 제어 문자 없음 및 경로 길이 제한(4096자 이하)
+    public static func forwardableHTMLFileURL(_ url: URL) -> URL? {
+        guard url.isFileURL else { return nil }
+        let standardized = url.standardizedFileURL.resolvingSymlinksInPath()
+        let path = standardized.path
+        guard path.utf8.count <= 4096,
+              !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+            return nil
+        }
+        let ext = standardized.pathExtension.lowercased()
+        let isHTML = ext == "html" || ext == "htm" || ext == "xhtml" ||
+            (UTType(filenameExtension: ext)?.conforms(to: .html) == true)
+        guard isHTML else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+            return nil
+        }
+        return standardized
     }
 
     /// 전달 가능한 웹 주소만 고른다: http/https, 계정 정보·제어 문자 없음, 주소 4096자·호스트 253자 이하,

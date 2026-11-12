@@ -15,6 +15,13 @@ enum AutoShorts {
 
     /// Verified check: HTD is nested inside HTT.app/Contents/Helpers and parent bundle ID matches HTT.
     static var isBundledInHTT: Bool {
+        #if HTT_HOST
+        // Integrated HanTool build: this module is compiled into the HTT app itself, so Bundle.main is the parent.
+        if let id = Bundle.main.bundleIdentifier,
+           id == expectedParentBundleID || id.hasPrefix(expectedParentBundleID) {
+            return true
+        }
+        #endif
         let me = Bundle.main.bundleURL.resolvingSymlinksInPath()
         let helpers = me.deletingLastPathComponent()
         let contents = helpers.deletingLastPathComponent()
@@ -181,7 +188,14 @@ enum AutoShorts {
           if (nextButton) {
             nextButton.click();
           } else {
-            dispatchArrowDown();
+            const activeVideo = getActiveVideo();
+            const currentItem = activeVideo ? activeVideo.closest("ytd-reel-video-renderer") : null;
+            const nextItem = currentItem ? currentItem.nextElementSibling : null;
+            if (nextItem && typeof nextItem.scrollIntoView === "function") {
+              nextItem.scrollIntoView({ behavior: "smooth", block: "start" });
+            } else {
+              dispatchArrowDown();
+            }
           }
           return true;
         }

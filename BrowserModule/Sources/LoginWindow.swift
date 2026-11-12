@@ -57,6 +57,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     @Published var address = ""
     @Published var currentURL: URL?
     private var authorizedPlannerReportURL: URL?
+    private var authorizedExternalHTMLURL: URL?
     /// The committed main-frame URL of this tab's webView, reset at view install/teardown/home.
     @Published public private(set) var popupCommittedURL: URL?
     @Published var pageTitle = ""
@@ -1065,6 +1066,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             return false
         }
         authorizedPlannerReportURL = fileURL
+        authorizedExternalHTMLURL = nil
         startNewLogicalAttempt()
         wanted = true
         hasStartedUp = true
@@ -1081,11 +1083,56 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         return true
     }
 
+    @discardableResult
+    func openExternalHTMLFile(_ fileURL: URL) -> Bool {
+        guard fileURL.isFileURL else { return false }
+        let standardized = fileURL.standardizedFileURL.resolvingSymlinksInPath()
+        let path = standardized.path
+        guard path.utf8.count <= 4096,
+              !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+            return false
+        }
+        let ext = standardized.pathExtension.lowercased()
+        guard ext == "html" || ext == "htm" || ext == "xhtml" else { return false }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+            return false
+        }
+        authorizedPlannerReportURL = nil
+        authorizedExternalHTMLURL = standardized
+        startNewLogicalAttempt()
+        wanted = true
+        hasStartedUp = true
+        isShowingHome = false
+        pendingURL = nil
+        prepare()
+        guard let wv = webView else { return false }
+        wv.stopLoading()
+        address = standardized.lastPathComponent
+        currentURL = standardized
+        pageTitle = standardized.lastPathComponent
+        lastError = nil
+        let documentDir = standardized.deletingLastPathComponent()
+        let homePath = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.resolvingSymlinksInPath().path
+        let docPath = documentDir.path
+        let isBroadContainer = docPath == "/" || docPath == "/Users" || docPath == homePath
+        let readAccessURL = isBroadContainer ? standardized : documentDir
+        wv.loadFileURL(standardized, allowingReadAccessTo: readAccessURL)
+        return true
+    }
+
     func open(_ raw: String) {
         startNewLogicalAttempt()
         recoveryEnabled = true
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if let fileURL = URL(string: trimmed), fileURL.isFileURL {
+            if openExternalHTMLFile(fileURL) {
+                return
+            }
+            lastError = "유효하지 않거나 접근할 수 없는 HTML 파일입니다."
+            return
+        }
         let candidate = trimmed.contains("://") ? trimmed : "https://" + trimmed
         guard let url = URL(string: candidate), let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https", url.host != nil else {
@@ -1093,6 +1140,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             return
         }
         authorizedPlannerReportURL = nil
+        authorizedExternalHTMLURL = nil
         let route = routeForAddressEntry(url)
         if webView != nil, route != viewRoute {
             // The address needs the other route's store: this tab's view cannot change its connection path.
@@ -1743,12 +1791,17 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         guard webView === self.webView else { return .cancel }
         guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else { return .cancel }
         if url.scheme?.lowercased() == "file" {
-            if navigationAction.targetFrame?.isMainFrame == true,
-               let authURL = authorizedPlannerReportURL,
-               let pid = sawProjectID,
-               url.standardizedFileURL.resolvingSymlinksInPath() == authURL.standardizedFileURL.resolvingSymlinksInPath(),
-               SAWReport.validatedURL(SAWArtifact(title: "", filename: authURL.lastPathComponent, fileURL: authURL.path), projectID: pid) == authURL {
-                return .allow
+            if navigationAction.targetFrame?.isMainFrame == true {
+                if let authURL = authorizedPlannerReportURL,
+                   let pid = sawProjectID,
+                   url.standardizedFileURL.resolvingSymlinksInPath() == authURL.standardizedFileURL.resolvingSymlinksInPath(),
+                   SAWReport.validatedURL(SAWArtifact(title: "", filename: authURL.lastPathComponent, fileURL: authURL.path), projectID: pid) == authURL {
+                    return .allow
+                }
+                if let authExtURL = authorizedExternalHTMLURL,
+                   url.standardizedFileURL.resolvingSymlinksInPath() == authExtURL.standardizedFileURL.resolvingSymlinksInPath() {
+                    return .allow
+                }
             }
             return .cancel
         }
@@ -1956,10 +2009,16 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if let authURL = authorizedPlannerReportURL,
-           let cur = currentURL,
-           cur.standardizedFileURL.resolvingSymlinksInPath() == authURL.standardizedFileURL.resolvingSymlinksInPath() {
-            return
+        if let cur = currentURL {
+            let standardizedCur = cur.standardizedFileURL.resolvingSymlinksInPath()
+            if let authURL = authorizedPlannerReportURL,
+               standardizedCur == authURL.standardizedFileURL.resolvingSymlinksInPath() {
+                return
+            }
+            if let authExtURL = authorizedExternalHTMLURL,
+               standardizedCur == authExtURL.standardizedFileURL.resolvingSymlinksInPath() {
+                return
+            }
         }
         guard webView === self.webView, !isShowingHome else { return }
         armGoogleFill()

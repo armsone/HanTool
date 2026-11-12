@@ -27,6 +27,22 @@ final class ExternalURLCoordinator {
 
     /// Validated (`BrowserPreferences.validateWebURL`) addresses only; at most `maxPending` wait for the model.
     private func enqueue(_ raw: String) -> String? {
+        if let fileCandidate = URL(string: raw), fileCandidate.isFileURL {
+            let standardized = fileCandidate.standardizedFileURL.resolvingSymlinksInPath()
+            let path = standardized.path
+            if path.utf8.count <= 4096,
+               !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+                let ext = standardized.pathExtension.lowercased()
+                if ext == "html" || ext == "htm" || ext == "xhtml" {
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
+                        let validStr = standardized.absoluteString
+                        if !pending.contains(validStr), pending.count < Self.maxPending { pending.append(validStr) }
+                        return validStr
+                    }
+                }
+            }
+        }
         guard let url = BrowserPreferences.validateWebURL(raw) else { return nil }
         if !pending.contains(url), pending.count < Self.maxPending { pending.append(url) }
         return url
@@ -66,6 +82,24 @@ final class ExternalURLCoordinator {
         let inWindow = Date() < launchWindowEnd
         if !inWindow { launchArgumentURLs.removeAll() }
         for url in urls.prefix(Self.maxScannedPerCall) {
+            if url.isFileURL {
+                let standardized = url.standardizedFileURL.resolvingSymlinksInPath()
+                let path = standardized.path
+                if path.utf8.count <= 4096,
+                   !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+                    let ext = standardized.pathExtension.lowercased()
+                    if ext == "html" || ext == "htm" || ext == "xhtml" {
+                        var isDir: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
+                            let validStr = standardized.absoluteString
+                            if inWindow, launchArgumentURLs.remove(validStr) != nil { continue }
+                            if !pending.contains(validStr), pending.count < Self.maxPending { pending.append(validStr) }
+                            continue
+                        }
+                    }
+                }
+                continue
+            }
             guard let valid = BrowserPreferences.validateWebURL(url.absoluteString) else { continue }
             if inWindow, launchArgumentURLs.remove(valid) != nil { continue }
             if !pending.contains(valid), pending.count < Self.maxPending { pending.append(valid) }

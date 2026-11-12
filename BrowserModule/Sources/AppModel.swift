@@ -520,6 +520,26 @@ public final class AppModel: ObservableObject {
         persistJobs()
     }
 
+    /// Cmd+Q 브라우저 종료: 모든 브라우저 탭과 WKWebView 실행을 즉시 중단하고 해제하며,
+    /// 쿠키·로그인·비밀번호·북마크 및 백그라운드 다운로드/플래너 작업은 온전히 보존한 채
+    /// 다음 실행 시 주소창 포커스를 가진 새 탭 홈 상태로 시작할 수 있도록 초기화한다.
+    public func terminateBrowserExecution() {
+        cancelPendingPopupBurstFocus()
+        tabOpeners.removeAll()
+        for tab in tabs {
+            tab.webView?.stopLoading()
+            tab.teardown()
+            extensions.tabClosed(tab)
+        }
+        let freshTab = LoginBrowserModel()
+        freshTab.appModel = self
+        self.tabs = [freshTab]
+        self.selectedTabID = freshTab.tabID
+        self.selectedTab = .browser
+        freshTab.showBuiltInHome()
+        requestAddressFocus(for: freshTab, isNewTab: true, isExplicit: true)
+    }
+
     // MARK: - Connection assist / login session
 
     /// The one "HTTPS 연결 도움" switch: proxy and TLS first-record split together (on) or neither (off).
@@ -1202,8 +1222,27 @@ public final class AppModel: ObservableObject {
         var valid: [String] = []
         for raw in rawURLs.prefix(64) {   // bounded scan
             if valid.count >= Self.maxExternalURLsPerRequest { break }
-            guard let url = BrowserPreferences.validateWebURL(raw), !valid.contains(url) else { continue }
-            valid.append(url)
+            if let fileCandidate = URL(string: raw), fileCandidate.isFileURL {
+                let standardized = fileCandidate.standardizedFileURL.resolvingSymlinksInPath()
+                let path = standardized.path
+                if path.utf8.count <= 4096,
+                   !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
+                    let ext = standardized.pathExtension.lowercased()
+                    if ext == "html" || ext == "htm" || ext == "xhtml" {
+                        var isDir: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
+                            let validatedStr = standardized.absoluteString
+                            if !valid.contains(validatedStr) {
+                                valid.append(validatedStr)
+                                continue
+                            }
+                        }
+                    }
+                }
+            }
+            if let url = BrowserPreferences.validateWebURL(raw), !valid.contains(url) {
+                valid.append(url)
+            }
         }
         let candidates = Array(valid.prefix(Self.maxExternalURLsPerRequest))
         var opened = 0

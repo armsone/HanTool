@@ -3,11 +3,30 @@
 <plist version="1.0">
 <dict>
 	<key>BarobogiBuildStamp</key>
-	<string>202611110110</string>
+	<string>202611122100</string>
 	<key>CFBundleDisplayName</key>
 	<string>한툴</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>html</string>
+				<string>htm</string>
+				<string>xhtml</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>HTML 문서</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.html</string>
+				<string>public.xhtml</string>
+			</array>
+		</dict>
 		<dict>
 			<key>CFBundleTypeName</key>
 			<string>이메일 메시지</string>
@@ -45,7 +64,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.30.2</string>
+	<string>1.30.3</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -61,14 +80,14 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>202611121704</string>
+	<string>202611122100</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
 	<key>HTDBuildStamp</key>
-	<string>202611110110</string>
+	<string>202611122100</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>

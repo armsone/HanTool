@@ -140,7 +140,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         launchFinished = true
         if let target = duplicateLaunchTarget {
-            let argumentURLs = CommandLine.arguments.dropFirst().compactMap(URL.init(string:))
+            let argumentURLs = CommandLine.arguments.dropFirst().compactMap { arg -> URL? in
+                if let url = URL(string: arg), url.scheme != nil { return url }
+                let path = NSString(string: arg).expandingTildeInPath
+                if FileManager.default.fileExists(atPath: path) {
+                    return URL(fileURLWithPath: path)
+                }
+                return nil
+            }
             if !argumentURLs.isEmpty { forwardDuplicateURLs(argumentURLs) }
             if duplicateURLForwarded { finishDuplicateLaunch(); return }
             target.activate(options: [])
@@ -297,19 +304,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
-    /// .eml·이미지 파일 열기(Finder '다음으로 열기', Dock 아이콘으로 끌어놓기)
+    /// .eml·이미지·HTML 파일 열기(Finder '다음으로 열기', Dock 아이콘으로 끌어놓기)
     func application(_ application: NSApplication, open urls: [URL]) {
         if duplicateLaunchTarget != nil {
             forwardDuplicateURLs(urls)
             return
         }
-        // http/https 주소는 HTT 안의 브라우저로 넘기고, 파일 열기는 기존 동작을 그대로 유지한다.
-        let webURLs = EmbeddedBrowser.forwardableWebURLs(urls)
-        if !webURLs.isEmpty {
+        // http/https 주소 및 .html/.htm 파일은 브라우저로 넘기고, 번역 문서(메일/이미지)는 기존 동작을 그대로 유지한다.
+        let browserURLs = EmbeddedBrowser.forwardableURLs(urls)
+        if !browserURLs.isEmpty {
             showDockIconForBrowser()
-            EmbeddedBrowser.open(urls: webURLs)
+            EmbeddedBrowser.open(urls: browserURLs)
         }
-        guard let url = urls.first(where: { $0.isFileURL }) else { return }
+        guard let url = urls.first(where: { $0.isFileURL && EmbeddedBrowser.forwardableHTMLFileURL($0) == nil }) else { return }
         AppModel.shared.open(url: url)
         AppModel.shared.showMainWindow()
     }
@@ -827,10 +834,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func closeBrowserWindows() {
-        for window in NSApp.windows where window.isVisible &&
-            MailWindowCoordinator.shared.isWorkbenchWindow(window) {
-            window.performClose(nil)
+        for window in NSApp.windows where MailWindowCoordinator.shared.isWorkbenchWindow(window) {
+            if window.isVisible {
+                window.performClose(nil)
+            }
         }
+        UnifiedBrowserManager.shared.terminateBrowserExecution()
     }
 
     /// Only the explicit status-menu action requests a full application quit.

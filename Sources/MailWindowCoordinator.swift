@@ -171,6 +171,12 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         window.setContentSize(NSSize(width: 1040, height: 760))
         if !window.setFrameUsingName("HTTWorkbenchWindow") { window.center() }
         window.setFrameAutosaveName("HTTWorkbenchWindow")
+        if let toolbar = window.toolbar {
+            toolbar.allowsUserCustomization = false
+            if #available(macOS 15.0, *) {
+                toolbar.allowsDisplayModeCustomization = false
+            }
+        }
         if AppModel.shared.keepOnTop { window.level = .floating }
         workbenchWindow = window
         return window

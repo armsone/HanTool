@@ -171,6 +171,12 @@ public final class UnifiedBrowserManager {
         HTDHostExport.shared.shutdown()
     }
 
+    /// Cmd+Q 브라우저 종료 시 브라우저 페이지/웹뷰/미디어 실행을 완전히 종료하고 초기 상태로 되돌린다.
+    public func terminateBrowserExecution() {
+        guard isInitialized else { return }
+        HTDHostExport.shared.terminateBrowserExecution()
+    }
+
     /// 현재 호스트 테마를 모듈에 동기화
     public func syncTheme() {
         syncTheme(HTTAppearanceStore.shared.theme)

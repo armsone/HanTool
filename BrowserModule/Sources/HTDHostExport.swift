@@ -173,6 +173,12 @@ public final class HTDHostExport: ObservableObject {
         appModel.shutdown()
     }
 
+    /// Cmd+Q 브라우저 종료: 모든 브라우저 탭 및 웹뷰/미디어 실행을 중단·해제하고 새 탭 초기 상태로 재설정한다.
+    public func terminateBrowserExecution() {
+        self.hostedToolID = nil
+        appModel.terminateBrowserExecution()
+    }
+
     /// 현재 진행 중인 백그라운드 다운로드나 활성 플래너 작업이 있는지 확인합니다.
     public var hasActiveWork: Bool {
         let activeJobs = appModel.jobs.contains { job in
