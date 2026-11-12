@@ -265,6 +265,8 @@ final class BrowserDoubleTapShortcut: ObservableObject {
     }
 
     private func triggerBrowserOpen() {
-        EmbeddedBrowser.open()
+        if !UnifiedBrowserManager.shared.showAssistantIfBrowserVisible() {
+            EmbeddedBrowser.open()
+        }
     }
 }

@@ -73,6 +73,10 @@ public final class HTDHostExport: ObservableObject {
 
     /// 브라우저 뷰로 전환하고 선택적으로 주소들을 엽니다.
     public func showBrowser(urls: [URL] = []) {
+        if cachedController?.view.window?.isVisible != true && appModel.isAIPanelOpen {
+            HanaPanelHost.shared.setPreferredWidth(HanaPanelHost.defaultWidth)
+            appModel.thirdPartyAIHost.setPreferredWidth(ThirdPartyAIPanelHost.defaultWidth)
+        }
         if self.hostedToolID != nil {
             cachedController?.view.window?.makeFirstResponder(nil)
         }
@@ -81,10 +85,63 @@ public final class HTDHostExport: ObservableObject {
         UnifiedNavigationModel.shared.syncFromExternal(hostedToolID: nil, selectedTab: .browser)
         if !urls.isEmpty {
             ExternalURLCoordinator.shared.receive(urls)
+        } else {
+            // Keep the launch/new-tab request: its nil attempt binding survives
+            // the first page activation before the window is attached.
+            let pending = appModel.addressFocusRequest
+            if pending?.tabID != appModel.browser.tabID || pending?.isNewTab != true {
+                appModel.requestAddressFocus(for: appModel.browser, isExplicit: true)
+            }
         }
     }
 
     /// 호스트 코드에서 프로그래밍 방식으로 도구를 선택 표시합니다.
+    /// A visible browser toggles its assistant; each state restores its own input focus.
+    /// Retained closed windows take the ordinary browser-open path instead.
+    public func showAssistantIfBrowserVisible() -> Bool {
+        guard let window = cachedController?.view.window, window.isVisible,
+              !window.isMiniaturized, hostedToolID == nil,
+              appModel.selectedTab == .browser,
+              UnifiedNavigationModel.shared.destination == .browser else { return false }
+        if appModel.isAIPanelOpen {
+            appModel.setAIPanelOpen(false)
+            appModel.requestAddressFocus(for: appModel.browser, isExplicit: true)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return true
+        }
+        appModel.clearAddressFocusRequest()
+        if !appModel.isAIPanelOpen {
+            if appModel.aiServices.enabledServices.isEmpty {
+                appModel.temporaryShowHanaPanel = true
+            }
+            appModel.setAIPanelOpen(true)
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, window.isVisible, window.isKeyWindow,
+                  window.attachedSheet == nil, self.appModel.isAIPanelOpen else { return }
+            if self.appModel.activeAIPanelIsHana {
+                let host = HanaPanelHost.shared
+                guard host.webView.window === window,
+                      HanaPanelHost.isTrustedAlfredURL(host.webView.url) else { return }
+                window.makeFirstResponder(host.webView)
+                // Focus only; preserve the draft and never read or submit it.
+                host.webView.evaluateJavaScript("""
+                (() => { const input = document.getElementById('afInput');
+                  if (input instanceof HTMLTextAreaElement && !input.disabled && !input.readOnly) {
+                    input.focus(); return true;
+                  } return false; })()
+                """, completionHandler: nil)
+            } else {
+                let webView = self.appModel.thirdPartyAIHost.webView
+                if webView.window === window { window.makeFirstResponder(webView) }
+            }
+        }
+        return true
+    }
+
     /// (호스트 재귀 호출 방지를 위해 onToolSelected 콜백은 트리거하지 않습니다)
     public func showTool(_ id: String) {
         if self.hostedToolID != id {

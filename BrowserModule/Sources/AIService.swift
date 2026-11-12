@@ -379,7 +379,7 @@ public final class AIServiceStore: ObservableObject {
 /// Supports real child WKWebView popups for OAuth authentication without automation injection.
 @MainActor
 public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
-    public static let defaultWidth: CGFloat = 420
+    public static let defaultWidth: CGFloat = 372
     public static let minWidth: CGFloat = 320
     public static let maxWidth: CGFloat = 900
     public static let storageKey = "HanaPanelWidth"
@@ -388,7 +388,11 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
     @Published public var isLoading: Bool = false
     @Published public var statusMessage: String? = nil
     @Published public var currentService: AIService? = nil
-    @Published public var isPanelOpen: Bool = false
+    @Published public var isPanelOpen: Bool = false {
+        didSet {
+            if isPanelOpen && !oldValue { setPreferredWidth(Self.defaultWidth) }
+        }
+    }
 
     public private(set) var webView: WKWebView
     public var onOpenExternalURL: ((URL) -> Void)?
@@ -402,12 +406,7 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
     private var plannerConfigKey: String?
 
     public init(dataStore: WKWebsiteDataStore = .default()) {
-        let saved = HTDBrowserDefaults.standard.double(forKey: Self.storageKey)
-        if saved >= Double(Self.minWidth) && saved <= Double(Self.maxWidth) {
-            self.preferredWidth = CGFloat(saved)
-        } else {
-            self.preferredWidth = Self.defaultWidth
-        }
+        self.preferredWidth = Self.defaultWidth
 
         self.currentDataStore = dataStore
         let config = WKWebViewConfiguration()
@@ -796,10 +795,7 @@ public struct ThirdPartyAIPanelView: View {
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            AIPanelDivider(preferredWidth: $host.preferredWidth, availableWidth: availableWidth)
-
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
                 headerBar
                 Divider()
                 if let msg = host.statusMessage {
@@ -810,6 +806,8 @@ public struct ThirdPartyAIPanelView: View {
             }
             .frame(width: displayedWidth)
             .background(palette.cardColor)
+        .overlay(alignment: .leading) {
+            AIPanelDivider(preferredWidth: $host.preferredWidth, availableWidth: availableWidth).offset(x: -8)
         }
         .onAppear {
             host.load(service: service)

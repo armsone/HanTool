@@ -138,6 +138,16 @@ if ! compgen -G "$ROOT_DIR/BrowserModule/Sources/*.swift" > /dev/null; then
   exit 1
 fi
 HTD_SOURCES=("$ROOT_DIR"/BrowserModule/Sources/*.swift)
+HTD_OBJECT_DIR="$(mktemp -d "$BUILD_DIR/HTTHTDCore-Objects.XXXXXX")"
+HTD_OUTPUT_MAP="$HTD_OBJECT_DIR/output-map.json"
+python3 - "$HTD_OUTPUT_MAP" "$HTD_OBJECT_DIR" "${HTD_SOURCES[@]}" <<'PY'
+import json, pathlib, sys
+output_map, object_dir, *sources = sys.argv[1:]
+pathlib.Path(output_map).write_text(json.dumps({
+    source: {"object": str(pathlib.Path(object_dir) / (pathlib.Path(source).stem + ".o"))}
+    for source in sources
+}))
+PY
 
 echo "==> HTTHTDCore 정적 모듈 컴파일 (target: $SWIFT_TARGET)"
 xcrun swiftc \
@@ -146,6 +156,7 @@ xcrun swiftc \
   -target "$SWIFT_TARGET" \
   -sdk "$SDK_PATH" \
   -module-name HTTHTDCore \
+  -output-file-map "$HTD_OUTPUT_MAP" \
   -D HTT_HOST \
   -parse-as-library \
   -emit-module \

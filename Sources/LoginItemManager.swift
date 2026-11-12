@@ -11,6 +11,9 @@ final class LoginItemManager {
     private static let preferenceKey = "LoginItemEnabledPreference"
     private let service = SMAppService.mainApp
     private(set) var lastError: String?
+    private(set) var menuStatus: SMAppService.Status = .notRegistered
+    private(set) var menuStatusDescription = "확인 중"
+    private var isRefreshingMenuStatus = false
 
     var isInstalledInApplications: Bool {
         Bundle.main.bundleURL.standardizedFileURL.path.hasPrefix("/Applications/")
@@ -24,10 +27,30 @@ final class LoginItemManager {
     }
 
     var statusDescription: String {
+        statusDescription(for: service.status)
+    }
+
+    /// Menu rendering must not wait for ServiceManagement's synchronous IPC.
+    /// Only display snapshots change here; registration and consent stay live.
+    func refreshMenuStatus() {
+        guard !isRefreshingMenuStatus else { return }
+        isRefreshingMenuStatus = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let status = SMAppService.mainApp.status
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.menuStatus = status
+                self.menuStatusDescription = self.statusDescription(for: status)
+                self.isRefreshingMenuStatus = false
+            }
+        }
+    }
+
+    private func statusDescription(for status: SMAppService.Status) -> String {
         if !isInstalledInApplications {
             return "/Applications에 설치된 앱에서만 사용할 수 있습니다"
         }
-        switch service.status {
+        switch status {
         case .enabled: return "켜짐"
         case .requiresApproval: return "승인 필요: 시스템 설정 > 일반 > 로그인 항목에서 허용하세요"
         case .notRegistered: return "꺼짐"

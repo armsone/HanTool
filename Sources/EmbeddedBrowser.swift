@@ -29,7 +29,7 @@ public enum EmbeddedBrowser {
 
     /// 실행 인자(argv0 제외)에 지원하지 않는 비공개 플래그가 있는지 확인.
     private static func hasUnsupportedPrivateFlag(_ arguments: [String]) -> Bool {
-        let flags: Set<String> = ["--incognito", "-incognito", "--private", "-private", "--inprivate"]
+        let flags: Set<String> = ["--private", "-private", "--inprivate"]
         return arguments.dropFirst().contains { flags.contains($0.lowercased()) }
     }
 

@@ -109,7 +109,7 @@ private final class HanaCompletionDelivery {
 final class HanaPanelHost: ObservableObject {
     static let shared = HanaPanelHost()
 
-    static let defaultWidth: CGFloat = 420
+    static let defaultWidth: CGFloat = 372
     static let minWidth: CGFloat = 320
     static let maxWidth: CGFloat = 900
     static let storageKey = "HanaPanelWidth"
@@ -122,6 +122,7 @@ final class HanaPanelHost: ObservableObject {
 
     @Published var isPanelOpen: Bool = false {
         didSet {
+            if isPanelOpen && !oldValue { setPreferredWidth(Self.defaultWidth) }
             if !isPanelOpen {
                 locationHandler?.cancelPending()
                 uiDelegateHandler?.dismissActiveAlert()
@@ -189,12 +190,7 @@ final class HanaPanelHost: ObservableObject {
 
     @MainActor
     private init() {
-        let saved = HTDBrowserDefaults.standard.double(forKey: Self.storageKey)
-        if saved >= Double(Self.minWidth) && saved <= Double(Self.maxWidth) {
-            self.preferredWidth = CGFloat(saved)
-        } else {
-            self.preferredWidth = Self.defaultWidth
-        }
+        self.preferredWidth = Self.defaultWidth
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
@@ -1985,10 +1981,7 @@ struct HanaPanelView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            HanaPanelDivider(host: host, availableWidth: availableWidth)
-
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
                 if let msg = host.statusMessage {
                     statusBanner(msg)
                 }
@@ -1997,6 +1990,8 @@ struct HanaPanelView: View {
             }
             .frame(width: displayedWidth)
             .background(palette.cardColor)
+        .overlay(alignment: .leading) {
+            HanaPanelDivider(host: host, availableWidth: availableWidth).offset(x: -8)
         }
     }
 

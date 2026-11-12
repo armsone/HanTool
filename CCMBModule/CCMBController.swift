@@ -2252,7 +2252,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     }
 
     private func configureStatusItem() {
-        statusItem.autosaveName = "CCMB.MainStatusItem"
+        statusItem.autosaveName = nil
         statusItem.isVisible = isMenuBarVisible
         statusItem.button?.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         statusItem.button?.toolTip = "Codex, Claude, Gemini 본계정·부계정·세 번째 계정 남은 사용량과 크레딧"
@@ -2473,6 +2473,17 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     @objc private func showStatusMenu() {
         guard let button = statusItem.button, let window = button.window else { return }
 
+
+        // 드롭다운 패널 또는 고정 패널이 이미 열려 있다면 닫는다 (토글).
+        if statusDropdownController.isVisible {
+            statusDropdownController.close()
+            return
+        }
+        if let pinned = pinnedUsageWindowController, pinned.isVisible {
+            pinned.close()
+            return
+        }
+
         // Before the first usage snapshot ever arrives, fall back to the
         // native menu, which still carries the original loading/offline/
         // error text rows that the dropdown panel has no equivalent for.
@@ -2485,11 +2496,6 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             button.highlight(true)
             menu.popUp(positioning: nil, at: point, in: nil)
             button.highlight(false)
-            return
-        }
-
-        if statusDropdownController.isVisible {
-            statusDropdownController.close()
             return
         }
 

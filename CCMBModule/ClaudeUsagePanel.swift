@@ -3025,7 +3025,20 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.close() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Status-bar clicks may arrive through the global monitor.
+                // Let the button's mouse-up action close this same panel;
+                // closing on mouse-down here would make that action reopen it.
+                if let excludedView = self.dismissalExcludedView,
+                   let excludedWindow = excludedView.window {
+                    let buttonRect = excludedWindow.convertToScreen(
+                        excludedView.convert(excludedView.bounds, to: nil)
+                    )
+                    if buttonRect.contains(NSEvent.mouseLocation) { return }
+                }
+                self.close()
+            }
         }
         localClickMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]

@@ -25,22 +25,15 @@ private struct AssistantPlannerEntryBar: View {
                     .help(feedback)
             }
             Spacer(minLength: 4)
-            Menu {
-                Button("플래너에게 넘기기", action: onManual)
-                    .disabled(session.binding == nil || session.status.kind == .pending)
-                    .help("지금 열린 대화를 읽어 새 플래너 프로젝트로 넘깁니다. 입력창 내용은 바꾸지 않습니다.")
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.caption)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .accessibilityLabel("대화 도구")
-            .help("대화 도구")
+            Button("플래너에게 넘기기", action: onManual)
+                .disabled(session.binding == nil || session.status.kind == .pending)
+                .font(.caption)
+                .buttonStyle(.plain)
+                .help("지금 열린 대화를 읽어 새 플래너 프로젝트로 넘깁니다. 입력창 내용은 바꾸지 않습니다.")
         }
         .foregroundColor(palette.textColor)
         .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .frame(height: BrowserView.footerHeight)
         .background(activeFeedback != nil ? palette.accentSoftColor : palette.cardColor)
         .task(id: refreshToken) { await session.refreshCapability() }
     }
@@ -141,21 +134,11 @@ struct GlobalAssistantDock: View {
         let panelWidth = isHanaPanel
             ? hanaHost.effectiveWidth(forAvailableWidth: availableWidth)
             : thirdPartyHost.effectiveWidth(forAvailableWidth: availableWidth)
-        let outerWidth = open ? panelWidth + 16 : 0
+        let outerWidth = open ? panelWidth : 0
 
         GeometryReader { _ in
             if open {
                 VStack(spacing: 0) {
-                    if let entrySession = isHanaPanel ? hanaHost.plannerSession : thirdPartyHost.plannerSession {
-                        AssistantPlannerEntryBar(
-                            session: entrySession,
-                            refreshToken: isHanaPanel
-                                ? "hana|\(hanaHost.isBridgeReady)"
-                                : "\(thirdPartyHost.currentService?.id ?? "")|\(thirdPartyHost.isLoading)",
-                            onManual: { startManualAssistantHandoff(entrySession, isHana: isHanaPanel) }
-                        )
-                        Divider()
-                    }
                     if isHanaPanel {
                         HanaPanelView(
                             host: hanaHost,
@@ -178,10 +161,6 @@ struct GlobalAssistantDock: View {
                         Divider()
 
                         HStack(spacing: 0) {
-                            Rectangle()
-                                .fill(palette.borderColor)
-                                .frame(width: 16)
-
                             AIPageContextComposerView(
                                 appModel: appModel,
                                 tabModel: model,
@@ -193,8 +172,18 @@ struct GlobalAssistantDock: View {
                         }
                         .fixedSize(horizontal: false, vertical: true)
                     }
+                    Divider()
+                    if let entrySession = isHanaPanel ? hanaHost.plannerSession : thirdPartyHost.plannerSession {
+                        AssistantPlannerEntryBar(
+                            session: entrySession,
+                            refreshToken: isHanaPanel
+                                ? "hana|\(hanaHost.isBridgeReady)"
+                                : "\(thirdPartyHost.currentService?.id ?? "")|\(thirdPartyHost.isLoading)",
+                            onManual: { startManualAssistantHandoff(entrySession, isHana: isHanaPanel) }
+                        )
+                    }
                 }
-                .frame(width: panelWidth + 16)
+                .frame(width: panelWidth)
                 .frame(maxHeight: .infinity)
             } else {
                 Color.clear
@@ -205,6 +194,10 @@ struct GlobalAssistantDock: View {
         }
         .frame(width: outerWidth)
         .frame(maxHeight: .infinity)
+        .background(palette.cardColor)
+        .overlay(alignment: .leading) {
+            if open { Rectangle().fill(palette.borderColor).frame(width: 1) }
+        }
         .allowsHitTesting(open)
         .accessibilityHidden(!open)
         .onChange(of: hanaHost.isPanelOpen) { isOpen in

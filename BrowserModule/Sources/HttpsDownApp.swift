@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 /// Holds external http(s) addresses (command line / OS URL event) until the main model exists, then hands them over
-/// once. Normal tabs only: no private mode. `open -n` is not needed (and would start a second process on the same store).
+/// once. Normal tabs only: --incognito is ignored; the host forwards duplicate launches to its existing process.
 @MainActor
 final class ExternalURLCoordinator {
     static let shared = ExternalURLCoordinator()
@@ -12,13 +12,13 @@ final class ExternalURLCoordinator {
     private var launchArgumentURLs: Set<String> = []
     private var launchWindowEnd = Date.distantPast
     /// Set once by an unsupported private-mode flag in the launch arguments and kept for the whole process: the OS URL
-    /// event of that same launch (`open -a APP URL --args --incognito`) can arrive well after the alert, so it is never
+    /// event of that same launch (`open -a APP URL --args --private`) can arrive well after the alert, so it is never
     /// time-limited. Only a new process (normal launch without the flag) opens external URLs again.
     private var externalLaunchRejected = false
     /// Name of the refused flag until the alert has been shown (always one of `unsupportedFlags`, never a URL).
     private var rejectedFlagToAnnounce: String?
 
-    private static let unsupportedFlags: Set<String> = ["--incognito", "-incognito", "--private", "-private", "--inprivate"]
+    private static let unsupportedFlags: Set<String> = ["--private", "-private", "--inprivate"]
     private static let maxPending = 10
     private static let maxScannedPerCall = 64
     /// Cold-launch dedup window: a URL event for an address that also came in as an argument is skipped only inside it.
@@ -40,7 +40,7 @@ final class ExternalURLCoordinator {
     func ingestLaunchArguments(_ args: [String]) {
         launchWindowEnd = Date().addingTimeInterval(Self.coldLaunchWindow)
         let rest = args.dropFirst()
-        // `--incognito` and `--incognito=…` alike (the part before `=` is compared; the alert shows only that fixed name).
+        // `--private` and `--private=…` alike (the part before `=` is compared; the alert shows only that fixed name).
         let flagName = { (arg: String) -> String in String(arg.lowercased().split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first ?? "") }
         if let flag = rest.map(flagName).first(where: { Self.unsupportedFlags.contains($0) }) {
             externalLaunchRejected = true

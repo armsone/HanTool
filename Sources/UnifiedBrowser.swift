@@ -75,6 +75,12 @@ public final class UnifiedBrowserManager {
         HTDHostExport.shared.showTool(toolID)
     }
 
+    /// Reuse the existing shortcut action without changing its key detector.
+    public func showAssistantIfBrowserVisible() -> Bool {
+        guard isInitialized else { return false }
+        return HTDHostExport.shared.showAssistantIfBrowserVisible()
+    }
+
     /// 호스트에서 모듈 메인 브라우저 경로 열기를 요청한다.
     public func showBrowser(urls: [URL] = []) {
         guard ensureReady() else { return }

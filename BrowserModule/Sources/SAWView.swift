@@ -278,11 +278,15 @@ final class PlannerNativeResizeHandle: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
         setAccessibilityLabel("플레너 너비 조절")
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
         setAccessibilityLabel("플레너 너비 조절")
     }
 
@@ -295,8 +299,13 @@ final class PlannerNativeResizeHandle: NSView {
         addCursorRect(bounds, cursor: .resizeLeftRight)
     }
 
+    override var isOpaque: Bool { false }
+
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+        // The resize hit area is wider than its visible separator. Clear the
+        // native backing surface explicitly when SwiftUI recomposites it.
+        NSColor.clear.setFill()
+        dirtyRect.fill(using: .copy)
         NSColor.separatorColor.setFill()
         let separatorWidth: CGFloat = 1.0
         let separatorRect = NSRect(

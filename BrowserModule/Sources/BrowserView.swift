@@ -5,6 +5,8 @@ import WebKit
 /// "브라우저" tab: a compact tab strip above the active tab's page. Observes the AppModel, so a tab change always
 /// hands the pane the new active model; its video list is the "이 페이지의 영상" tab.
 struct BrowserView: View {
+    static let footerHeight: CGFloat = 28
+    static let headerHeight: CGFloat = 45 // Measured one-row Hana header at the 372pt opening width.
     @ObservedObject var appModel: AppModel
     @Environment(\.bkPalette) private var palette
 
@@ -342,7 +344,7 @@ struct BrowserPane: View {
             secondaryOverflowMenu
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .frame(height: BrowserView.headerHeight)
     }
 
     private var navigationGroup: some View {
@@ -699,6 +701,9 @@ struct BrowserPane: View {
         guard isPaneActive else { return }
         guard let request = appModel.addressFocusRequest, request.tabID == model.tabID else { return }
         guard NSApp.isActive, NSApp.keyWindow != nil else { return }
+        // A retained window can keep FocusState true after its native editor lost focus.
+        // Only an explicit browser-open request resets it before the existing deferred focus.
+        if request.isExplicit { addressFocused = false }
         DispatchQueue.main.async {
             guard isPaneActive else { return }
             guard NSApp.isActive, let window = NSApp.keyWindow else { return }
@@ -1094,7 +1099,7 @@ struct BrowserPane: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .frame(height: BrowserView.footerHeight)
     }
 
     private var pageStatusHelp: String {

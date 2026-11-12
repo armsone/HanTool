@@ -6,6 +6,7 @@ struct HierarchicalSidebarView: View {
     @ObservedObject var navModel: UnifiedNavigationModel
     var onRequestDownloadInput: () -> Void
     var isCompact: Bool
+    var onToggleSidebar: (() -> Void)?
     @ObservedObject private var workspace: SAWWorkspace
     @Environment(\.bkPalette) private var palette
     @ObservedObject private var audioController = PageAudioController.shared
@@ -47,17 +48,34 @@ struct HierarchicalSidebarView: View {
         appModel: AppModel,
         navModel: UnifiedNavigationModel,
         onRequestDownloadInput: @escaping () -> Void,
-        isCompact: Bool = false
+        isCompact: Bool = false,
+        onToggleSidebar: (() -> Void)? = nil
     ) {
         self.appModel = appModel
         self.navModel = navModel
         self.onRequestDownloadInput = onRequestDownloadInput
         self.isCompact = isCompact
+        self.onToggleSidebar = onToggleSidebar
         self._workspace = ObservedObject(wrappedValue: appModel.sawWorkspace)
     }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            if let onToggleSidebar {
+                HStack(spacing: 0) {
+                    Button(action: onToggleSidebar) {
+                        Image(systemName: "sidebar.left")
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isCompact ? "사이드바 펼치기" : "사이드바 접기")
+                    .help(isCompact ? "사이드바 펼치기" : "사이드바 접기")
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: BrowserView.headerHeight)
+                Divider()
+            }
             if isCompact {
                 compactRailBody
             } else {
@@ -123,17 +141,7 @@ struct HierarchicalSidebarView: View {
                 .padding(.horizontal, 8)
             }
 
-            Divider()
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-
-            VStack(spacing: 3) {
-                ForEach(Self.bottomDestinations) { dest in
-                    destinationNode(dest)
-                }
-            }
-            .padding(.bottom, 12)
-            .padding(.horizontal, 8)
+            helpFooter
         }
         .frame(minWidth: 200, maxWidth: 260)
     }
@@ -150,19 +158,33 @@ struct HierarchicalSidebarView: View {
                 .padding(.horizontal, 4)
             }
 
-            Divider()
-                .padding(.horizontal, 6)
-                .padding(.vertical, 6)
-
-            VStack(spacing: 6) {
-                ForEach(Self.bottomDestinations) { dest in
-                    compactDestinationItem(dest)
-                }
-            }
-            .padding(.bottom, 12)
-            .padding(.horizontal, 4)
+            helpFooter
         }
         .frame(minWidth: 55, maxWidth: 68)
+    }
+
+    private var helpFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Button {
+                navModel.navigateTo(destination: .help, appModel: appModel,
+                    selectTool: selectTool, clearTool: clearHostedTool)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: MainNavDestination.help.iconName)
+                    if !isCompact { Text(MainNavDestination.help.rawValue) }
+                    if !isCompact { Spacer(minLength: 0) }
+                }
+                .font(.caption)
+                .foregroundColor(palette.textColor)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity)
+                .frame(height: BrowserView.footerHeight)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(MainNavDestination.help.rawValue)
+        }
     }
 
     @ViewBuilder

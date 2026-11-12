@@ -50,8 +50,8 @@ fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self, let root = self.window?.contentView else { return }
                 if let splitView = self.findFirstVerticalSplitView(in: root) {
-                    if splitView.dividerStyle != .thick {
-                        splitView.dividerStyle = .thick
+                    if splitView.dividerStyle != .thin {
+                        splitView.dividerStyle = .thin
                         splitView.needsLayout = true
                     }
                     if self.observedSplit !== splitView {
@@ -201,17 +201,20 @@ public struct MainView: View {
         HSplitView {
             HierarchicalSidebarView(appModel: appModel, navModel: navModel, onRequestDownloadInput: {
                 appModel.requestDownloadInputFocus()
-            }, isCompact: !isExpanded)
+            }, isCompact: !isExpanded, onToggleSidebar: {
+                columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+            })
             .frame(minWidth: isExpanded ? 200 : 55,
                    idealWidth: isExpanded ? 220 : 60,
                    maxWidth: isExpanded ? 260 : 68,
                    maxHeight: .infinity)
             .clipped()
 
-            detailContentView
-                .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            GlobalAssistantDock(appModel: appModel)
+            HStack(alignment: .top, spacing: 0) {
+                detailContentView
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                GlobalAssistantDock(appModel: appModel)
+            }
         }
         .frame(minWidth: 860, idealWidth: 1120, maxWidth: .infinity,
                minHeight: 560, idealHeight: 760, maxHeight: .infinity)
@@ -228,15 +231,6 @@ public struct MainView: View {
         )
         .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .help(columnVisibility == .detailOnly ? "사이드바 펼치기" : "사이드바 접기")
-                .accessibilityLabel(columnVisibility == .detailOnly ? "사이드바 펼치기" : "사이드바 접기")
-            }
             if #available(macOS 26.0, *) {
                 ToolbarItem(placement: .primaryAction) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
@@ -373,12 +367,14 @@ public struct MainView: View {
 
     private var detailContentView: some View {
         HStack(spacing: 0) {
+            #if !HTT_HOST
             if columnVisibility == .detailOnly {
                 CompactSidebarRail(appModel: appModel, navModel: navModel, expand: {
                     columnVisibility = .all
                 })
                 Divider()
             }
+            #endif
             GeometryReader { proxy in
             VStack(spacing: 0) {
                 if navModel.destination == .downloads {

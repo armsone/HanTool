@@ -5,6 +5,62 @@ import HTTHTDCore
 import ServiceManagement
 import SwiftUI
 
+private final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+private struct MenuBarNetworkRateView: View {
+    @ObservedObject private var monitor = NetworkRateMonitor.shared
+
+    var body: some View {
+        let upload = NetworkRateMonitor.formatRate(monitor.uploadRate)
+        let download = NetworkRateMonitor.formatRate(monitor.downloadRate)
+
+        VStack(alignment: .leading, spacing: 1) {
+            rateRow(
+                color: .red,
+                rate: upload,
+                label: "업로드"
+            )
+            rateRow(
+                color: .blue,
+                rate: download,
+                label: "다운로드"
+            )
+        }
+        .frame(width: 68, height: 22, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "Mac 이더넷 및 Wi-Fi 전체 네트워크 속도: 업로드 \(upload.value) \(upload.unit), 다운로드 \(download.value) \(download.unit)"
+        )
+    }
+
+    private func rateRow(color: Color, rate: (value: String, unit: String), label: String) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 4.5, height: 4.5)
+                .accessibilityHidden(true)
+
+            Text(rate.value)
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .monospacedDigit()
+                .foregroundColor(.primary)
+                .lineLimit(1)
+                .frame(width: 31, alignment: .trailing)
+
+            Text(rate.unit)
+                .font(.system(size: 7.5, weight: .regular, design: .monospaced))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .frame(width: 23, alignment: .leading)
+        }
+        .accessibilityLabel("\(label): \(rate.value) \(rate.unit)")
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var overlay: OverlayPanelController!
@@ -15,9 +71,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var mailHotKey: GlobalHotKey?
     private var browserHotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
+    private var networkRateStatusItem: NSStatusItem?
+    private var mainStatusMenu: NSMenu?
+    private var networkRateMenu: NSMenu?
     private var networkRateCancellables = Set<AnyCancellable>()
+    private var isStatusMenuOpen = false
+    private var explicitAppTerminationRequested = false
+
+    private var duplicateLaunchTarget: NSRunningApplication?
+    private var duplicateLaunchExit: DispatchWorkItem?
+    private var launchFinished = false
+    private var duplicateURLForwarded = false
+    private var duplicateForwardedURLs: Set<String> = []
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let ownURL = Bundle.main.bundleURL.standardizedFileURL.resolvingSymlinksInPath()
+        duplicateLaunchTarget = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated &&
+                $0.bundleURL?.standardizedFileURL.resolvingSymlinksInPath() == ownURL }
+            .min { $0.processIdentifier < $1.processIdentifier }
+    }
+
+    private func finishDuplicateLaunch() {
+        duplicateLaunchExit?.cancel()
+        explicitAppTerminationRequested = true
+        NSApp.terminate(nil)
+    }
+
+    private func forwardDuplicateURLs(_ urls: [URL]) {
+        guard let target = duplicateLaunchTarget, !target.isTerminated else { return }
+        let valid = EmbeddedBrowser.forwardableWebURLs(urls).filter {
+            !duplicateForwardedURLs.contains($0.absoluteString)
+        }
+        let files = urls.filter { $0.isFileURL && !duplicateForwardedURLs.contains($0.absoluteString) }.prefix(1)
+        guard !valid.isEmpty || !files.isEmpty else { return }
+        do {
+            for url in valid {
+                let event = NSAppleEventDescriptor(eventClass: AEEventClass(kInternetEventClass),
+                    eventID: AEEventID(kAEGetURL),
+                    targetDescriptor: NSAppleEventDescriptor(processIdentifier: target.processIdentifier),
+                    returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+                event.setParam(NSAppleEventDescriptor(string: url.absoluteString), forKeyword: AEKeyword(keyDirectObject))
+                _ = try event.sendEvent(options: .waitForReply, timeout: 5)
+                duplicateForwardedURLs.insert(url.absoluteString)
+            }
+            if !files.isEmpty {
+                let event = NSAppleEventDescriptor(eventClass: AEEventClass(kCoreEventClass),
+                    eventID: AEEventID(kAEOpenDocuments),
+                    targetDescriptor: NSAppleEventDescriptor(processIdentifier: target.processIdentifier),
+                    returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+                let items = NSAppleEventDescriptor.list()
+                for (index, url) in files.enumerated() {
+                    items.insert(NSAppleEventDescriptor(fileURL: url), at: index + 1)
+                }
+                event.setParam(items, forKeyword: AEKeyword(keyDirectObject))
+                _ = try event.sendEvent(options: .waitForReply, timeout: 5)
+                for url in files { duplicateForwardedURLs.insert(url.absoluteString) }
+            }
+            duplicateURLForwarded = true
+        } catch {
+            // No URL or account data in diagnostics.
+            NSLog("HanTool URL handoff failed status=%ld", (error as NSError).code)
+        }
+        if launchFinished { finishDuplicateLaunch() }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        launchFinished = true
+        if let target = duplicateLaunchTarget {
+            let argumentURLs = CommandLine.arguments.dropFirst().compactMap(URL.init(string:))
+            if !argumentURLs.isEmpty { forwardDuplicateURLs(argumentURLs) }
+            if duplicateURLForwarded { finishDuplicateLaunch(); return }
+            target.activate(options: [])
+            // The initial OS URL event can follow didFinishLaunching. The
+            // secondary stays store/UI-free and exits as soon as it is forwarded.
+            let exit = DispatchWorkItem { [weak self] in self?.finishDuplicateLaunch() }
+            duplicateLaunchExit = exit
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: exit)
+            return
+        }
+
         BundledFonts.registerIfNeeded()
         // 원화 환산 환율(번역과 별도): 저장 환율을 읽고, 연결 상태·앱 활성화를 지켜보며 뒤에서 갱신한다.
         ExchangeRateStore.shared.start()
@@ -50,6 +184,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MailWindowCoordinator.shared.cancelCaptureWork = { [weak self] in self?.viewModel.windowWillHide() }
 
         buildStatusItem()
+        // 서버 현황(CCMB) 모듈 초기화 및 활성화 시 시작 (한툴 버튼 좌측에 밀착 생성)
+        CCMBIntegration.shared.setup(updater: updater, loginItem: loginItem)
+        CCMBIntegration.shared.startIfEnabled()
+        buildNetworkRateStatusItem()
 
         let hotKey = GlobalHotKey { [weak self] in self?.showOverlay() }
         hotKey.register()
@@ -70,7 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 브라우저 열기 전역 단축키(⇧⌃⌥⌘B). 다른 앱에서도 HTT 브라우저를 열거나 이미 열려 있으면 앞으로 가져온다.
         // 다른 앱과 키가 겹치면 등록되지 않으며, 그 사실을 상태 메뉴와 경고에 표시한다(다른 앱 설정은 바꾸지 않는다).
         let browserHotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_B), id: GlobalHotKey.browserHotKeyID,
-                                         display: GlobalHotKey.browserDisplayString) {
+                                         display: GlobalHotKey.browserDisplayString) { [weak self] in
+            self?.showDockIconForBrowser()
             EmbeddedBrowser.open()
         }
         browserHotKey.register()
@@ -92,23 +231,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         DockVisibilityStore.shared.applyInitial()
         loginItem.applyInitialDefaultIfNeeded()
+        loginItem.refreshMenuStatus()
         WakeLaunchManager().applyInitialDefaultIfNeeded()
         updater.start()
-        // 서버 현황(CCMB) 모듈 초기화 및 활성화 시 시작
-        CCMBIntegration.shared.setup(updater: updater, loginItem: loginItem)
-        CCMBIntegration.shared.startIfEnabled()
         // 브라우저 번역 엔진 연결(허용했거나 브라우저 도우미가 실행한 경우에만 연다)
         BrowserIntegration.shared.applicationDidLaunch()
         writeDiagnostics()
 
-        // 모든 실행 경로(콜드/수동/로그인/브라우저)에서 화면 번역 창은 자동으로 띄우지 않는다.
-        // 메뉴·단축키에서만 화면 번역 창을 연다. Dock/Finder 재실행도 숨김 상태를 유지한다.
+        // 콜드 유저 론칭(Dock/Finder/수동 실행): 브라우저 메인 창을 열고 Dock 아이콘을 표시한다.
+        // 로그인 항목·잠자기 헬퍼·브라우저 도우미 백그라운드 시작 시에는 메뉴 막대 전용으로 유지한다.
+        if !isBackgroundOrLoginLaunch(notification: notification) {
+            showDockIconForBrowser()
+            MailWindowCoordinator.shared.openBrowserMain()
+        }
     }
 
     /// 업데이트 설치가 예약된 상태에서 HTT 안의 브라우저 다운로드나 작업이 진행 중이면 종료를 멈춘다.
     /// Sparkle은 앱이 종료되는 순간(applicationWillTerminate 이후) 설치를 시작하므로, 그 전인 이 단계에서만 막을 수 있다.
     /// 진행 중인 작업은 자동으로 종료하지 않으며, 작업이 끝나면 정상 종료·설치된다.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let explicit = explicitAppTerminationRequested
+        explicitAppTerminationRequested = false
+        if isSystemTerminationRequest() { return .terminateNow }
+        guard explicit else {
+            closeBrowserWindows()
+            return .terminateCancel
+        }
         guard updater.hasPendingInstall, EmbeddedBrowser.isEmbeddedRunning() else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText = "한툴 브라우저 작업을 먼저 완료해 주세요"
@@ -123,21 +271,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let target = duplicateLaunchTarget {
+            target.activate(options: [])
+            finishDuplicateLaunch()
+            return false
+        }
+        let mouseLoc = NSEvent.mouseLocation
+        let screenMaxY = NSScreen.main?.visibleFrame.maxY ?? 0
+        let inMenuBar = mouseLoc.y >= screenMaxY
+
+        // 메뉴바 버튼을 클릭 중이거나 메뉴가 열려 있는 중에는 브라우저를 앞으로 띄워 메뉴를 닫지 않는다.
+        if isStatusMenuOpen || statusItem?.button?.isHighlighted == true || networkRateStatusItem?.button?.isHighlighted == true {
+            return false
+        }
+        if inMenuBar {
+            return false
+        }
+        if let event = NSApp.currentEvent, (event.type == .leftMouseDown || event.type == .leftMouseUp) {
+            if let window = event.window, window.className.contains("StatusBar") {
+                return false
+            }
+        }
+        showDockIconForBrowser()
         MailWindowCoordinator.shared.openBrowserMain()
         return true
     }
 
     /// .eml·이미지 파일 열기(Finder '다음으로 열기', Dock 아이콘으로 끌어놓기)
     func application(_ application: NSApplication, open urls: [URL]) {
+        if duplicateLaunchTarget != nil {
+            forwardDuplicateURLs(urls)
+            return
+        }
         // http/https 주소는 HTT 안의 브라우저로 넘기고, 파일 열기는 기존 동작을 그대로 유지한다.
         let webURLs = EmbeddedBrowser.forwardableWebURLs(urls)
-        if !webURLs.isEmpty { EmbeddedBrowser.open(urls: webURLs) }
+        if !webURLs.isEmpty {
+            showDockIconForBrowser()
+            EmbeddedBrowser.open(urls: webURLs)
+        }
         guard let url = urls.first(where: { $0.isFileURL }) else { return }
         AppModel.shared.open(url: url)
         AppModel.shared.showMainWindow()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if duplicateLaunchTarget != nil {
+            duplicateLaunchExit?.cancel()
+            return
+        }
         BrowserDoubleTapShortcut.shared.stop()
         MailWindowCoordinator.shared.prepareForTermination()
         InputMateCoordinator.shared.stop()
@@ -213,58 +394,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let button = item.button {
             // 메뉴 막대 아이콘은 SF Symbol 대신 기존 디자인된 앱 아이콘을 그대로 축소해 쓴다(원본 색 유지).
             button.image = menuBarIconImage()
+            button.imagePosition = .imageOnly
             button.toolTip = "한툴 (화면 \(GlobalHotKey.displayString) · 메일 \(GlobalHotKey.mailDisplayString) · 브라우저 \(GlobalHotKey.browserDisplayString))"
         }
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
         item.menu = menu
+        mainStatusMenu = menu
         statusItem = item
+    }
+
+    private func buildNetworkRateStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: 68)
+        if let button = item.button {
+            button.imagePosition = .noImage
+            button.title = ""
+            let hosting = PassthroughHostingView(rootView: MenuBarNetworkRateView())
+            hosting.frame = NSRect(x: 0, y: 0, width: 68, height: 22)
+            hosting.autoresizingMask = [.width, .height]
+            button.addSubview(hosting)
+            button.toolTip = "네트워크 전송률 (Mac 이더넷/Wi-Fi 전체 합산, VPN 제외)"
+        }
+        let rateMenu = NSMenu()
+        rateMenu.delegate = self
+        rateMenu.autoenablesItems = false
+        item.menu = rateMenu
+        networkRateMenu = rateMenu
+        networkRateStatusItem = item
 
         NetworkRateMonitor.shared.start()
         setupNetworkRateObservation()
+        updateNetworkRateVisibility(location: NetworkRateDisplayStore.shared.location)
     }
 
     private func setupNetworkRateObservation() {
-        Publishers.CombineLatest3(
-            NetworkRateDisplayStore.shared.$location,
-            NetworkRateMonitor.shared.$uploadRate,
-            NetworkRateMonitor.shared.$downloadRate
-        )
-        .receive(on: DispatchQueue.main)
-        .sink { [weak self] location, upload, download in
-            self?.updateStatusItemRate(location: location, upload: upload, download: download)
-        }
-        .store(in: &networkRateCancellables)
+        NetworkRateDisplayStore.shared.$location
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] location in
+                self?.updateNetworkRateVisibility(location: location)
+            }
+            .store(in: &networkRateCancellables)
     }
 
-    private func updateStatusItemRate(location: NetworkRateDisplayLocation, upload: Double, download: Double) {
-        guard let item = statusItem, let button = item.button else { return }
+    private func updateNetworkRateVisibility(location: NetworkRateDisplayLocation) {
+        guard let item = networkRateStatusItem else { return }
         switch location {
         case .menuBar:
-            item.length = NSStatusItem.variableLength
-            button.imagePosition = .imageLeading
-            let up = NetworkRateMonitor.formatRate(upload)
-            let down = NetworkRateMonitor.formatRate(download)
-            let text = "▲\(up.value)\(up.unit) ▼\(down.value)\(down.unit)"
-            let attr = NSAttributedString(
-                string: text,
-                attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-                ]
-            )
-            button.attributedTitle = attr
+            item.length = 68
+            item.isVisible = true
         case .appTop:
-            item.length = NSStatusItem.squareLength
-            button.imagePosition = .imageOnly
-            button.attributedTitle = NSAttributedString(string: "")
-            button.title = ""
+            item.length = 0
+            item.isVisible = false
+        }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === mainStatusMenu || menu === networkRateMenu {
+            isStatusMenuOpen = true
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === mainStatusMenu || menu === networkRateMenu {
+            isStatusMenuOpen = false
         }
     }
 
     /// 메뉴를 열 때마다 현재 상태(창 표시, 주 버튼, 로그인 항목, 업데이트)로 다시 만든다.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === statusItem?.menu else { return }
+        guard menu === mainStatusMenu || menu === networkRateMenu else { return }
+        loginItem.refreshMenuStatus()
         menu.removeAllItems()
 
         menu.addItem(headerItem())
@@ -307,6 +507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let browserItem = item("브라우저 열기", #selector(openEmbeddedBrowser), symbol: "safari")
         applyKeyEquivalent(browserItem, GlobalHotKey.browserKeyEquivalent, GlobalHotKey.browserModifierMask)
         menu.addItem(browserItem)
+        menu.addItem(item("기본 브라우저로 설정…", #selector(setAsDefaultBrowser), symbol: "globe"))
 
         menu.addItem(.separator())
 
@@ -338,7 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(warning)
         }
         menu.addItem(item("업데이트 확인…", #selector(checkForUpdates), symbol: "arrow.down.circle"))
-        menu.addItem(item("한툴 종료", #selector(NSApplication.terminate(_:)), target: NSApp, symbol: "power"))
+        menu.addItem(item("한툴 종료", #selector(terminateHanTool(_:)), symbol: "power"))
     }
 
     /// 앱 아이콘·이름·버전을 보여주는 비활성 머리글 행
@@ -363,7 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 실패·조치 필요 상태만 눈에 띄게 올린다(정상일 때는 표시하지 않는다).
     private func actionNeededWarningItem() -> NSMenuItem? {
         let hotKeyFailed = hotKey?.isRegistered == false || mailHotKey?.isRegistered == false || browserHotKey?.isRegistered == false
-        let loginNeedsApproval = loginItem.status == .requiresApproval
+        let loginNeedsApproval = loginItem.menuStatus == .requiresApproval
         let inputNeedsAccessibility = InputMateCoordinator.shared.settings.preferences.isEnabled &&
             InputMateCoordinator.shared.appState.serviceStatus == .needsAccessibility
         guard hotKeyFailed || loginNeedsApproval || inputNeedsAccessibility else { return nil }
@@ -388,8 +589,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         submenu.addItem(info("메일 번역 단축키: \(mailHotKey?.statusDescription ?? "없음")"))
         submenu.addItem(info("브라우저 열기 단축키: \(browserHotKey?.statusDescription ?? "없음")"))
         submenu.addItem(.separator())
-        submenu.addItem(info("로그인 항목: \(loginItem.lastError ?? loginItem.statusDescription)"))
-        if loginItem.status == .requiresApproval {
+        submenu.addItem(info("로그인 항목: \(loginItem.lastError ?? loginItem.menuStatusDescription)"))
+        if loginItem.menuStatus == .requiresApproval {
             submenu.addItem(item("로그인 항목 설정 열기…", #selector(openLoginItemsSettings), symbol: nil))
         }
         submenu.addItem(.separator())
@@ -467,7 +668,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // 아래 메뉴 동작은 모두 HTT 메인 창(하나뿐인 일반 창)의 해당 섹션을 연다. 별도 창을 만들지 않는다.
 
+    private func isBackgroundOrLoginLaunch(notification: Notification) -> Bool {
+        if BrowserIntegration.shared.launchedByBrowser {
+            return true
+        }
+        let args = CommandLine.arguments
+        if args.contains("-login") || args.contains("--login") ||
+           args.contains("-background") || args.contains("--background") {
+            return true
+        }
+        if let isDefault = (notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool) ??
+                           ((notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? NSNumber)?.boolValue) {
+            if !isDefault {
+                return true
+            }
+        }
+        if let event = NSAppleEventManager.shared().currentAppleEvent {
+            let lginKeyword = AEKeyword(0x6c67696e)
+            if event.attributeDescriptor(forKeyword: lginKeyword) != nil ||
+               event.paramDescriptor(forKeyword: lginKeyword) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func showDockIconForBrowser() {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        applyBundleIcon()
+    }
+
     @objc private func showHome() {
+        showDockIconForBrowser()
         MailWindowCoordinator.shared.openBrowserMain()
     }
 
@@ -509,6 +743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openEmbeddedBrowser() {
+        showDockIconForBrowser()
         EmbeddedBrowser.open()
     }
 
@@ -586,6 +821,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Cmd+Q is a browser-window command, even when no browser window is open.
+    @objc private func handleAppQuit(_ sender: Any?) {
+        closeBrowserWindows()
+    }
+
+    private func closeBrowserWindows() {
+        for window in NSApp.windows where window.isVisible &&
+            MailWindowCoordinator.shared.isWorkbenchWindow(window) {
+            window.performClose(nil)
+        }
+    }
+
+    /// Only the explicit status-menu action requests a full application quit.
+    @objc private func terminateHanTool(_ sender: Any?) {
+        explicitAppTerminationRequested = true
+        NSApp.terminate(sender)
+    }
+
+    private func isSystemTerminationRequest() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == AEEventID(kAEQuitApplication),
+              let reason = event.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue else {
+            return false
+        }
+        return [OSType(kAEQuitAll), OSType(kAELogOut), OSType(kAEReallyLogOut),
+                OSType(kAEShutDown), OSType(kAERestart)].contains(reason)
+    }
+
+    @objc private func setAsDefaultBrowser() {
+        requestDefaultBrowser(schemes: ["https", "http"])
+    }
+
+    private func requestDefaultBrowser(schemes: [String]) {
+        guard let scheme = schemes.first else { return }
+        NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL,
+                                                 toOpenURLsWithScheme: scheme) { [weak self] error in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let error {
+                    if (error as NSError).code == NSUserCancelledError { return }
+                    let alert = NSAlert()
+                    alert.messageText = "기본 브라우저 설정을 완료하지 못했습니다"
+                    alert.informativeText = error.localizedDescription
+                    alert.runModal()
+                    return
+                }
+                self.requestDefaultBrowser(schemes: Array(schemes.dropFirst()))
+            }
+        }
+    }
+
     @objc private func openLoginItemsSettings() {
         loginItem.openSystemSettings()
     }
@@ -650,7 +936,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guide.target = self
         appMenu.addItem(guide)
         appMenu.addItem(.separator())
-        appMenu.addItem(NSMenuItem(title: "한툴 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let quitItem = NSMenuItem(title: "브라우저 창 닫기", action: #selector(handleAppQuit(_:)), keyEquivalent: "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
