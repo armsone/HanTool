@@ -12,6 +12,7 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
     case macManagement = "Mac 관리"
     case usbDrives = "USB 드라이브"
     case server = "서버 현황"
+    case clipboardHistory = "클립보드"
     case settings = "설정"
     case help = "사용 안내"
 
@@ -27,6 +28,7 @@ public enum MainNavDestination: String, CaseIterable, Identifiable {
         case .macManagement: return "desktopcomputer"
         case .usbDrives: return "externaldrive"
         case .server: return "chart.bar.xaxis"
+        case .clipboardHistory: return "doc.on.clipboard"
         case .settings: return "gearshape"
         case .help: return "questionmark.circle"
         }
@@ -253,6 +255,14 @@ public enum ToolCatalog {
             category: .macManagement,
             hostedToolID: "cleanUSB"
         ),
+        ToolCatalogItem(
+            id: "clipboardHistory",
+            title: "클립보드",
+            description: "복사한 텍스트와 이미지 기록을 확인하고 다시 사용합니다",
+            iconName: "doc.on.clipboard",
+            category: .macManagement,
+            hostedToolID: "clipboardHistory"
+        ),
 
         // 웹 도구
         ToolCatalogItem(
@@ -380,6 +390,10 @@ public final class UnifiedNavigationModel: ObservableObject {
                 destination = .usbDrives
                 settingsOwner = nil
                 activeSettingsLeaf = nil
+            case "clipboardHistory":
+                destination = .clipboardHistory
+                settingsOwner = nil
+                activeSettingsLeaf = nil
             default:
                 destination = .browser
                 settingsOwner = nil
@@ -491,6 +505,11 @@ public final class UnifiedNavigationModel: ObservableObject {
             settingsOwner = nil
             activeSettingsLeaf = nil
             selectTool("serverStatus")
+
+        case .clipboardHistory:
+            settingsOwner = nil
+            activeSettingsLeaf = nil
+            selectTool("clipboardHistory")
 
         case .settings:
             applySettingsTab(settingsTab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
@@ -654,6 +673,8 @@ public final class UnifiedNavigationModel: ObservableObject {
             currentOwner = .server
         case .usbDrives:
             currentOwner = .macManagement
+        case .clipboardHistory:
+            currentOwner = .browser
         case .settings:
             currentOwner = self.settingsOwner ?? .browser
         case .help:
@@ -719,6 +740,8 @@ public final class UnifiedNavigationModel: ObservableObject {
             selectTool("cleanUSB")
         case .server:
             selectTool("serverStatus")
+        case .clipboardHistory:
+            selectTool("clipboardHistory")
         case .help:
             selectTool("help")
         case .settings:
@@ -807,6 +830,13 @@ public final class UnifiedNavigationModel: ObservableObject {
         } else if let toolID = item.hostedToolID {
             selectTool(toolID)
         }
+    }
+
+    public func openSpeedTest(appModel: AppModel, clearTool: () -> Void) {
+        clearTool()
+        destination = .browser
+        appModel.selectedTab = .browser
+        isSpeedTestPresented = true
     }
 
     public func backToToolsHub(clearTool: () -> Void) {

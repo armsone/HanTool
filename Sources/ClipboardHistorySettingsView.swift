@@ -1,10 +1,11 @@
 import SwiftUI
 import AppKit
 
-/// 한툴 환경설정 내 "클립보드 기록" 설정 화면.
+/// 한툴 환경설정 내 "클립보드" 설정 화면.
 public struct ClipboardHistorySettingsView: View {
     @ObservedObject private var store = ClipboardHistoryStore.shared
     @ObservedObject private var shortcut = ClipboardHistoryShortcut.shared
+    @ObservedObject private var prefs = ClipboardPanelPreferences.shared
     @ObservedObject private var appearance = HTTAppearanceStore.shared
     @Environment(\.colorScheme) private var systemColorScheme
 
@@ -31,6 +32,11 @@ public struct ClipboardHistorySettingsView: View {
 
                 Divider()
 
+                // 테마 및 배경 불투명도 설정
+                themeAndAppearanceSection
+
+                Divider()
+
                 // 저장 한도 및 보관 기간 설정
                 retentionSettingsSection
 
@@ -45,7 +51,7 @@ public struct ClipboardHistorySettingsView: View {
             .frame(maxWidth: 680, alignment: .leading)
         }
         .background(palette.bg)
-        .alert("클립보드 기록을 모두 삭제하시겠습니까?", isPresented: $showingClearConfirmation) {
+        .alert("클립보드를 모두 삭제하시겠습니까?", isPresented: $showingClearConfirmation) {
             Button("취소", role: .cancel) {}
             Button("모두 삭제", role: .destructive) {
                 store.clearAllHistory()
@@ -71,7 +77,7 @@ public struct ClipboardHistorySettingsView: View {
     // MARK: - Header
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("클립보드 히스토리 설정")
+            Text("클립보드")
                 .font(.title2.weight(.bold))
                 .foregroundColor(palette.text)
 
@@ -141,6 +147,66 @@ public struct ClipboardHistorySettingsView: View {
             .background(palette.card)
             .cornerRadius(8)
         }
+    }
+
+    // MARK: - Theme & Appearance
+    private var themeAndAppearanceSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("테마 및 화면 표시")
+                .font(.headline)
+                .foregroundColor(palette.text)
+
+            // 테마 스타일 선택
+            VStack(alignment: .leading, spacing: 8) {
+                Text("배경 테마")
+                    .font(.subheadline)
+                    .foregroundColor(palette.text)
+
+                Picker("", selection: $prefs.useCustomColor) {
+                    Text("기본 앱 테마").tag(false)
+                    Text("사용자 지정 색상").tag(true)
+                }
+                .pickerStyle(.segmented)
+
+                if prefs.useCustomColor {
+                    HStack {
+                        Text("사용자 지정 색상 선택")
+                            .font(.subheadline)
+                            .foregroundColor(palette.text)
+                        Spacer()
+                        ColorPicker("", selection: Binding<Color>(
+                            get: { color(from: prefs.customColorHex) },
+                            set: { newColor in
+                                prefs.customColorHex = hexString(from: newColor)
+                            }
+                        ), supportsOpacity: false)
+                        .labelsHidden()
+                    }
+                    .padding(.top, 4)
+                }
+            }
+
+            // 불투명도 슬라이더 (10% ~ 100%)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("배경 불투명도")
+                        .font(.subheadline)
+                        .foregroundColor(palette.text)
+                    Spacer()
+                    Text("\(Int(round(prefs.opacity * 100)))%")
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundColor(palette.muted)
+                }
+                Slider(
+                    value: $prefs.opacity,
+                    in: 0.1...1.0,
+                    step: 0.05
+                )
+            }
+        }
+        .padding(14)
+        .background(palette.card)
+        .cornerRadius(8)
     }
 
     // MARK: - Retention Settings
@@ -331,6 +397,33 @@ public struct ClipboardHistorySettingsView: View {
     private func openAccessibilityPreferences() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func hexString(from color: Color) -> String {
+        if let nsColor = NSColor(color).usingColorSpace(.sRGB) {
+            let r = Int(round(nsColor.redComponent * 255))
+            let g = Int(round(nsColor.greenComponent * 255))
+            let b = Int(round(nsColor.blueComponent * 255))
+            return String(format: "#%02X%02X%02X", r, g, b)
+        }
+        return "#000000"
+    }
+
+    private func color(from hex: String) -> Color {
+        let cleanHex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard !cleanHex.isEmpty else { return palette.bg }
+        var int: UInt64 = 0
+        guard Scanner(string: cleanHex).scanHexInt64(&int) else { return palette.bg }
+        let r, g, b: Double
+        switch cleanHex.count {
+        case 6:
+            r = Double((int >> 16) & 0xFF) / 255.0
+            g = Double((int >> 8) & 0xFF) / 255.0
+            b = Double(int & 0xFF) / 255.0
+            return Color(.sRGB, red: r, green: g, blue: b, opacity: 1.0)
+        default:
+            return palette.bg
         }
     }
 }

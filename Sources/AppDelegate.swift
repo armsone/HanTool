@@ -427,17 +427,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hosting.autoresizingMask = [.width, .height]
             button.addSubview(hosting)
             button.toolTip = "네트워크 전송률 (Mac 이더넷/Wi-Fi 전체 합산, VPN 제외)"
+            button.target = self
+            button.action = #selector(handleNetworkRateClick(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         let rateMenu = NSMenu()
         rateMenu.delegate = self
         rateMenu.autoenablesItems = false
-        item.menu = rateMenu
         networkRateMenu = rateMenu
         networkRateStatusItem = item
 
         NetworkRateMonitor.shared.start()
         setupNetworkRateObservation()
         updateNetworkRateVisibility(location: NetworkRateDisplayStore.shared.location)
+    }
+
+    @objc private func handleNetworkRateClick(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || (event?.modifierFlags.contains(.control) == true) {
+            if let menu = networkRateMenu {
+                sender.isHighlighted = true
+                networkRateStatusItem?.popUpMenu(menu)
+                sender.isHighlighted = false
+            }
+        } else {
+            openSpeedTest()
+        }
+    }
+
+    @objc private func openSpeedTest() {
+        showDockIconForBrowser()
+        MailWindowCoordinator.shared.openBrowserMain()
+        let nav = UnifiedNavigationModel.shared
+        nav.openSpeedTest(
+            appModel: HTDHostExport.shared.appModel,
+            clearTool: HTDHostExport.shared.clearHostedTool
+        )
     }
 
     private func setupNetworkRateObservation() {
@@ -524,19 +549,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         // MARK: 입력 도우미
-        let isInputEnabled = InputMateCoordinator.shared.settings.preferences.isEnabled
-        let inputToggle = item(
-            isInputEnabled ? "입력 도우미 끄기" : "입력 도우미 켜기",
-            #selector(toggleInputMateEnabled),
-            symbol: isInputEnabled ? "keyboard" : "pause.circle"
-        )
-        menu.addItem(inputToggle)
+        menu.addItem(item("입력 도우미 설정", #selector(showInputSettings), symbol: "keyboard"))
 
         menu.addItem(.separator())
 
         // MARK: Mac 관리
+        menu.addItem(item("Mac 관리", #selector(showMacManagement), symbol: "desktopcomputer"))
         menu.addItem(item("USB 정리·추출", #selector(showCleanUSB), symbol: "externaldrive"))
-        menu.addItem(item("클립보드 히스토리", #selector(showClipboardHistory), symbol: "doc.on.clipboard"))
+        let clipboardItem = item("클립보드", #selector(showClipboardHistory), symbol: "doc.on.clipboard")
+        // 독립 전역 제스처이므로 keyEquivalent가 아닌 표시용 주석으로만 덧붙인다.
+        let tabStyle = NSMutableParagraphStyle()
+        tabStyle.tabStops = [NSTextTab(textAlignment: .right, location: 200)]
+        let label = NSMutableAttributedString(string: "클립보드\t", attributes: [.font: NSFont.menuFont(ofSize: 0), .paragraphStyle: tabStyle])
+        label.append(NSAttributedString(string: "⇧ + ⌘ 두 번", attributes: [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: tabStyle]))
+        clipboardItem.attributedTitle = label
+        menu.addItem(clipboardItem)
 
         menu.addItem(.separator())
 
@@ -814,6 +841,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func showClipboardHistory() {
+        // 상태 메뉴 클릭은 앱을 활성화하지 않으므로 패널 활성화 전에 원래 앱·창·입력위치를 캡처 (메뉴 열림 시점에는 AX 질의 없음)
+        ClipboardPasteCoordinator.shared.captureOriginTarget()
         ClipboardHistoryPanelController.shared.toggle()
     }
 
@@ -921,7 +950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(item("업데이트 확인…", #selector(checkForUpdates)))
         appMenu.addItem(.separator())
         appMenu.addItem(item("USB 정리·추출", #selector(showCleanUSB)))
-        appMenu.addItem(item("클립보드 히스토리", #selector(showClipboardHistory)))
+        appMenu.addItem(item("클립보드", #selector(showClipboardHistory)))
         appMenu.addItem(item("Mac 상태·정리 항목", #selector(showMacManagement)))
         let settings = NSMenuItem(title: "현재 메뉴 설정…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self

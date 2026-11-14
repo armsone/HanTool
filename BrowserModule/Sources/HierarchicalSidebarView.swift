@@ -33,12 +33,15 @@ struct HierarchicalSidebarView: View {
         .inputHelper,
         .macManagement,
         .usbDrives,
-        .server
+        .server,
+        .clipboardHistory
     ]
 
     private static let bottomDestinations: [MainNavDestination] = [
         .help
     ]
+
+    private var headerButtonSize: CGFloat { isCompact ? 24 : 28 }
 
     private var activeQueueCount: Int {
         appModel.jobs.filter { !$0.state.isTerminal || $0.state == .interrupted || $0.state == .selectionChanged }.count
@@ -65,14 +68,22 @@ struct HierarchicalSidebarView: View {
                 HStack(spacing: 0) {
                     Button(action: onToggleSidebar) {
                         Image(systemName: "sidebar.left")
-                            .frame(width: 28, height: 28)
+                            .frame(width: headerButtonSize, height: 28)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(isCompact ? "사이드바 펼치기" : "사이드바 접기")
                     .help(isCompact ? "사이드바 펼치기" : "사이드바 접기")
                     Spacer(minLength: 0)
+                    // 전체 펼침/접힘: 펼친 상태·접힌 레일 모두 같은 expansion state만 토글(사이드바 폭은 변경하지 않음)
+                    Button(action: toggleAllExpanded) {
+                        Image(systemName: allExpanded ? "minus" : "plus")
+                            .frame(width: headerButtonSize, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(allExpanded ? "모두 접기" : "모두 펼치기")
+                    .help(allExpanded ? "모두 접기" : "모두 펼치기")
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, isCompact ? 3 : 8)
                 .frame(height: BrowserView.headerHeight)
                 Divider()
             }
@@ -195,7 +206,28 @@ struct HierarchicalSidebarView: View {
         let isSettingsOwnerSelected = (navModel.destination == .settings && navModel.settingsOwner?.correspondingDestination == dest)
         let isDestSelected = isDestDirectSelected || isSettingsOwnerSelected
 
+        let hasChildren = isExpandable(dest)
+        let isExpanded = hasChildren && expandedDestinations.contains(dest)
+
         VStack(spacing: 3) {
+          HStack(spacing: 0) {
+            if hasChildren {
+                Button {
+                    toggleExpanded(dest)
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(palette.mutedColor)
+                        .frame(width: 10, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "접기" : "펼치기")
+                .accessibilityLabel("\(dest.rawValue) \(isExpanded ? "접기" : "펼치기")")
+                .accessibilityAddTraits(.isButton)
+            } else {
+                Spacer().frame(width: 10)
+            }
             Button {
                 navModel.navigateTo(
                     destination: dest,
@@ -210,12 +242,12 @@ struct HierarchicalSidebarView: View {
                 ZStack(alignment: .topTrailing) {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(isDestSelected ? palette.accentSoftColor : Color.clear)
-                        .frame(width: 44, height: 40)
+                        .frame(width: 34, height: 40)
 
                     Image(systemName: dest.iconName)
                         .font(.system(size: 15))
                         .foregroundColor(isDestSelected ? palette.accentColor : palette.textColor)
-                        .frame(width: 44, height: 40)
+                        .frame(width: 34, height: 40)
 
                     if dest == .downloads && activeQueueCount > 0 {
                         Text("\(activeQueueCount)")
@@ -227,143 +259,84 @@ struct HierarchicalSidebarView: View {
                             .offset(x: -2, y: 2)
                     }
                 }
-                .frame(width: 44, height: 40)
+                .frame(width: 34, height: 40)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help(dest == .downloads && activeQueueCount > 0 ? "\(dest.rawValue) (\(activeQueueCount)개 진행 중)" : dest.rawValue)
             .accessibilityLabel(dest == .downloads && activeQueueCount > 0 ? "\(dest.rawValue), 진행 중 \(activeQueueCount)개" : dest.rawValue)
             .accessibilityAddTraits(isDestSelected ? [.isButton, .isSelected] : [.isButton])
+          }
 
-            if dest == .browser {
-                compactBrowserChildren
-            } else if dest == .planner {
-                compactPlannerChildren
+            if isExpanded {
+                compactDestinationChildren(dest)
             }
         }
     }
 
+    /// 접힌 레일의 하위 항목: 펼친 레이아웃과 같은 expansion state/같은 navModel 동작을 아이콘+툴팁으로 표시한다.
     @ViewBuilder
-    private var compactBrowserChildren: some View {
-        VStack(spacing: 4) {
-            ForEach(appModel.tabs, id: \.tabID) { tab in
-                let isTabSelected = (navModel.destination == .browser && tab.tabID == appModel.selectedTabID)
-                let audioState = audioController.audioState(for: tab.webView)
-
-                Button {
-                    appModel.selectTab(tab.tabID)
-                    navModel.navigateTo(
-                        destination: .browser,
-                        appModel: appModel,
-                        selectTool: selectTool,
-                        clearTool: clearHostedTool
-                    )
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        tabIconView(tab: tab, size: 14)
-                            .frame(width: 32, height: 28)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(isTabSelected ? palette.accentSoftColor : Color.clear)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(isTabSelected ? palette.accentColor : Color.clear, lineWidth: 1)
-                            )
-
-                        if audioState == .playingAudible {
-                            Image(systemName: "speaker.wave.2.fill")
-                                .font(.system(size: 7))
-                                .foregroundColor(palette.accentColor)
-                                .offset(x: -2, y: -2)
-                        } else if audioState == .playingMuted {
-                            Image(systemName: "speaker.slash.fill")
-                                .font(.system(size: 7))
-                                .foregroundColor(palette.warnColor)
-                                .offset(x: -2, y: -2)
-                        }
-                    }
-                    .frame(width: 32, height: 28)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(tab.tabTitle)
-                .accessibilityLabel("탭: \(tab.tabTitle)")
-                .accessibilityAddTraits(isTabSelected ? [.isButton, .isSelected] : [.isButton])
-                .contextMenu {
-                    Button("새 탭") {
-                        if appModel.tabs.count < AppModel.maxTabs {
-                            if let created = appModel.newTab() {
-                                appModel.selectTab(created.tabID)
-                            }
-                            navModel.navigateTo(
-                                destination: .browser,
-                                appModel: appModel,
-                                selectTool: selectTool,
-                                clearTool: clearHostedTool
-                            )
-                        }
-                    }
-                    .disabled(appModel.tabs.count >= AppModel.maxTabs)
-
-                    if appModel.tabs.count > 1 {
-                        Button("탭 닫기") {
-                            appModel.closeTab(tab.tabID)
-                        }
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    if tab.isLoading {
-                        GeometryReader { geo in
-                            palette.accentColor
-                                .frame(width: geo.size.width * CGFloat(max(0, min(1, tab.progress))), height: 1.5)
-                        }
-                        .frame(height: 1.5)
-                        .allowsHitTesting(false)
-                    }
-                }
-            }
-
-            Button {
-                if appModel.tabs.count < AppModel.maxTabs {
-                    if let created = appModel.newTab() {
-                        appModel.selectTab(created.tabID)
-                    }
-                    navModel.navigateTo(
-                        destination: .browser,
-                        appModel: appModel,
-                        selectTool: selectTool,
-                        clearTool: clearHostedTool
-                    )
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(palette.mutedColor)
-                    .frame(width: 32, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.clear)
-                    )
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(appModel.tabs.count >= AppModel.maxTabs)
-            .help("새 탭")
-            .accessibilityLabel("새 탭 열기")
-            .accessibilityAddTraits(.isButton)
+    private func compactLeaf(icon: String, label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(selected ? palette.accentColor : palette.mutedColor)
+                .frame(width: 32, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(selected ? palette.accentSoftColor : Color.clear)
+                )
+                .contentShape(Rectangle())
         }
-        .padding(.vertical, 2)
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
     }
 
     @ViewBuilder
-    private var compactPlannerChildren: some View {
-        let activeProjects = workspace.store.projects.filter { !$0.archived }
-        if !activeProjects.isEmpty {
-            VStack(spacing: 3) {
-                ForEach(activeProjects) { proj in
-                    let isProjectSelected = (navModel.destination == .planner && proj.id == workspace.selectedProjectID)
-                    Button {
+    private func compactSettingsLeaf(for owner: SettingsOwner, label: String) -> some View {
+        compactLeaf(icon: "gearshape", label: label,
+                    selected: navModel.destination == .settings && navModel.settingsOwner == owner) {
+            navModel.openFeatureSettings(
+                for: owner,
+                appModel: appModel,
+                currentToolID: hostedToolID,
+                selectTool: selectTool,
+                clearTool: clearHostedTool
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func compactDestinationChildren(_ dest: MainNavDestination) -> some View {
+        VStack(spacing: 2) {
+            switch dest {
+            case .browser:
+                compactSettingsLeaf(for: .browser, label: "브라우저 설정")
+            case .downloads:
+                compactLeaf(icon: "arrow.down.circle",
+                            label: activeQueueCount > 0 ? "진행 중, \(activeQueueCount)개" : "진행 중",
+                            selected: navModel.destination == .downloads && navModel.downloadTab == .queue) {
+                    navModel.selectDownloadTab(.queue, appModel: appModel, clearTool: clearHostedTool)
+                }
+                compactLeaf(icon: "clock", label: "완료 기록",
+                            selected: navModel.destination == .downloads && navModel.downloadTab == .history) {
+                    navModel.selectDownloadTab(.history, appModel: appModel, clearTool: clearHostedTool)
+                }
+                compactLeaf(icon: "doc.on.clipboard", label: "링크 붙여넣고 받기", selected: false) {
+                    navModel.selectDownloadTab(.queue, appModel: appModel, clearTool: clearHostedTool)
+                    appModel.pasteLinksFromClipboard()
+                }
+                compactLeaf(icon: "link.badge.plus", label: "주소 직접 입력", selected: false) {
+                    navModel.selectDownloadTab(.queue, appModel: appModel, clearTool: clearHostedTool)
+                    onRequestDownloadInput()
+                }
+                compactSettingsLeaf(for: .downloads, label: "다운로드 설정")
+            case .planner:
+                ForEach(workspace.store.projects.filter { !$0.archived }) { proj in
+                    compactLeaf(icon: "folder", label: "프로젝트: \(proj.title)",
+                                selected: navModel.destination == .planner && proj.id == workspace.selectedProjectID) {
                         workspace.selectProject(proj.id)
                         let targetSess = workspace.session(for: proj.id)
                         if targetSess.tabs.isEmpty {
@@ -375,25 +348,45 @@ struct HierarchicalSidebarView: View {
                             selectTool: selectTool,
                             clearTool: clearHostedTool
                         )
-                    } label: {
-                        Image(systemName: "folder")
-                            .font(.system(size: 12))
-                            .foregroundColor(isProjectSelected ? palette.accentColor : palette.mutedColor)
-                            .frame(width: 32, height: 26)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5)
-                                    .fill(isProjectSelected ? palette.accentSoftColor : Color.clear)
-                            )
-                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .help(proj.title)
-                    .accessibilityLabel("프로젝트: \(proj.title)")
-                    .accessibilityAddTraits(isProjectSelected ? [.isButton, .isSelected] : [.isButton])
                 }
+                compactSettingsLeaf(for: .planner, label: "플래너 설정")
+            case .translation:
+                ForEach(["mail", "screen", "browser"], id: \.self) { id in
+                    let item = ["mail": ("메일 번역", "envelope"), "screen": ("화면 번역", "viewfinder"), "browser": ("번역 확장", "puzzlepiece.extension")][id]!
+                    compactLeaf(icon: item.1, label: item.0,
+                                selected: navModel.destination == .translation && navModel.activeTranslationChild == id) {
+                        navModel.selectTranslationChild(id, selectTool: selectTool)
+                    }
+                }
+                compactSettingsLeaf(for: .translation, label: "번역 설정")
+            case .inputHelper:
+                ForEach(["input.appLanguage", "input.koreanTypo", "input.personalDictionary", "input.trackpad"], id: \.self) { id in
+                    let item = ["input.appLanguage": ("앱별 언어 전환", "character.bubble"), "input.koreanTypo": ("한글 오타 교정", "pencil.and.outline"),
+                                "input.personalDictionary": ("개인 사전", "book"), "input.trackpad": ("트랙패드 잠금", "hand.raised")][id]!
+                    compactLeaf(icon: item.1, label: item.0,
+                                selected: navModel.destination == .inputHelper && navModel.activeInputChild == id) {
+                        navModel.selectInputChild(id, selectTool: selectTool)
+                    }
+                }
+                compactSettingsLeaf(for: .inputHelper, label: "입력 도우미 설정")
+            case .macManagement:
+                ForEach(["macManagement", "cleanUSB"], id: \.self) { id in
+                    let item = ["macManagement": ("Mac 관리", "desktopcomputer"), "cleanUSB": ("USB 드라이브 정리", "externaldrive")][id]!
+                    compactLeaf(icon: item.1, label: item.0,
+                                selected: navModel.destination == .macManagement && navModel.activeMacManagementChild == id) {
+                        navModel.selectMacManagementChild(id, selectTool: selectTool)
+                    }
+                }
+                compactSettingsLeaf(for: .macManagement, label: "Mac 관리 설정")
+            case .server:
+                compactSettingsLeaf(for: .server, label: "서버 현황 설정")
+            default:
+                EmptyView()
             }
-            .padding(.vertical, 2)
         }
+        .padding(.leading, 10)
+        .padding(.bottom, 2)
     }
 
     @ViewBuilder
@@ -434,6 +427,22 @@ struct HierarchicalSidebarView: View {
             return true
         default:
             return false
+        }
+    }
+
+    private var expandableDestinations: Set<MainNavDestination> {
+        Set((Self.topDestinations + Self.bottomDestinations).filter { isExpandable($0) })
+    }
+
+    private var allExpanded: Bool {
+        expandableDestinations.isSubset(of: expandedDestinations)
+    }
+
+    private func toggleAllExpanded() {
+        if allExpanded {
+            expandedDestinations.subtract(expandableDestinations)
+        } else {
+            expandedDestinations.formUnion(expandableDestinations)
         }
     }
 
@@ -572,114 +581,6 @@ struct HierarchicalSidebarView: View {
     @ViewBuilder
     private var browserChildren: some View {
         VStack(spacing: 2) {
-            ForEach(appModel.tabs, id: \.tabID) { tab in
-                let isTabSelected = (navModel.destination == .browser && tab.tabID == appModel.selectedTabID)
-                let audioState = audioController.audioState(for: tab.webView)
-                HStack(spacing: 2) {
-                    Button {
-                        appModel.selectTab(tab.tabID)
-                        navModel.navigateTo(
-                            destination: .browser,
-                            appModel: appModel,
-                            selectTool: selectTool,
-                            clearTool: clearHostedTool
-                        )
-                    } label: {
-                        HStack(spacing: 6) {
-                            tabIconView(tab: tab, size: 11)
-
-                            Text(tab.tabTitle)
-                                .font(.system(size: 12, weight: isTabSelected ? .semibold : .regular))
-                                .foregroundColor(isTabSelected ? palette.accentColor : palette.textColor)
-                                .lineLimit(1)
-
-                            Spacer(minLength: 0)
-
-                            if audioState == .playingAudible {
-                                Image(systemName: "speaker.wave.2.fill")
-                                    .font(.caption2)
-                                    .foregroundColor(palette.accentColor)
-                            } else if audioState == .playingMuted {
-                                Image(systemName: "speaker.slash.fill")
-                                    .font(.caption2)
-                                    .foregroundColor(palette.warnColor)
-                            }
-                        }
-                        .padding(.leading, 26)
-                        .padding(.trailing, 4)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(tab.tabTitle)
-                    .accessibilityLabel("탭: \(tab.tabTitle)")
-                    .accessibilityAddTraits(isTabSelected ? [.isButton, .isSelected] : [.isButton])
-
-                    if appModel.tabs.count > 1 {
-                        Button {
-                            appModel.closeTab(tab.tabID)
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9))
-                                .foregroundColor(palette.mutedColor)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 4)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("탭 닫기")
-                        .accessibilityLabel("탭 닫기: \(tab.tabTitle)")
-                        .accessibilityAddTraits(.isButton)
-                    }
-                }
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(isTabSelected ? palette.accentSoftColor : Color.clear)
-                )
-                .overlay(alignment: .bottom) {
-                    if tab.isLoading {
-                        GeometryReader { geo in
-                            palette.accentColor
-                                .frame(width: geo.size.width * CGFloat(max(0, min(1, tab.progress))), height: 1.5)
-                        }
-                        .frame(height: 1.5)
-                        .allowsHitTesting(false)
-                    }
-                }
-            }
-
-            Button {
-                if appModel.tabs.count < AppModel.maxTabs {
-                    if let created = appModel.newTab() {
-                        appModel.selectTab(created.tabID)
-                    }
-                    navModel.navigateTo(
-                        destination: .browser,
-                        appModel: appModel,
-                        selectTool: selectTool,
-                        clearTool: clearHostedTool
-                    )
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .bold))
-                    Text("새 탭")
-                        .font(.system(size: 11))
-                    Spacer()
-                }
-                .foregroundColor(palette.mutedColor)
-                .padding(.leading, 26)
-                .padding(.trailing, 8)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(appModel.tabs.count >= AppModel.maxTabs)
-            .help("새 탭")
-            .accessibilityLabel("새 탭 열기")
-            .accessibilityAddTraits(.isButton)
-
             featureSettingsLeaf(for: .browser, label: "브라우저 설정")
         }
     }

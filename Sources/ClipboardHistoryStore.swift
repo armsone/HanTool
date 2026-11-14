@@ -121,7 +121,7 @@ public final class ClipboardHistoryStore: ObservableObject {
     private var lastObservedChangeCount: Int = 0
     private var pollTimer: Timer?
     private var workspaceObserver: NSObjectProtocol?
-    private var isSelfWriting: Bool = false
+    private var suppressedChangeCount: Int? = nil
     private var metadataLoadedSuccessfully: Bool = false
 
     // 썸네일 인메모리 캐시 (UUID -> NSImage)
@@ -229,9 +229,9 @@ public final class ClipboardHistoryStore: ObservableObject {
         guard currentCount != lastObservedChangeCount else { return }
         lastObservedChangeCount = currentCount
 
-        // 자체 쓰기(한툴 패널에서 복사)에 의한 changeCount 변경은 히스토리에 다시 쌓지 않음
-        if isSelfWriting {
-            isSelfWriting = false
+        // 자체 쓰기(한툴 패널에서 복사)에 의한 changeCount 변경은 1회성 억제 처리하여 히스토리에 다시 쌓지 않음
+        if let suppressed = suppressedChangeCount, currentCount == suppressed {
+            suppressedChangeCount = nil
             return
         }
 
@@ -410,9 +410,10 @@ public final class ClipboardHistoryStore: ObservableObject {
     }
 
     // MARK: - Re-Copy to System Pasteboard
-    /// 선택한 항목을 시스템 클립보드에 복사하고 자체 쓰기 플래그를 설정하여 중복 인입 방지.
-    public func copyToPasteboard(item: ClipboardItem) {
-        isSelfWriting = true
+    /// 선택한 항목을 시스템 클립보드에 복사하고 자체 쓰기 changeCount를 설정하여 중복 인입 방지.
+    /// 자기 재복사 시 히스토리 항목 추가/중복/최근 시간 재정렬을 하지 않고 순서를 그대로 보존.
+    @discardableResult
+    public func copyToPasteboard(item: ClipboardItem) -> Int {
         let pasteboard = self.pasteboard
         pasteboard.clearContents()
 
@@ -424,22 +425,25 @@ public final class ClipboardHistoryStore: ObservableObject {
         case .image:
             if let fileName = item.imageFileName {
                 let fileURL = imagesDirectory.appendingPathComponent(fileName)
-                if let image = NSImage(contentsOf: fileURL) {
+                if let data = try? Data(contentsOf: fileURL), let image = NSImage(data: data) {
+                    pasteboard.writeObjects([image])
+                    if let pngType = NSPasteboard.PasteboardType(UTType.png.identifier) as NSPasteboard.PasteboardType? {
+                        pasteboard.setData(data, forType: pngType)
+                    }
+                } else if let image = NSImage(contentsOf: fileURL) {
                     pasteboard.writeObjects([image])
                 }
             }
         }
 
-        lastObservedChangeCount = pasteboard.changeCount
-
-        // 방금 복사한 항목을 최상단으로 이동
-        if let idx = items.firstIndex(where: { $0.id == item.id }) {
-            var updated = items.remove(at: idx)
-            updated.copiedAt = Date()
-            items.insert(updated, at: 0)
-            persistMetadataAtomic()
-        }
+        let newCount = pasteboard.changeCount
+        lastObservedChangeCount = newCount
+        suppressedChangeCount = newCount
+        return newCount
     }
+
+    /// 자동 붙여넣기 직전 외부 복사 여부 확인용 (내용은 읽지 않고 changeCount만 조회).
+    public var pasteboardChangeCount: Int { pasteboard.changeCount }
 
     // MARK: - Image & Thumbnail Access
     public func imageURL(for item: ClipboardItem) -> URL? {

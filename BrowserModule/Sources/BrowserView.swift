@@ -268,6 +268,7 @@ struct BrowserPane: View {
         }
         // A 길찾기 lookup belongs to the tab it was started in: leaving that tab or this screen drops it.
         .onChange(of: model.tabID) { _, _ in
+            model.activate()
             addressFlow.cancel()
             webPageAgent.syncContext(tab: model)
         }

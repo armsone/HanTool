@@ -317,6 +317,8 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         AppModel.shared.closeDocument()
         AppModel.shared.errorMessage = nil
         // 창 닫기로 인해 브라우저/Planner 모델/컨트롤러가 파괴되지 않도록 윈도우와 컨트롤러를 유지한다.
+        // 다음 재열기 시 newWindow 시작 정책이 정상 적용될 수 있도록 실행 탭 상태를 준비한다.
+        UnifiedBrowserManager.shared.terminateBrowserExecution()
     }
 }
 

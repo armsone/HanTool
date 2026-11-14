@@ -64,7 +64,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.33.9</string>
+	<string>1.33.10</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -80,12 +80,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>202611142152</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
-	</dict>
+	<string>202611142359</string>
 	<key>HTDBuildStamp</key>
 	<string>202611130000</string>
 	<key>LSApplicationCategoryType</key>
@@ -94,6 +89,11 @@
 	<string>15.4</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>'선택한 메일 번역'(메뉴 막대, ⌃⌥⇧⌘M, Mail 위 번역 버튼, Mail › 서비스 › '메일 전체 번역')을 실행할 때에만 Mail에서 현재 선택된 메시지의 원본을 읽어 번역합니다. 기본 번역 방식은 이 Mac 안에서 처리하며, 외부 AI(ChatGPT·Claude·Gemini) 또는 사용자가 선택한 웹 번역 서비스(DeepL·Google·Papago)를 고르고 전송에 동의한 경우에만 제목·본문·이미지 글자를 해당 서비스로 보냅니다. 메시지를 보내거나 수정하지 않으며 메일 파일을 별도로 저장하지 않습니다.</string>
 	<key>NSDesktopFolderUsageDescription</key>

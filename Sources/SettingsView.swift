@@ -31,7 +31,7 @@ public enum SettingsSection: Hashable, CaseIterable, Identifiable {
         case .macManagement, .macManagementSettings: return "Mac 관리"
         case .cleanUSB: return "USB 드라이브"
         case .serverStatus, .serverStatusSettings: return "서버 현황"
-        case .clipboardHistory: return "클립보드 기록"
+        case .clipboardHistory: return "클립보드"
         case .help: return "사용 안내"
         case .general: return "브라우저 설정"
         }
@@ -351,7 +351,7 @@ public struct SettingsView: View {
         case .serverStatusSettings:
             CCMBSettingsView()
         case .clipboardHistory:
-            ClipboardHistorySettingsView()
+            ClipboardHistoryBrowserPane()
         case .help:
             HTTGuideView(settingsStore: store)
         case .general:

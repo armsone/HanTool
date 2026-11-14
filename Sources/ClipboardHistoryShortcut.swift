@@ -2,11 +2,11 @@ import AppKit
 import ApplicationServices
 import Combine
 
-/// 클립보드 히스토리 호출용 전역 단축키 감지기.
-/// - 단축키: Shift 누른 채 + 동일 Command 2회 탭 (Down → Up 2회).
+/// 클립보드 호출용 전역 단축키 감지기.
+/// - 단축키: Shift 누른 채 + 동일 Command 2회 탭 (Down → Up → 두 번째 Down 즉시 show).
 /// - 기존 BrowserDoubleTapShortcut(브라우저 더블탭)과 완전히 독립된 상태 머신으로 동작.
 /// - 일반 키 입력(.keyDown), 마우스 클릭, 또는 Option/Control 등의 다른 보조키 개입 시 즉시 시퀀스 초기화.
-/// - 2회 탭 완료 후 모든 보조키(Shift, Command 등)가 릴리즈되면 클립보드 히스토리 패널을 띄우고 포커스 부여.
+/// - 두 번째 Command Down 감지 즉시 클립보드 패널을 띄우고 포커스 부여 (Shift/Command 잔류 상태에서도 팝업 조작 가능).
 @MainActor
 public final class ClipboardHistoryShortcut: ObservableObject {
     public static let shared = ClipboardHistoryShortcut()
@@ -21,7 +21,7 @@ public final class ClipboardHistoryShortcut: ObservableObject {
         case idle
         case firstPressed(keyCode: UInt16, timestamp: TimeInterval)
         case firstReleased(keyCode: UInt16, pressTimestamp: TimeInterval, releaseTimestamp: TimeInterval)
-        case secondPressed(keyCode: UInt16, timestamp: TimeInterval)
+        case secondTriggered(keyCode: UInt16)
     }
 
     private var phase: Phase = .idle
@@ -36,7 +36,6 @@ public final class ClipboardHistoryShortcut: ObservableObject {
     private var activationObserver: NSObjectProtocol?
 
     private var isStarted = false
-    private var isWaitingForModifiersRelease = false
 
     private init() {
         checkAccessibility()
@@ -115,7 +114,6 @@ public final class ClipboardHistoryShortcut: ObservableObject {
 
     public func resetGesture() {
         phase = .idle
-        isWaitingForModifiersRelease = false
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
@@ -131,16 +129,6 @@ public final class ClipboardHistoryShortcut: ObservableObject {
         lastHandledEventTimestamp = timestamp
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-
-        // 2회 탭 완료 후 모든 보조키가 해제될 때까지 대기 중인 상태 처리
-        if isWaitingForModifiersRelease {
-            if flags.isEmpty {
-                isWaitingForModifiersRelease = false
-                resetGesture()
-                ClipboardHistoryPanelController.shared.showAndFocus()
-            }
-            return
-        }
 
         let keyCode = event.keyCode
 
@@ -203,11 +191,14 @@ public final class ClipboardHistoryShortcut: ObservableObject {
 
         case .firstReleased(let firstCode, _, let releaseTime):
             if isCommandPressed {
-                // 첫 뗌 이후 동일 Command 두 번째 누름 (Down 2)
+                // 첫 뗌 이후 동일 Command 두 번째 누름 (Down 2) 즉시 show & focus
                 if keyCode == firstCode {
                     let interval = timestamp - releaseTime
                     if interval <= maxTapInterval {
-                        phase = .secondPressed(keyCode: keyCode, timestamp: timestamp)
+                        phase = .secondTriggered(keyCode: keyCode)
+                        // HanTool 활성화 전에 origin target을 즉시 캡처
+                        ClipboardPasteCoordinator.shared.captureOriginTarget()
+                        ClipboardHistoryPanelController.shared.showAndFocus()
                     } else {
                         // 간격이 너무 길어 새 첫 번째 누름으로 전환
                         phase = .firstPressed(keyCode: keyCode, timestamp: timestamp)
@@ -217,30 +208,11 @@ public final class ClipboardHistoryShortcut: ObservableObject {
                 }
             }
 
-        case .secondPressed(let secondCode, let pressTime):
+        case .secondTriggered(let secondCode):
             if !isCommandPressed {
-                // 두 번째 Command 뗌 (Up 2) -> 2회 탭 완성!
+                // 두 번째 Command 뗌 (Up 2) -> 중복 show 없이 제스처 초기화
                 if keyCode == secondCode {
-                    let duration = timestamp - pressTime
-                    if duration <= maxTapDuration {
-                        // 단축키 인식 성공!
-                        // 사용자가 Shift를 아직 쥐고 있을 수 있으므로 모든 modifier가 릴리즈된 후 포커스 부여
-                        if flags.isEmpty {
-                            resetGesture()
-                            ClipboardHistoryPanelController.shared.showAndFocus()
-                        } else {
-                            isWaitingForModifiersRelease = true
-                            // 1.0초 내에 보조키를 떼지 않더라도 안전하게 열리도록 타이머 백업
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                                guard let self, self.isWaitingForModifiersRelease else { return }
-                                self.isWaitingForModifiersRelease = false
-                                self.resetGesture()
-                                ClipboardHistoryPanelController.shared.showAndFocus()
-                            }
-                        }
-                    } else {
-                        resetGesture()
-                    }
+                    resetGesture()
                 } else {
                     resetGesture()
                 }

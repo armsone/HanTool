@@ -3,11 +3,16 @@ import AppKit
 import Combine
 
 fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
+    var onDoubleClick: () -> Void = {}
+
     func makeNSView(context: Context) -> StyleInspectorView {
-        StyleInspectorView()
+        let view = StyleInspectorView()
+        view.onDoubleClick = onDoubleClick
+        return view
     }
 
     func updateNSView(_ nsView: StyleInspectorView, context: Context) {
+        nsView.onDoubleClick = onDoubleClick
         nsView.scheduleInspection()
     }
 
@@ -15,6 +20,8 @@ fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
         private weak var observedSplit: NSSplitView?
         private let grip = PlannerNativeResizeHandle()
         private var dragStartPosition: CGFloat?
+        private var lastExpandedWidth: CGFloat?
+        var onDoubleClick: () -> Void = {}
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -80,6 +87,28 @@ fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
         }
 
         private func setupGrip() {
+            grip.onDoubleClick = { [weak self] in
+                guard let self = self else { return }
+                let split = self.observedSplit
+                let wasExpanded = (split?.arrangedSubviews.first?.frame.width ?? 0) >= 200
+                if wasExpanded, let width = split?.arrangedSubviews.first?.frame.width {
+                    self.lastExpandedWidth = width
+                }
+                self.onDoubleClick()
+                guard !wasExpanded, let saved = self.lastExpandedWidth else { return }
+                // 접힘 -> 펼침: 마지막으로 수동 선택한 펼친 너비를 복원한다.
+                for delay in [0.05, 0.2] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        guard let split = self?.observedSplit,
+                              split.arrangedSubviews.count >= 2,
+                              split.arrangedSubviews[0].frame.width >= 200 else { return }
+                        let target = min(max(saved, 200.0), 260.0)
+                        split.setPosition(target, ofDividerAt: 0)
+                        split.adjustSubviews()
+                    }
+                }
+            }
+
             grip.onBegan = { [weak self] in
                 guard let self = self,
                       let split = self.observedSplit,
@@ -108,6 +137,8 @@ fileprivate struct SidebarDividerStyleInstaller: NSViewRepresentable {
                     let target = min(max(start + delta, 200.0), upperBound)
                     split.setPosition(target, ofDividerAt: 0)
                     split.adjustSubviews()
+                    let width = split.arrangedSubviews[0].frame.width
+                    if width >= 200 { self.lastExpandedWidth = width }
                 }
                 self.dragStartPosition = nil
                 self.updateGripFrame()
@@ -164,6 +195,8 @@ public struct MainView: View {
     @EnvironmentObject private var appearance: AppearanceStore
     @Environment(\.bkPalette) private var palette
     @State private var actualRootWidth: CGFloat = 1120
+    @State private var sidebarEdgeX: CGFloat = 0
+    @State private var controlBarWidth: CGFloat = 0
     #if HTT_HOST
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     #else
@@ -209,6 +242,13 @@ public struct MainView: View {
                    maxWidth: isExpanded ? 260 : 68,
                    maxHeight: .infinity)
             .clipped()
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { sidebarEdgeX = geo.frame(in: .global).maxX }
+                        .onChange(of: geo.frame(in: .global).maxX) { sidebarEdgeX = $0 }
+                }
+            )
 
             HStack(alignment: .top, spacing: 0) {
                 detailContentView
@@ -229,13 +269,20 @@ public struct MainView: View {
                     }
             }
         )
-        .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
+        .background(SidebarDividerStyleInstaller(onDoubleClick: {
+            columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+        }).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
+        .modifier(HideToolbarTitle())
         .toolbar {
             if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .navigation) { browserTabRow }
+                    .sharedBackgroundVisibility(.hidden)
+                ToolbarSpacer(.flexible)
+                ToolbarItem(placement: .automatic) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
             } else {
-                ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .navigation) { browserTabRow }
+                ToolbarItem(placement: .automatic) { browserControlBar }
             }
         }
         .background(
@@ -315,13 +362,20 @@ public struct MainView: View {
                     }
             }
         )
-        .background(SidebarDividerStyleInstaller().frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
+        .background(SidebarDividerStyleInstaller(onDoubleClick: {
+            columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+        }).frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
+        .modifier(HideToolbarTitle())
         .toolbar {
             if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .navigation) { browserTabRow }
+                    .sharedBackgroundVisibility(.hidden)
+                ToolbarSpacer(.flexible)
+                ToolbarItem(placement: .automatic) { browserControlBar }
                     .sharedBackgroundVisibility(.hidden)
             } else {
-                ToolbarItem(placement: .primaryAction) { browserControlBar }
+                ToolbarItem(placement: .navigation) { browserTabRow }
+                ToolbarItem(placement: .automatic) { browserControlBar }
             }
         }
         .sheet(isPresented: $navModel.isSpeedTestPresented) {
@@ -596,8 +650,22 @@ public struct MainView: View {
         actualRootWidth <= 1200
     }
 
+    /// 컨트롤이 실제로 보였던 검증된 원래 탭 폭 여유(-56). 남는 폭은 표준 flexibleSpace가 받아 컨트롤을 오른쪽 끝에 둔다.
+    private let toolbarItemChrome: CGFloat = 56
+
+    @ViewBuilder
+    private var browserTabRow: some View {
+        if navModel.destination == .browser && hostedToolID == nil {
+            BrowserTabStrip(
+                appModel: appModel,
+                sidebarEdgeX: sidebarEdgeX,
+                rightLimitX: actualRootWidth - (controlBarWidth > 0 ? controlBarWidth + toolbarItemChrome : (isNarrowToolbar ? 240 : 640))
+            )
+        }
+    }
+
     private var browserControlBar: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 2) {
             if isNarrowToolbar {
                 // Narrow layout: [현재 context 단일 번역/AI Menu+Toggle/Theme/명시 도구 Menu]
                 #if HTT_HOST
@@ -607,7 +675,7 @@ public struct MainView: View {
                     button
                         .font(.caption.bold())
                         .buttonStyle(.plain)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 6)
                         .frame(height: 26)
                         .background(Capsule().fill(palette.surfaceColor))
                 }
@@ -704,7 +772,7 @@ public struct MainView: View {
                     button
                         .font(.caption.bold())
                         .buttonStyle(.plain)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 6)
                         .frame(height: 26)
                         .background(Capsule().fill(palette.surfaceColor))
                 }
@@ -718,7 +786,7 @@ public struct MainView: View {
                             .truncationMode(.middle)
                     }
                     .foregroundColor(palette.textColor)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 6)
                     .frame(height: 26)
                     .fixedSize(horizontal: true, vertical: false)
                     .background(Capsule().fill(palette.surfaceColor))
@@ -727,7 +795,7 @@ public struct MainView: View {
                 .help("저장 폴더 변경")
                 .accessibilityLabel("저장 폴더 변경")
 
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Button {
                         BrowserAdHideManager.shared.toggle(appModel: appModel, model: appModel.browser)
                     } label: {
@@ -753,7 +821,7 @@ public struct MainView: View {
                         .help("웹 페이지 안의 주요 서드파티 광고 도메인 연결을 차단합니다. 브라우저 화면에만 적용되며 외부 전송이나 추가 다운로드 없이 동작합니다.")
                         .accessibilityLabel("광고 차단")
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 6)
                 .frame(height: 26)
                 .background(Capsule().fill(palette.surfaceColor))
                 .fixedSize()
@@ -770,9 +838,17 @@ public struct MainView: View {
                     .frame(width: 26, height: 26)
             }
         }
-        .padding(4)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 2)
         .modifier(BrowserControlBarBackground())
         .fixedSize()
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { controlBarWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { controlBarWidth = $0 }
+            }
+        )
     }
 
     private func selectDestinationFolder() {
@@ -812,7 +888,7 @@ struct CompactSidebarRail: View {
     #endif
 
     private static let topDestinations: [MainNavDestination] = [
-        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .usbDrives, .server
+        .browser, .downloads, .planner, .translation, .inputHelper, .macManagement, .usbDrives, .server, .clipboardHistory
     ]
     private static let bottomDestinations: [MainNavDestination] = [
         .settings, .help
@@ -1410,6 +1486,15 @@ fileprivate struct RightClickBlockerView: NSViewRepresentable {
 }
 
 fileprivate struct ToolbarCustomizationConfigurator: NSViewRepresentable {
+    /// macOS 26 uses SwiftUI's ToolbarSpacer(.flexible); older systems get the same standard flexible space between the two items.
+    private static func ensureFlexibleSpace(_ toolbar: NSToolbar) {
+        if #unavailable(macOS 26.0) {
+            guard toolbar.items.count == 2,
+                  toolbar.items.contains(where: { $0.itemIdentifier == .flexibleSpace }) == false else { return }
+            toolbar.insertItem(withItemIdentifier: .flexibleSpace, at: 1)
+        }
+    }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async { [weak view] in
@@ -1418,6 +1503,7 @@ fileprivate struct ToolbarCustomizationConfigurator: NSViewRepresentable {
             if #available(macOS 15.0, *) {
                 toolbar.allowsDisplayModeCustomization = false
             }
+            Self.ensureFlexibleSpace(toolbar)
         }
         return view
     }
@@ -1428,6 +1514,7 @@ fileprivate struct ToolbarCustomizationConfigurator: NSViewRepresentable {
             if #available(macOS 15.0, *) {
                 toolbar.allowsDisplayModeCustomization = false
             }
+            Self.ensureFlexibleSpace(toolbar)
         }
     }
 }
@@ -1915,7 +2002,7 @@ struct JobCardView: View {
                            !rawSource.contains("…"), !rawSource.lowercased().contains("%e2%80%a6") {
                             Button("브라우저에서 열기") {
                                 appModel.selectedTab = .browser
-                                appModel.newTab()?.open(source.absoluteString)
+                                appModel.newTab(explicitURL: true)?.open(source.absoluteString)
                             }
                             .buttonStyle(.bordered)
                             .help("가능하면 원래 페이지, 없으면 현재 주소를 새 탭에 엽니다.")
@@ -2825,5 +2912,15 @@ struct StateBadgeView: View {
 extension Optional where Wrapped == String {
     var isNilOrEmpty: Bool {
         return self == nil || self?.isEmpty == true
+    }
+}
+
+private struct HideToolbarTitle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content
+        }
     }
 }

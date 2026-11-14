@@ -273,6 +273,7 @@ final class PlannerNativeResizeHandle: NSView {
     var onBegan: (() -> Void)?
     var onChanged: ((CGFloat) -> Void)?
     var onEnded: ((CGFloat) -> Void)?
+    var onDoubleClick: (() -> Void)?
 
     private var startWindowX: CGFloat?
 
@@ -318,6 +319,11 @@ final class PlannerNativeResizeHandle: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2, let onDoubleClick {
+            startWindowX = nil
+            onDoubleClick()
+            return
+        }
         startWindowX = event.locationInWindow.x
         onBegan?()
     }

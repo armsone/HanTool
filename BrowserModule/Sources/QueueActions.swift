@@ -340,7 +340,7 @@ extension AppModel {
 
         var openedCount = 0
         for url in urlsToOpen {
-            if let tab = newTab() {
+            if let tab = newTab(explicitURL: true) {
                 tab.open(url)
                 openedCount += 1
             }
