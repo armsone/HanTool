@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import AppKit
 import WebKit
@@ -55,7 +56,7 @@ public enum CuratedAIServices {
         ),
         AIService(
             id: "chatgpt",
-            name: "ChatGPT (OpenAI)",
+            name: "ChatGPT",
             homeURL: "https://chatgpt.com/",
             serviceDescription: "OpenAI 대화형 인공지능 서비스",
             restrictions: "제공사 정책에 따름 (게스트/무료 대화 또는 공식 로그인) · 수동 웹 대화",
@@ -95,7 +96,7 @@ public enum CuratedAIServices {
         ),
         AIService(
             id: "copilot",
-            name: "Microsoft Copilot",
+            name: "Copilot",
             homeURL: "https://copilot.microsoft.com/",
             serviceDescription: "Microsoft 대화형 AI 어시스턴트",
             restrictions: "제공사 정책에 따름 (무료 웹 대화 또는 Microsoft 계정) · 수동 웹 대화",
@@ -379,7 +380,7 @@ public final class AIServiceStore: ObservableObject {
 /// Supports real child WKWebView popups for OAuth authentication without automation injection.
 @MainActor
 public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
-    public static let defaultWidth: CGFloat = 372
+    public static let defaultWidth: CGFloat = 400
     public static let minWidth: CGFloat = 320
     public static let maxWidth: CGFloat = 900
     public static let storageKey = "HanaPanelWidth"
@@ -388,17 +389,14 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
     @Published public var isLoading: Bool = false
     @Published public var statusMessage: String? = nil
     @Published public var currentService: AIService? = nil
-    @Published public var isPanelOpen: Bool = false {
-        didSet {
-            if isPanelOpen && !oldValue { setPreferredWidth(Self.defaultWidth) }
-        }
-    }
+    @Published public var isPanelOpen: Bool = false
 
     public private(set) var webView: WKWebView
     public var onOpenExternalURL: ((URL) -> Void)?
 
     private var openPopups: [NSWindow] = []
     private var currentDataStore: WKWebsiteDataStore
+    private var openPanelToken: UUID?
 
     /// Common assistant planner session of this panel (one per host). Configured with the exact current service,
     /// website data store and web view; every service/store/web view change reconfigures it before the next load.
@@ -406,7 +404,13 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
     private var plannerConfigKey: String?
 
     public init(dataStore: WKWebsiteDataStore = .default()) {
-        self.preferredWidth = Self.defaultWidth
+        let saved = HTDBrowserDefaults.standard.double(forKey: Self.storageKey)
+        if saved >= Self.minWidth && saved <= Self.maxWidth {
+            self.preferredWidth = CGFloat(saved)
+        } else {
+            self.preferredWidth = Self.defaultWidth
+            HTDBrowserDefaults.standard.set(Double(Self.defaultWidth), forKey: Self.storageKey)
+        }
 
         self.currentDataStore = dataStore
         let config = WKWebViewConfiguration()
@@ -572,10 +576,45 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
         return false
     }
 
+    /// Copilot's landing "채팅으로 이동" leads to the signed-in personal chat on this one exact host; it stays in this
+    /// panel's own web view and store instead of opening a main browser tab.
+    private static func isServiceChatHost(_ host: String, serviceID: String?) -> Bool {
+        serviceID == "copilot" && host == "copilot.cloud.microsoft"
+    }
+
+    /// Copilot panel navigation markers in the app's local log: catalog ID (a custom service is only "custom"), delegate
+    /// class, web view role, navigation type / target frame and the scheme + host only (never path, query, credentials or
+    /// page content), bounded. Public at the default level so a normal `log show` / `log stream` reads them; a host outside
+    /// this service, its sign-in hosts and Microsoft's own domains is only "other", so no other browsing host is shown.
+    private static let diagLog = Logger(subsystem: "com.local.screentranslator", category: "AssistantDiag")
+    private var navLogBudget = 40
+    private func copilotNavLog(_ webView: WKWebView, _ action: WKNavigationAction?, _ url: URL?, _ branch: String) {
+        guard navLogBudget > 0, let service = currentService,
+              service.id == "copilot" || URL(string: service.homeURL)?.host?.lowercased() == "copilot.microsoft.com" else { return }
+        navLogBudget -= 1
+        let id = CuratedAIServices.all.contains(where: { $0.id == service.id }) ? service.id : "custom"
+        let role = webView === self.webView ? "main" : "popup"
+        let nav = action.map { String($0.navigationType.rawValue) } ?? "-"
+        let frame = action.map { $0.targetFrame.map { $0.isMainFrame ? "main" : "sub" } ?? "nil" } ?? "-"
+        let rawScheme = url?.scheme?.lowercased() ?? "-"
+        let scheme = rawScheme.range(of: "^[a-z][a-z0-9+.-]{0,19}$", options: .regularExpression) != nil ? rawScheme : "other"
+        let rawHost = url?.host?.lowercased() ?? "-"
+        let serviceHost = URL(string: service.homeURL)?.host?.lowercased() ?? ""
+        let known = rawHost == "-" || Self.isRelatedServiceHost(rawHost, serviceHost: serviceHost) || Self.isAllowedAuthHost(rawHost)
+            || Self.isServiceChatHost(rawHost, serviceID: service.id) || rawHost.hasSuffix(".microsoft")
+            || rawHost == "microsoft.com" || rawHost.hasSuffix(".microsoft.com")
+        let host = known ? rawHost : "other"
+        let chat = Self.isServiceChatHost(rawHost, serviceID: service.id) ? 1 : 0
+        let delegate = String(describing: type(of: self))
+        Self.diagLog.notice("[HttpsDown] afnav id=\(id, privacy: .public) idm=\(service.id == "copilot" ? 1 : 0, privacy: .public) d=\(delegate, privacy: .public) wv=\(role, privacy: .public) t=\(nav, privacy: .public) f=\(frame, privacy: .public) s=\(scheme, privacy: .public) h=\(host, privacy: .public) chat=\(chat, privacy: .public) r=\(branch, privacy: .public)")
+    }
+
     // MARK: - WKNavigationDelegate
 
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let logNav = navigationAction.targetFrame?.isMainFrame != false
         guard let url = navigationAction.request.url else {
+            if logNav { copilotNavLog(webView, navigationAction, nil, "cancel-nourl") }
             decisionHandler(.cancel)
             return
         }
@@ -586,6 +625,7 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
                 decisionHandler(.allow)
                 return
             }
+            if logNav { copilotNavLog(webView, navigationAction, url, "cancel-scheme") }
             decisionHandler(.cancel)
             return
         }
@@ -593,13 +633,19 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
         if navigationAction.navigationType == .linkActivated {
             if let host = url.host?.lowercased(),
                let curHost = self.currentService.flatMap({ URL(string: $0.homeURL)?.host?.lowercased() }) {
-                if !Self.isRelatedServiceHost(host, serviceHost: curHost) && !Self.isAllowedAuthHost(host) {
+                // m365.cloud.microsoft is Microsoft's official automatic redirect to that chat host: navigation only
+                // (no bridge origin or file access).
+                if !Self.isRelatedServiceHost(host, serviceHost: curHost) && !Self.isAllowedAuthHost(host)
+                    && !Self.isServiceChatHost(host, serviceID: currentService?.id)
+                    && !(currentService?.id == "copilot" && host == "m365.cloud.microsoft") {
+                    if logNav { copilotNavLog(webView, navigationAction, url, "cancel-external") }
                     decisionHandler(.cancel)
                     onOpenExternalURL?(url)
                     return
                 }
             }
         }
+        if logNav { copilotNavLog(webView, navigationAction, url, "allow") }
         decisionHandler(.allow)
     }
 
@@ -646,7 +692,11 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
 
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                         for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard openPopups.count < 4 else { return nil }
+        guard openPopups.count < 4 else {
+            copilotNavLog(webView, navigationAction, navigationAction.request.url, "popup-limit")
+            return nil
+        }
+        copilotNavLog(webView, navigationAction, navigationAction.request.url, "popup")
         PageAudioController.shared.prepareConfiguration(configuration)
         let child = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 680), configuration: configuration)
         child.navigationDelegate = self
@@ -677,6 +727,40 @@ public final class ThirdPartyAIPanelHost: NSObject, ObservableObject, WKNavigati
         window.makeKeyAndOrderFront(nil)
         PageAudioController.shared.register(webView: child, kind: .popup(window: window, title: window.title))
         return child
+    }
+
+    /// The page's own file button (e.g. Meta AI attach): one user-chosen picker for this panel's current main frame only,
+    /// same pattern as Hana. Popups, other pages, a hidden panel or an inactive app get no picker.
+    public func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                        initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        guard frame.isMainFrame, isCurrentServicePage(webView), isPanelOpen, openPanelToken == nil,
+              let window = webView.window, window.isVisible, NSApp.isActive else {
+            completionHandler(nil)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        let token = UUID()
+        let serviceID = currentService?.id
+        openPanelToken = token
+        panel.beginSheetModal(for: window) { [weak self, weak webView] response in
+            let urls = response == .OK ? panel.urls : nil
+            Task { @MainActor in
+                guard let self, self.openPanelToken == token else { completionHandler(nil); return }
+                self.openPanelToken = nil
+                guard let webView, self.isCurrentServicePage(webView), self.currentService?.id == serviceID, self.isPanelOpen,
+                      webView.window === window, window.isVisible else { completionHandler(nil); return }
+                completionHandler(urls)
+            }
+        }
+    }
+
+    private func isCurrentServicePage(_ wv: WKWebView) -> Bool {
+        guard wv === webView, let host = wv.url?.host?.lowercased(),
+              let serviceHost = currentService.flatMap({ URL(string: $0.homeURL)?.host?.lowercased() }) else { return false }
+        return Self.isRelatedServiceHost(host, serviceHost: serviceHost) || Self.isServiceChatHost(host, serviceID: currentService?.id)
     }
 
     public func webViewDidClose(_ webView: WKWebView) {
@@ -718,6 +802,100 @@ public struct ThirdPartyAIWebViewRepresentable: NSViewRepresentable {
     }
 }
 
+fileprivate final class AIPanelNativeResizeHandle: NSView {
+    var onBegan: (() -> Void)?
+    var onChanged: ((CGFloat) -> Void)?
+    var onEnded: ((CGFloat) -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    private var startWindowX: CGFloat?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        setAccessibilityLabel("비서 대화창 너비 조절")
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        setAccessibilityLabel("비서 대화창 너비 조절")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.clear.setFill()
+        dirtyRect.fill(using: .copy)
+        NSColor.separatorColor.setFill()
+        let separatorWidth: CGFloat = 1.0
+        let separatorRect = NSRect(
+            x: bounds.midX - (separatorWidth / 2.0),
+            y: bounds.minY,
+            width: separatorWidth,
+            height: bounds.height
+        )
+        separatorRect.fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            startWindowX = nil
+            onDoubleClick?()
+            return
+        }
+        startWindowX = event.locationInWindow.x
+        onBegan?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startX = startWindowX else { return }
+        let delta = event.locationInWindow.x - startX
+        onChanged?(delta)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let startX = startWindowX else { return }
+        let delta = event.locationInWindow.x - startX
+        startWindowX = nil
+        onEnded?(delta)
+    }
+}
+
+fileprivate struct AIPanelNativeResizeDivider: NSViewRepresentable {
+    var onBegan: () -> Void
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat) -> Void
+    var onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> AIPanelNativeResizeHandle {
+        let view = AIPanelNativeResizeHandle(frame: .zero)
+        view.onBegan = onBegan
+        view.onChanged = onChanged
+        view.onEnded = onEnded
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: AIPanelNativeResizeHandle, context: Context) {
+        nsView.onBegan = onBegan
+        nsView.onChanged = onChanged
+        nsView.onEnded = onEnded
+        nsView.onDoubleClick = onDoubleClick
+    }
+}
+
 public struct AIPanelDivider: View {
     @Binding var preferredWidth: CGFloat
     let availableWidth: CGFloat
@@ -732,7 +910,7 @@ public struct AIPanelDivider: View {
     }
 
     public var body: some View {
-        PlannerNativeResizeDivider(
+        AIPanelNativeResizeDivider(
             onBegan: {
                 dragStartWidth = preferredWidth
             },
@@ -750,6 +928,11 @@ public struct AIPanelDivider: View {
                 preferredWidth = clamped
                 HTDBrowserDefaults.standard.set(Double(clamped), forKey: ThirdPartyAIPanelHost.storageKey)
                 dragStartWidth = nil
+            },
+            onDoubleClick: {
+                let defaultW = ThirdPartyAIPanelHost.defaultWidth
+                preferredWidth = defaultW
+                HTDBrowserDefaults.standard.set(Double(defaultW), forKey: ThirdPartyAIPanelHost.storageKey)
             }
         )
         .frame(width: 16)
@@ -856,7 +1039,7 @@ public struct ThirdPartyAIPanelView: View {
             .accessibilityLabel("대화창 닫기")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .frame(height: BrowserView.headerHeight)
         .background(palette.cardColor)
     }
 

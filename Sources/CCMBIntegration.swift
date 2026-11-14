@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import HTTCCMB
+import HTTHTDCore
 
 /// HTT 호스트와 CCMB 서버 현황 모듈(HTTCCMB) 간의 수명주기 및 설정 연결 객체.
 /// - 기본 상태는 완전 비활성화(OFF), 메뉴 막대 요약 표시 비활성화(OFF), 대상 서버 비어 있음(""), 수집 소스 NAS("nas").
@@ -92,6 +93,8 @@ public final class CCMBIntegration: ObservableObject {
         self.updater = updater
         self.loginItem = loginItem
         HTTCCMBProviderPageRouter.openPage = { url in EmbeddedBrowser.open(urls: [url]) }
+        // 기존 메뉴 막대 수집값을 사이드바 남은 사용량 표시로 전달(값 없음은 nil).
+        HTTCCMBRuntime.onUsageUpdate = { SidebarUsageStore.shared.update($0) }
     }
 
     // MARK: - 수명주기 제어

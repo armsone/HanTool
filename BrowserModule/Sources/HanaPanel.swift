@@ -63,6 +63,8 @@ struct HanaProtectedOptions {
     /// Exact raw `window.HanstreeAlfred.hostContext()` value the page must still report, checked in the page both at
     /// the snapshot and immediately before openQuery. nil keeps the manual / page-context behaviour. Memory only.
     var expectedHostContext: String? = nil
+    /// Request-owned masked page image (JPEG, memory only). Delivered through Hana's own file input and composer, never openQuery.
+    var image: Data? = nil
 }
 
 /// State of the single protected queue entry (the Planner result question). Never persisted.
@@ -109,7 +111,7 @@ private final class HanaCompletionDelivery {
 final class HanaPanelHost: ObservableObject {
     static let shared = HanaPanelHost()
 
-    static let defaultWidth: CGFloat = 372
+    static let defaultWidth: CGFloat = 400
     static let minWidth: CGFloat = 320
     static let maxWidth: CGFloat = 900
     static let storageKey = "HanaPanelWidth"
@@ -122,7 +124,6 @@ final class HanaPanelHost: ObservableObject {
 
     @Published var isPanelOpen: Bool = false {
         didSet {
-            if isPanelOpen && !oldValue { setPreferredWidth(Self.defaultWidth) }
             if !isPanelOpen {
                 locationHandler?.cancelPending()
                 uiDelegateHandler?.dismissActiveAlert()
@@ -183,6 +184,7 @@ final class HanaPanelHost: ObservableObject {
         if let plannerSession { return plannerSession }
         let session = AssistantWebSession(hostID: "hana-panel", coordinator: coordinator)
         plannerSession = session
+        session.onPageModeChange = { [weak self] on in self?.pushPageMode(on) }
         session.configure(serviceID: CuratedAIServices.hanaID, profileID: "default",
                           homeURL: Self.trustedURL.absoluteString, webView: webView)
         return session
@@ -190,7 +192,13 @@ final class HanaPanelHost: ObservableObject {
 
     @MainActor
     private init() {
-        self.preferredWidth = Self.defaultWidth
+        let saved = HTDBrowserDefaults.standard.double(forKey: Self.storageKey)
+        if saved >= Self.minWidth && saved <= Self.maxWidth {
+            self.preferredWidth = CGFloat(saved)
+        } else {
+            self.preferredWidth = Self.defaultWidth
+            HTDBrowserDefaults.standard.set(Double(Self.defaultWidth), forKey: Self.storageKey)
+        }
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
@@ -825,12 +833,230 @@ final class HanaPanelHost: ObservableObject {
             release()
             throw refuse("하나 대화나 프로젝트가 바뀌어 질문을 보내지 않았습니다.")
         }
+        if let image = options.image {
+            try await deliverWithImage(entry: entry, payload: payload, image: image, generation: generation,
+                                       originLive: originLive, release: release)
+            return
+        }
         pendingQueue.append(payload)
         pendingQueueCount = pendingQueue.count
         entry.enqueued = true
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             entry.continuation = continuation
             Task { @MainActor [weak self] in self?.drainQueue() }
+        }
+    }
+
+    // MARK: - Request-owned page image (existing #afFileInput + #afInput/#afSend composer path)
+
+    /// Shared by the attach/send/cleanup scripts: the composer's own attachment evidence (never reads values or file contents).
+    private static let composerAttachmentHelpers = #"""
+    const input = document.querySelector('#afInput');
+    const fileInput = document.querySelector('#afFileInput');
+    const scope = input ? (input.form || input.parentElement) : null;
+    const CHIP = '[class*="attach" i], [class*="upload" i], [class*="file-chip" i], [class*="thumb" i], [class*="preview" i]';
+    // Visible attachment metadata of the composer: class-based chips next to the input, plus the accessible
+    // "첨부할 이미지 N: 파일명 크기" preview outside the message history.
+    const ATT = '[aria-label*="첨부할 이미지"], img[alt*="첨부할 이미지"]';
+    const chips = () => {
+        const found = new Set();
+        if (scope) for (const el of scope.querySelectorAll(CHIP)) found.add(el);
+        const history = document.querySelector('#afMessages');
+        for (const el of document.querySelectorAll(ATT)) { if (!(history && history.contains(el))) found.add(el); }
+        return Array.from(found).filter((el) => {
+            if (['BUTTON', 'LABEL', 'INPUT', 'SVG', 'svg'].includes(el.tagName)) return false;
+            const r = el.getBoundingClientRect();
+            if (r.width <= 0 || r.height <= 0) return false;
+            return el.matches(ATT) || !!el.querySelector('img, canvas, video') || Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
+        });
+    };
+    const outer = () => { const all = chips(); return all.filter((el) => !all.some((o) => o !== el && o.contains(el))); };
+    const chipText = (el) => [el.getAttribute('aria-label') || '', el.getAttribute('alt') || '', el.textContent || '']
+        .concat(Array.from(el.querySelectorAll('[aria-label],[alt]')).map((x) => x.getAttribute('aria-label') || x.getAttribute('alt') || '')).join(' ');
+    const userFiles = () => !scope || Array.from(scope.querySelectorAll('input[type="file"]')).some((f) => f.files && f.files.length > 0);
+    const busy = () => !!(scope && scope.querySelector('progress, [aria-busy="true"], [class*="uploading" i], [class*="loading" i]'));
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    """#
+
+    private static let attachScript = #"""
+    \#(composerAttachmentHelpers)
+    const st = window.__hanaResultState;
+    if (!st || st.nonce !== nonce || st.input !== input || !input || input.tagName !== 'TEXTAREA') return 'changed';
+    if (!(fileInput instanceof HTMLInputElement) || fileInput.type !== 'file' || fileInput.disabled) return 'noFileInput';
+    if (input.value !== expected) return 'draft';
+    if (userFiles() || chips().length > 0) return 'userAttachment';
+    let bytes;
+    try { const bin = atob(b64); bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i); } catch (e) { return 'encode'; }
+    const file = new File([bytes], 'hantool-page-view.jpg', { type: 'image/jpeg', lastModified: Date.now() });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const own = { nonce: nonce, file: file, input: fileInput, chip: null };
+    window.__hanaOwnAttach = own;
+    fileInput.files = dt.files;
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    const started = Date.now();
+    let okSince = 0;
+    let why = 'nochip';
+    while (Date.now() - started < 8000) {
+        await sleep(150);
+        if (input.value !== expected) return 'draft';
+        if (window.__hanaOwnAttach !== own) return 'changed';
+        const send = document.querySelector('#afSend');
+        const sendOK = send instanceof HTMLButtonElement && !send.disabled;
+        // Own chip = the single outermost chip that appeared after the (empty) pre-attach composer; several means uncertain.
+        const top = outer();
+        if (top.length > 1) { return 'changed'; }
+        if (top.length === 1 && !own.chip) own.chip = top[0];
+        const chip = own.chip;
+        if (!chip) { okSince = 0; continue; }
+        why = 'preview';
+        if (!chip.isConnected || top.length !== 1 || top[0] !== chip) return 'changed';
+        if (!chipText(chip).includes('hantool-page-view.jpg')) { why = 'label'; okSince = 0; continue; }
+        const imgs = chip.matches('img') ? [chip] : Array.from(chip.querySelectorAll('img'));
+        const previewed = imgs.length > 0 ? imgs.every((i) => i.complete && i.naturalWidth > 0) : !!chip.querySelector('canvas');
+        const failed = !!scope.querySelector('[class*="error" i], [class*="fail" i], [aria-invalid="true"]') ||
+            !!chip.querySelector('[class*="error" i], [class*="fail" i], [role="alert"]');
+        if (failed) return 'failed';
+        if (busy()) { why = 'busy'; okSince = 0; continue; }
+        if (!previewed) { why = 'preview'; okSince = 0; continue; }
+        if (!sendOK) { why = 'send'; okSince = 0; continue; }
+        if (!okSince) okSince = Date.now();
+        if (Date.now() - okSince >= 450) return 'ready';
+    }
+    return 'timeout:' + why;
+    """#
+
+    private static let sendWithImageScript = #"""
+    \#(composerAttachmentHelpers)
+    const st = window.__hanaResultState;
+    const own = window.__hanaOwnAttach;
+    const root = document.querySelector('#afMessages');
+    const send = document.querySelector('#afSend');
+    const rowCount = () => root ? root.querySelectorAll(':scope > .af-msg-row').length : -1;
+    const rows = root ? Array.from(root.querySelectorAll(':scope > .af-msg-row')) : [];
+    const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const vis = rows.filter(shown);
+    const last = vis.length ? vis[vis.length - 1] : null;
+    if (!st || st.nonce !== nonce || st.root !== root || st.input !== input || !input || input.tagName !== 'TEXTAREA' ||
+        st.first !== (vis.length ? vis[0] : null) || st.last !== last || st.len !== (last ? (last.textContent || '').length : 0) ||
+        st.count !== vis.length) return 'changed';
+    try { delete window.__hanaResultState; } catch (e) {}
+    if (!own || own.nonce !== nonce || own.input !== fileInput || !own.chip || !own.chip.isConnected) return 'changed';
+    const top = outer();
+    if (top.length !== 1 || top[0] !== own.chip) return 'changed';
+    if (fileInput.files && fileInput.files.length > 0 && !(fileInput.files.length === 1 && fileInput.files[0] === own.file)) return 'changed';
+    if (input.value !== expected) return 'changed';
+    if (root.querySelector('.af-share-controls[data-streaming="true"]')) return 'busy';
+    if (busy() || !(send instanceof HTMLButtonElement) || send.disabled) return 'noSend';
+    const baseline = rowCount();
+    input.value = payload;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    send.click();
+    const started = Date.now();
+    while (Date.now() - started < 5000) {
+        await sleep(150);
+        if (rowCount() > baseline) {
+            if (input.value === payload) { input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }
+            try { delete window.__hanaOwnAttach; } catch (e) {}
+            return 'accepted';
+        }
+    }
+    // After the click the outcome is unknown (the upload may be in flight): never retry or remove the attachment;
+    // only the text this request wrote is given back, and only while it is still untouched.
+    if (input.value === payload) { input.value = expected; input.dispatchEvent(new Event('input', { bubbles: true })); }
+    try { delete window.__hanaOwnAttach; } catch (e) {}
+    return 'unknown';
+    """#
+
+    /// Removes only what this request put into the composer: its own file object and the one chip recorded as its own.
+    /// With no recorded chip (uncertain) nothing but the own file is touched, so user attachments are never removed.
+    private static let cleanupAttachScript = #"""
+    \#(composerAttachmentHelpers)
+    const own = window.__hanaOwnAttach;
+    if (!own || own.nonce !== nonce) return 'none';
+    try { delete window.__hanaOwnAttach; } catch (e) {}
+    if (fileInput && fileInput.files && fileInput.files.length === 1 && fileInput.files[0] === own.file) {
+        fileInput.files = new DataTransfer().files;
+        fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const chip = own.chip;
+    if (chip && chip.isConnected) {
+        const DEL = 'button[aria-label*="제거"], button[aria-label*="삭제"], button[aria-label*="빼기"], button[aria-label*="remove" i], button[aria-label*="delete" i], button[class*="remove" i], button[class*="delete" i], button[class*="close" i]';
+        // The remove button may sit beside the chip: it is used only when that container holds exactly this one chip.
+        const host = chip.querySelector(DEL) ? chip : chip.parentElement;
+        const alone = host === chip || outer().filter((c) => host.contains(c)).length === 1;
+        const dels = alone ? host.querySelectorAll(DEL) : [];
+        if (dels.length === 1) dels[0].click();
+    }
+    return 'cleaned';
+    """#
+
+    private func runComposerScript(_ body: String, arguments: [String: Any]) async -> String? {
+        guard Self.isTrustedAlfredURL(webView.url) else { return nil }
+        let value = try? await webView.callAsyncJavaScript(body, arguments: arguments, in: nil, contentWorld: .page)
+        return value as? String
+    }
+
+    private func deliverWithImage(entry: HanaProtectedEntry, payload: String, image: Data, generation: Int,
+                                  originLive: () async -> Bool, release: () -> Void) async throws {
+        let expected = entry.options.expectedDraft
+        func refuse(_ message: String) -> HanaResultQuestionError {
+            HanaResultQuestionError(message: message, ambiguous: false)
+        }
+        func valid() -> Bool {
+            protectedEntry === entry && navigationGeneration == generation && entry.isCurrent() && !hasAmbiguousError
+        }
+        isDispatching = true
+        defer { isDispatching = false }
+        let base: [String: Any] = ["nonce": entry.nonce, "expected": expected]
+        func cleanup() async {
+            _ = await runComposerScript(Self.cleanupAttachScript, arguments: base)
+        }
+        func fail(_ message: String, cleaning: Bool) async -> HanaResultQuestionError {
+            if cleaning { await cleanup() }
+            release()
+            return entry.failure ?? refuse(message)
+        }
+
+        var attachArgs = base
+        attachArgs["b64"] = image.base64EncodedString()
+        let attached = await runComposerScript(Self.attachScript, arguments: attachArgs)
+        switch attached {
+        case "ready": break
+        case "userAttachment":
+            throw await fail("하나 입력창에 첨부된 파일이 있어 화면 이미지를 함께 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: false)
+        case "draft", "changed":
+            throw await fail("하나 입력창이나 대화가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: true)
+        case "failed":
+            throw await fail("하나가 화면 이미지 첨부를 처리하지 못해 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: true)
+        case "noFileInput":
+            throw await fail("하나의 파일 첨부 입력을 찾지 못해 화면 이미지를 보내지 못했습니다. 입력은 그대로 둡니다.", cleaning: false)
+        default:
+            throw await fail("화면 이미지 첨부가 준비되었는지 확인하지 못해 보내지 않았습니다(\(attached ?? "응답 없음")). 입력은 그대로 둡니다.", cleaning: true)
+        }
+        guard valid() else { throw await fail("하나 대화나 프로젝트가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: true) }
+        let stillOrigin = await originLive()
+        guard stillOrigin, valid() else { throw await fail("원래 하나 대화를 확인할 수 없어 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: true) }
+
+        var sendArgs = base
+        sendArgs["payload"] = payload
+        let sent = await runComposerScript(Self.sendWithImageScript, arguments: sendArgs)
+        switch sent {
+        case "accepted":
+            hasAmbiguousError = false
+            statusMessage = nil
+            release()
+        case "unknown", nil:
+            // The page may or may not have sent it: keep everything as is and never retry.
+            let message = "전송 결과를 확인할 수 없습니다. 하나에서 확인해 주세요. 중복될 수 있습니다."
+            hasAmbiguousError = true
+            statusMessage = message
+            release()
+            throw HanaResultQuestionError(message: message, ambiguous: true)
+        case "busy":
+            throw await fail("하나가 응답 중이라 보내지 않았습니다. 입력은 그대로 둡니다.", cleaning: true)
+        default:
+            throw await fail("하나가 질문을 접수하지 않았습니다. 입력은 그대로 둡니다.", cleaning: true)
         }
     }
 
@@ -1076,15 +1302,11 @@ extension HanaPanelHost {
     /// A bare noun such as '요약' or '읽기' is not a request. Embedded in the script too.
     static let pageRequestPattern = #"(?:(?:읽어|요약해|요약\s*좀\s*해|요약\s*부탁|정리해|정리\s*좀\s*해|분석해|분석\s*좀\s*해|설명해|설명\s*좀\s*해|번역해|번역\s*좀\s*해)\s*(?:줘|주세|주실|줄래|주라|주십|봐|보세|달라|라(?![가-힣])|요)|(?:무슨|뭐|뭘|무엇|어떤)[^?？]*[?？])"#
 
-    /// Whole-text decision: a reference AND an explicit request, no negation, no quotation marks (quoted text is a description, not a command).
+    /// Whole-text decision for page-aware assistant questions: any non-empty natural query up to 10,000 characters.
     static func isPageContextQuestion(_ raw: String) -> Bool {
         let text = raw.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.utf16.count <= 10_000 else { return false }
-        let quotes = CharacterSet(charactersIn: "\"'`\u{201C}\u{201D}\u{2018}\u{2019}\u{300C}\u{300D}\u{300E}\u{300F}")
-        guard text.rangeOfCharacter(from: quotes) == nil else { return false }
-        return text.range(of: pageContextPattern, options: .regularExpression) != nil &&
-            text.range(of: pageRequestPattern, options: .regularExpression) != nil &&
-            text.range(of: pageContextNegation, options: .regularExpression) == nil
+        return true
     }
 
     static func isDelegationUtterance(_ raw: String) -> Bool {
@@ -1106,10 +1328,6 @@ extension HanaPanelHost {
         const channel = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\#(delegationHandlerName);
         if (!channel || window.__hdeleg) return;
         const PATTERN = /\#(delegationPattern)/u;
-        const PAGE_REF = /\#(pageContextPattern)/u;
-        const PAGE_NEG = /\#(pageContextNegation)/u;
-        const PAGE_REQ = /\#(pageRequestPattern)/u;
-        const QUOTE = /["'`“”‘’「」『』]/u;
         const hex = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
         const docID = hex();
         let nonce = null, pending = null, handledAt = -1e9, watching = null;
@@ -1118,7 +1336,10 @@ extension HanaPanelHost {
         // Off until native confirms the common planner does not own the control sentence (see setDelegate).
         let delegateOn = false;
         const control = (v) => { const t = String(v).normalize('NFC').trim(); return delegateOn && t.length > 0 && t.length <= 200 && PATTERN.test(t); };
-        const pageAsk = (v) => { const t = String(v).normalize('NFC').trim(); return t.length > 0 && t.length <= 10000 && PAGE_REF.test(t) && PAGE_REQ.test(t) && !PAGE_NEG.test(t) && !QUOTE.test(t); };
+        // Browser mode of this Hana conversation, mirrored from native (default off). Only a slash question or, while the mode
+        // is on, any question is handled here; everything else is sent by Hana itself, untouched.
+        let modeOn = false;
+        const pageAsk = (v) => { const t = String(v).normalize('NFC').trim(); return t.length > 0 && (modeOn || t.startsWith('/')); };
         const kindOf = (v) => control(v) ? 'delegate' : (pageAsk(v) ? 'pageContext' : null);
         // Anything the user attached to this message would be lost by a native re-send: then the site sends it untouched.
         const attached = (ta) => {
@@ -1191,7 +1412,8 @@ extension HanaPanelHost {
         const attempt = (e, ta) => {
             const kind = kindOf(ta.value);
             if (!kind) return;
-            if (kind === 'pageContext' && attached(ta)) return;
+            // An attachment is never dropped or re-sent here: native refuses the page question and keeps everything.
+            const hasAttachment = kind === 'pageContext' && attached(ta);
             e.preventDefault();
             e.stopImmediatePropagation();
             handledAt = e.timeStamp;
@@ -1199,7 +1421,7 @@ extension HanaPanelHost {
             const requestID = crypto.randomUUID();
             const origin = register();
             pending = { requestID: requestID, origin: origin };
-            if (!post({ type: kind, docID: docID, nonce: nonce || '', requestID: requestID, text: ta.value, origin: origin || '' })) {
+            if (!post({ type: kind, docID: docID, nonce: nonce || '', requestID: requestID, text: ta.value, origin: origin || '', attached: hasAttachment })) {
                 if (origin) drop(origin);
                 pending = null;
             }
@@ -1212,6 +1434,13 @@ extension HanaPanelHost {
         }, true);
         window.addEventListener('click', (e) => {
             if (!e.isTrusted || !e.target || !e.target.closest) return;
+            // Trusted New Chat control: mode off right now (before any next send), then tell native.
+            const fresh = document.getElementById('afNewChat');
+            if (fresh && e.target.closest('#afNewChat') === fresh) {
+                modeOn = false;
+                post({ type: 'newChat', docID: docID, nonce: nonce || '' });
+                return;
+            }
             const send = document.getElementById('afSend');
             const ta = input();
             if (send && send.tagName === 'BUTTON' && ta && e.target.closest('#afSend') === send) attempt(e, ta);
@@ -1230,7 +1459,14 @@ extension HanaPanelHost {
             origin: (token) => origins.get(token) || null,
             drop: drop,
             watch: watch,
-            setDelegate: (on) => { delegateOn = on === true; }
+            setDelegate: (on) => { delegateOn = on === true; },
+            setPageMode: (on) => { modeOn = on === true; },
+            // Typed "//": clears the draft only while it still is exactly that control input, then releases the request.
+            consume: (rid, expected) => {
+                const ta = input();
+                if (ta && ta.value === expected) { ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); }
+                if (pending && pending.requestID === rid) { pending = null; }
+            }
         };
         post({ type: 'ready', docID: docID });
     })();
@@ -1244,6 +1480,11 @@ extension HanaPanelHost {
     private func runDelegationScript(_ script: String) {
         guard Self.isTrustedAlfredURL(webView.url) else { return }
         webView.evaluateJavaScript(script, in: nil, in: Self.delegationWorld, completionHandler: nil)
+    }
+
+    /// Mirrors the session's browser mode into the typed-question script (off unless the session says on).
+    fileprivate func pushPageMode(_ on: Bool) {
+        runDelegationScript("window.__hdeleg && window.__hdeleg.setPageMode(\(on ? "true" : "false"))")
     }
 
     private func releaseDelegationInScript(requestID: UUID, accepted: Bool) {
@@ -1284,12 +1525,12 @@ extension HanaPanelHost {
 
     /// Sends the already formatted prompt through the protected FIFO to the SAME Hana conversation the question was typed in.
     /// The exact raw draft is consumed only after Hana's openQuery returned true; throws (draft kept) otherwise.
-    func sendPageContextPrompt(_ prompt: String, request: HanaDelegationRequest) async throws {
+    func sendPageContextPrompt(_ prompt: String, image: Data? = nil, request: HanaDelegationRequest) async throws {
         try await submitPlannerResultQuestion(
             payload: prompt,
             requestID: request.requestID,
             isCurrent: { [weak self] in self?.isPageContextCurrent(request) ?? false },
-            options: HanaProtectedOptions(origin: request, expectedDraft: request.utterance)
+            options: HanaProtectedOptions(origin: request, expectedDraft: request.utterance, image: image)
         )
     }
 
@@ -1484,6 +1725,8 @@ extension HanaPanelHost {
             if !commonPlannerOwnsDelegation {
                 runDelegationScript("window.__hdeleg && window.__hdeleg.setDelegate(true)")
             }
+            // A reloaded page keeps this conversation's browser mode until the session finds another conversation.
+            pushPageMode(plannerSession?.pageModeOn == true)
             return
         }
 
@@ -1510,6 +1753,8 @@ extension HanaPanelHost {
                     attemptPendingCompletions()
                 }
             }
+        case "newChat":
+            plannerSession?.resetPageModeForNewChat()
         case "stateChanged":
             attemptPendingCompletions()
         case "pageContext":
@@ -1524,17 +1769,48 @@ extension HanaPanelHost {
             }
             guard let text = body["text"] as? String, text.utf16.count <= 10_000, Self.isPageContextQuestion(text),
                   let origin = body["origin"] as? String, origin.utf16.count == 32 else {
-                reject("현재 페이지 질문으로 확인하지 못해 보내지 않았습니다. 입력은 그대로 둡니다.")
+                reject("질문을 확인하지 못해 보내지 않았습니다. 입력은 그대로 둡니다.")
                 return
             }
-            guard isPanelOpen, isBridgeReady, !isLoading, let handler = onPageContextRequest else {
-                reject("지금은 일반 브라우저 화면의 하나 대화창에서만 현재 페이지를 읽을 수 있습니다. 입력은 그대로 둡니다.")
+            guard isPanelOpen, isBridgeReady, !isLoading, let handler = onPageContextRequest,
+                  let session = plannerSession else {
+                reject("지금은 일반 브라우저 화면의 하나 대화창에서만 질문을 보낼 수 있습니다. 입력은 그대로 둡니다.")
+                return
+            }
+            let command = AIPageSlashCommand(parsing: text)
+            if command.sendsPage && body["attached"] as? Bool != false {
+                reject("첨부 파일이 있어 페이지 본문을 함께 보낼 수 없습니다. 첨부를 지우거나 슬래시 없이 보내 주세요. 입력은 그대로 둡니다.")
                 return
             }
             let request = HanaDelegationRequest(requestID: requestID, docID: doc.docID, docNonce: doc.nonce,
                                                 generation: doc.generation, originToken: origin, utterance: text)
             activePageContext = request
-            handler(request)
+            Task { @MainActor [weak self] in
+                // Which Hana conversation is this? A changed thread turns the mode off before anything is decided.
+                await session.prepareScope()
+                guard let self else { return }
+                guard self.isPageContextCurrent(request) else {
+                    self.finishPageContext(request, error: "하나 대화가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.")
+                    return
+                }
+                switch command.kind {
+                case .toggle:
+                    session.togglePageMode()
+                    self.activePageContext = nil
+                    self.releaseOrigin(request.originToken)
+                    self.statusMessage = nil
+                    if let ids = Self.scriptLiteral([request.requestID.uuidString.lowercased(), request.utterance]) {
+                        self.runDelegationScript("window.__hdeleg && window.__hdeleg.consume((\(ids))[0], (\(ids))[1])")
+                    }
+                case .empty:
+                    self.finishPageContext(request, error: "/ 뒤에 질문을 입력해 주세요. (/질문: 이번만 현재 페이지, //질문: 브라우저 모드 켜기, //: 켜기/끄기) 입력은 그대로 둡니다.")
+                case .plain where !session.pageModeOn:
+                    self.finishPageContext(request, error: "브라우저 모드가 꺼져 있어 보내지 않았습니다. 다시 보내 주세요. 입력은 그대로 둡니다.")
+                    self.pushPageMode(false)
+                default:
+                    handler(request)
+                }
+            }
         case "delegate":
             guard let requestID = requestUUID else { return }
             guard !acceptedDelegationIDs.contains(requestID), activeDelegation == nil, activePageContext == nil, !isCapturingPlannerHandoff else {
@@ -1925,6 +2201,100 @@ struct HanaWebViewRepresentable: NSViewRepresentable {
     }
 }
 
+fileprivate final class HanaNativeResizeHandle: NSView {
+    var onBegan: (() -> Void)?
+    var onChanged: ((CGFloat) -> Void)?
+    var onEnded: ((CGFloat) -> Void)?
+    var onDoubleClick: (() -> Void)?
+
+    private var startWindowX: CGFloat?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        setAccessibilityLabel("하나 대화창 너비 조절")
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        setAccessibilityLabel("하나 대화창 너비 조절")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.clear.setFill()
+        dirtyRect.fill(using: .copy)
+        NSColor.separatorColor.setFill()
+        let separatorWidth: CGFloat = 1.0
+        let separatorRect = NSRect(
+            x: bounds.midX - (separatorWidth / 2.0),
+            y: bounds.minY,
+            width: separatorWidth,
+            height: bounds.height
+        )
+        separatorRect.fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            startWindowX = nil
+            onDoubleClick?()
+            return
+        }
+        startWindowX = event.locationInWindow.x
+        onBegan?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startX = startWindowX else { return }
+        let delta = event.locationInWindow.x - startX
+        onChanged?(delta)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let startX = startWindowX else { return }
+        let delta = event.locationInWindow.x - startX
+        startWindowX = nil
+        onEnded?(delta)
+    }
+}
+
+fileprivate struct HanaNativeResizeDivider: NSViewRepresentable {
+    var onBegan: () -> Void
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat) -> Void
+    var onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> HanaNativeResizeHandle {
+        let view = HanaNativeResizeHandle(frame: .zero)
+        view.onBegan = onBegan
+        view.onChanged = onChanged
+        view.onEnded = onEnded
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: HanaNativeResizeHandle, context: Context) {
+        nsView.onBegan = onBegan
+        nsView.onChanged = onChanged
+        nsView.onEnded = onEnded
+        nsView.onDoubleClick = onDoubleClick
+    }
+}
+
 struct HanaPanelDivider: View {
     @ObservedObject var host: HanaPanelHost
     let availableWidth: CGFloat
@@ -1934,7 +2304,7 @@ struct HanaPanelDivider: View {
     @State private var hasPushedCursor: Bool = false
 
     var body: some View {
-        PlannerNativeResizeDivider(
+        HanaNativeResizeDivider(
             onBegan: {
                 dragStartWidth = host.preferredWidth
             },
@@ -1950,6 +2320,9 @@ struct HanaPanelDivider: View {
                 let clamped = min(max(HanaPanelHost.minWidth, newWidth), HanaPanelHost.maxWidth)
                 host.setPreferredWidth(clamped)
                 dragStartWidth = nil
+            },
+            onDoubleClick: {
+                host.setPreferredWidth(HanaPanelHost.defaultWidth)
             }
         )
         .frame(width: 16)

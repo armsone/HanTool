@@ -4,9 +4,19 @@ import WebKit
 
 private struct AssistantPlannerEntryBar: View {
     @ObservedObject var session: AssistantWebSession
+    @ObservedObject var browser: LoginBrowserModel
     let refreshToken: String
     let onManual: () -> Void
     @Environment(\.bkPalette) private var palette
+
+    /// Title of the page that would be read right now (the visible active browser tab).
+    private var currentPageTitle: String {
+        if browser.isShowingHome || browser.currentURL == nil { return "열린 페이지 없음" }
+        if !browser.pageTitle.isEmpty { return browser.pageTitle }
+        return browser.currentURL?.host ?? "웹 페이지"
+    }
+
+    private var modeLabel: String { "브라우저 모드 · \(currentPageTitle) · //로 해제" }
 
     private var activeFeedback: String? {
         let status = session.status
@@ -23,6 +33,18 @@ private struct AssistantPlannerEntryBar: View {
                     .font(.caption)
                     .lineLimit(2)
                     .help(feedback)
+            } else if session.pageModeOn {
+                Text(modeLabel)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(modeLabel)
+                    .accessibilityLabel(modeLabel)
+            } else if session.binding != nil {
+                Text("/질문: 현재 페이지 · //: 브라우저 모드")
+                    .font(.caption)
+                    .lineLimit(1)
+                    .opacity(0.6)
             }
             Spacer(minLength: 4)
             Button("플래너에게 넘기기", action: onManual)
@@ -36,6 +58,45 @@ private struct AssistantPlannerEntryBar: View {
         .frame(height: BrowserView.footerHeight)
         .background(activeFeedback != nil ? palette.accentSoftColor : palette.cardColor)
         .task(id: refreshToken) { await session.refreshCapability() }
+    }
+}
+
+/// Reports the width of the window this view is actually attached to (not NSApp.mainWindow/keyWindow).
+private struct AttachedWindowWidthProbe: NSViewRepresentable {
+    let onWidth: (CGFloat) -> Void
+
+    final class ProbeView: NSView {
+        var onWidth: (CGFloat) -> Void = { _ in }
+        private var observer: NSObjectProtocol?
+
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
+        func report() {
+            guard let width = window?.frame.width, width > 0 else { return }
+            onWidth(width)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            guard let win = window else { return }
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification, object: win, queue: .main
+            ) { [weak self] _ in self?.report() }
+            DispatchQueue.main.async { [weak self] in self?.report() }
+        }
+    }
+
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onWidth = onWidth
+        return view
+    }
+
+    func updateNSView(_ view: ProbeView, context: Context) {
+        view.onWidth = onWidth
+        DispatchQueue.main.async { [weak view] in view?.report() }
     }
 }
 
@@ -176,6 +237,7 @@ struct GlobalAssistantDock: View {
                     if let entrySession = isHanaPanel ? hanaHost.plannerSession : thirdPartyHost.plannerSession {
                         AssistantPlannerEntryBar(
                             session: entrySession,
+                            browser: model,
                             refreshToken: isHanaPanel
                                 ? "hana|\(hanaHost.isBridgeReady)"
                                 : "\(thirdPartyHost.currentService?.id ?? "")|\(thirdPartyHost.isLoading)",
@@ -200,6 +262,14 @@ struct GlobalAssistantDock: View {
         }
         .allowsHitTesting(open)
         .accessibilityHidden(!open)
+        .background(
+            AttachedWindowWidthProbe { width in
+                if windowWidth != width { windowWidth = width }
+            }
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        )
         .onChange(of: hanaHost.isPanelOpen) { isOpen in
             if !isOpen && appModel.activeAIPanelIsHana && appModel.isAIPanelOpen {
                 appModel.setAIPanelOpen(false)
@@ -238,7 +308,7 @@ struct GlobalAssistantDock: View {
                     appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
                     return
                 }
-                appModel.newTab()?.open(validatedString)
+                appModel.newTab(explicitURL: true)?.open(validatedString)
             }
             thirdPartyHost.onOpenExternalURL = { [weak appModel] url in
                 guard let appModel = appModel else { return }
@@ -247,7 +317,7 @@ struct GlobalAssistantDock: View {
                     appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
                     return
                 }
-                appModel.newTab()?.open(validatedString)
+                appModel.newTab(explicitURL: true)?.open(validatedString)
             }
         }
         .onDisappear {
@@ -398,6 +468,10 @@ struct GlobalAssistantDock: View {
                 guard let session = session else { return }
                 presentAcceptedAssistantHandoff(handoff, from: session)
             }
+            session.onPageContext = { [weak session] request in
+                guard let session = session else { return .failure(.cancelled) }
+                return await handleAssistantPageContext(request, from: session)
+            }
         }
     }
 
@@ -407,7 +481,96 @@ struct GlobalAssistantDock: View {
         for session in [hanaHost.plannerSession, thirdPartyHost.plannerSession].compactMap({ $0 }) {
             session.onHandoff = nil
             session.onAcceptedPresentation = nil
+            session.onPageContext = nil
         }
+    }
+
+    private func handleAssistantPageContext(_ request: AssistantWebPageContextRequest, from session: AssistantWebSession) async -> Result<AssistantWebPagePayload, AIPageCaptureError> {
+        // Text only: the masked screen is captured locally for OCR text, the image itself is never uploaded.
+        switch await promptWithCurrentPage(question: request.question, includeVisual: true, stillValid: { session.binding != nil }) {
+        case .success(let prompt): return .success(AssistantWebPagePayload(text: prompt.text, image: nil))
+        case .failure(let error): return .failure(error)
+        }
+    }
+
+    /// Prompt text plus the optional request-owned masked screen image that must travel as a separate attachment.
+    private struct PagePrompt {
+        let text: String
+        let image: Data?
+    }
+
+    /// Reads the page that is visible in the active browser tab right now and formats it with the stripped question.
+    /// Never falls back to the plain question: a missing, unreadable or changed page is a failure for the caller to report.
+    /// With `includeVisual`, the visible web view pixels (masked first, OCR only on the masked image) are added as an image;
+    /// a failed screen capture never blocks readable text, but the prompt then says no image was attached.
+    private func promptWithCurrentPage(question: String, includeVisual: Bool, stillValid: () -> Bool) async -> Result<PagePrompt, AIPageCaptureError> {
+        guard isBrowserVisible, appModel.browser === model, !model.isShowingHome, model.currentURL != nil,
+              model.webView != nil else { return .failure(.noPage) }
+
+        let tabID = model.tabID
+        let sourceURL = model.currentURL
+        let sourceWV = model.webView
+        let isHome = model.isShowingHome
+        let nonce = UUID()
+        pageContextNonce = nonce
+        func unchanged() -> Bool {
+            !Task.isCancelled && pageContextNonce == nonce && stillValid() && isBrowserVisible && appModel.browser === model
+                && model.tabID == tabID && model.webView === sourceWV && model.isShowingHome == isHome && model.currentURL == sourceURL
+        }
+
+        let result = await AIPageSnapshotExtractor.capture(tab: model, timeoutSeconds: 8)
+        guard !Task.isCancelled, pageContextNonce == nonce, stillValid() else { return .failure(.cancelled) }
+        guard unchanged() else {
+            return .failure(.executionFailed("읽는 동안 브라우저 페이지가 바뀌었습니다."))
+        }
+        var snapshot: AIPageSnapshot?
+        var readFailure: AIPageCaptureError?
+        switch result {
+        case .failure(let error):
+            // Only "could not read the DOM" may still be answered from the screen; any other failure stops here.
+            guard includeVisual, case .executionFailed = error else { return .failure(error) }
+            readFailure = error
+        case .success(let value):
+            snapshot = value
+        }
+
+        var visual: AIPageVisualContext?
+        var visualFailure: String?
+        if includeVisual {
+            let captured = await AIPageVisualCapture.capture(tab: model, ocr: HTDHostExport.shared.hostedImageTextRecognizer)
+            guard !Task.isCancelled, pageContextNonce == nonce, stillValid() else { return .failure(.cancelled) }
+            guard unchanged() else {
+                return .failure(.executionFailed("읽는 동안 브라우저 페이지가 바뀌었습니다."))
+            }
+            switch captured {
+            case .success(let value):
+                visual = value
+            case .failure(.cancelled):
+                return .failure(.cancelled)
+            case .failure(.executionFailed(let reason)):
+                visualFailure = reason
+            case .failure(let error):
+                visualFailure = error.localizedDescription
+            }
+        }
+
+        let page: AIPageSnapshot
+        if let snapshot {
+            page = snapshot
+        } else if visual != nil, let url = model.currentURL {
+            // DOM unreadable but safe pixels exist: only the address and title are known, the text stays empty.
+            page = AIPageSnapshot(cleanURL: AIPageURLSanitizer.cleanURL(from: url),
+                                  title: model.pageTitle.isEmpty ? (url.host ?? "웹 페이지") : model.pageTitle, text: "")
+        } else {
+            return .failure(readFailure ?? .noPage)
+        }
+        if !page.isYouTube && page.text.isEmpty && (page.selectedText ?? "").isEmpty && visual == nil {
+            let suffix = visualFailure.map { " 화면 이미지도 보낼 수 없었습니다: \($0)" } ?? ""
+            return .failure(.executionFailed("페이지에서 읽을 수 있는 본문을 찾지 못했습니다.\(suffix)"))
+        }
+        let text = AIPagePromptFormatter.format(snapshot: page, question: question, hasPageContextIntent: true,
+                                                visual: visual, visualFailure: includeVisual ? visualFailure : nil, imageAttached: false)
+        return .success(PagePrompt(text: text, image: nil))
     }
 
     private func startManualAssistantHandoff(_ session: AssistantWebSession?, isHana: Bool) {
@@ -431,34 +594,23 @@ struct GlobalAssistantDock: View {
         func refuse(_ message: String) {
             hanaHost.finishPageContext(request, error: message)
         }
-        guard isBrowserVisible, appModel.browser === model,
-              !model.isShowingHome, !model.isLoading, let sourceURL = model.currentURL, let sourceWV = model.webView else {
-            refuse("지금은 읽을 수 있는 일반 웹 페이지가 열려 있지 않아 보내지 않았습니다. 입력은 그대로 둡니다.")
-            return
-        }
-        let tabID = model.tabID
-        let nonce = UUID()
-        pageContextNonce = nonce
+
+        let command = AIPageSlashCommand(parsing: request.utterance)
         Task { @MainActor in
-            let result = await AIPageSnapshotExtractor.capture(tab: model, timeoutSeconds: 8)
-            guard !Task.isCancelled, pageContextNonce == nonce, isBrowserVisible,
-                  appModel.browser === model, model.tabID == tabID,
-                  model.webView === sourceWV, !model.isShowingHome, model.currentURL == sourceURL,
-                  hanaHost.isPageContextCurrent(request) else {
-                refuse("읽는 동안 페이지나 하나 대화가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.")
-                return
-            }
-            let snapshot: AIPageSnapshot
-            switch result {
-            case .failure(let error):
-                refuse((error.errorDescription ?? "페이지를 읽지 못했습니다.") + " 입력은 그대로 둡니다.")
-                return
+            let prompt: PagePrompt
+            switch await promptWithCurrentPage(question: command.question, includeVisual: true, stillValid: { hanaHost.isPageContextCurrent(request) }) {
             case .success(let value):
-                snapshot = value
+                prompt = value
+            case .failure(.cancelled):
+                refuse("읽는 동안 하나 대화가 바뀌어 보내지 않았습니다. 입력은 그대로 둡니다.")
+                return
+            case .failure(let error):
+                refuse("페이지 본문을 읽지 못해 보내지 않았습니다. \(error.localizedDescription) 입력은 그대로 둡니다.")
+                return
             }
-            let prompt = AIPagePromptFormatter.format(snapshot: snapshot, question: request.utterance)
             do {
-                try await hanaHost.sendPageContextPrompt(prompt, request: request)
+                try await hanaHost.sendPageContextPrompt(prompt.text, image: prompt.image, request: request)
+                if command.kind == .enable { hanaHost.plannerSession?.enablePageMode() }
                 hanaHost.finishPageContext(request, error: nil)
             } catch {
                 refuse(((error as? HanaResultQuestionError)?.message ?? "하나로 보내지 못했습니다.") + (error is HanaResultQuestionError ? "" : " 입력은 그대로 둡니다."))

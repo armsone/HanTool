@@ -3588,6 +3588,11 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         switch dataCollectionSourcePreference {
         case .localMac:
             guard let snapshot = lastSnapshot else { return }
+            HTTCCMBRuntime.onUsageUpdate?([
+                snapshot.usedPercent.map(UsageCore.remainingPercent),
+                ClaudeUsageCore.remainingPercent(from: lastClaudeSnapshot?.fiveHourUsedPercent),
+                Self.geminiRemainingValue(cli: lastGeminiSnapshot), nil, nil
+            ])
             setStatusTitle(Self.statusTitleParts(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil))
             statusItem.button?.setAccessibilityValue(
                 Self.accessibilityStatus(from: snapshot, claude: lastClaudeSnapshot, gemini: lastGeminiSnapshot, gemini2: nil)
@@ -3595,6 +3600,13 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         case .nas:
             // Menu-bar figures in NAS mode come only from NAS values (Gemini
             // = selected account), never from a leftover local reading.
+            HTTCCMBRuntime.onUsageUpdate?([
+                nasState.codexSnapshot?.usedPercent.map(UsageCore.remainingPercent),
+                ClaudeUsageCore.remainingPercent(from: nasState.claudeSnapshot?.fiveHourUsedPercent),
+                Self.geminiRemainingValue(cli: nasState.geminiSnapshot),
+                Self.geminiRemainingValue(cli: nasState.gemini2Snapshot),
+                Self.geminiRemainingValue(cli: nasState.gemini3Snapshot)
+            ])
             let parts = Self.statusTitleParts(
                 from: nasState.codexSnapshot,
                 claude: nasState.claudeSnapshot,
@@ -5325,7 +5337,9 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             return
         }
         guard let button = statusItem.button else { return }
-        let font = button.font ?? NSFont.menuBarFont(ofSize: 0)
+        // Same menu bar size, but equal-width digits so "81" lines up with "99".
+        let baseFont = button.font ?? NSFont.menuBarFont(ofSize: 0)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: baseFont.pointSize, weight: .regular)
         let title = NSMutableAttributedString()
         for (index, part) in parts.enumerated() {
             if index > 0 {
@@ -5718,6 +5732,9 @@ public enum HTTCCMBRuntime {
 
     private static var sharedController: AppDelegate?
 
+    /// 남은 사용량 5칸(Codex 주간, Claude 세션, Gemini 1~3). 값이 없으면 nil.
+    public static var onUsageUpdate: (([Double?]) -> Void)?
+
     public static var isRunning: Bool {
         sharedController != nil
     }
@@ -5745,6 +5762,7 @@ public enum HTTCCMBRuntime {
     public static func stop() {
         sharedController?.stop()
         sharedController = nil
+        onUsageUpdate?([nil, nil, nil, nil, nil])
     }
 
     public static func showDashboard() {

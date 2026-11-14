@@ -6,7 +6,7 @@ import WebKit
 /// hands the pane the new active model; its video list is the "이 페이지의 영상" tab.
 struct BrowserView: View {
     static let footerHeight: CGFloat = 28
-    static let headerHeight: CGFloat = 45 // Measured one-row Hana header at the 372pt opening width.
+    static let headerHeight: CGFloat = 44 // Aligned with one-row Hana assistant header at 400pt width.
     @ObservedObject var appModel: AppModel
     @Environment(\.bkPalette) private var palette
 
@@ -245,7 +245,7 @@ struct BrowserPane: View {
                                             appModel.browser.notice = "더 이상 탭을 열 수 없습니다. (최대 \(AppModel.maxTabs)개)"
                                             return
                                         }
-                                        appModel.newTab()?.open(validated)
+                                        appModel.newTab(explicitURL: true)?.open(validated)
                                     }
                                 })
                             }

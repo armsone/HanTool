@@ -59,6 +59,10 @@ public final class UnifiedBrowserManager {
             guard key == "browser" else { return nil }
             return AnyView(AISettingsView(scope: .browser))
         }
+        HTDHostExport.shared.hostedImageTextRecognizer = { image in
+            let regions = try await ImageTextRecognizer.recognize(image, assetID: "page-view")
+            return regions.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: "\n")
+        }
         return HTDHostExport.shared.makeMainBrowserViewController(toolView: toolView) { [weak self] toolID in
             self?.handleToolSelectedFromModule(toolID)
         }

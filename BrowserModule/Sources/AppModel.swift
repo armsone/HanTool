@@ -381,6 +381,7 @@ public final class AppModel: ObservableObject {
 
     public init(configuration: AppConfiguration = .production()) {
         let firstTab = LoginBrowserModel()
+        firstTab.startTarget = .newWindow
         self.tabs = [firstTab]
         self.selectedTabID = firstTab.tabID
         self.addressFocusRequest = AddressFocusRequest(tabID: firstTab.tabID, attemptId: nil, isNewTab: true)   // launch: built-in New Tab takes address focus
@@ -532,11 +533,12 @@ public final class AppModel: ObservableObject {
             extensions.tabClosed(tab)
         }
         let freshTab = LoginBrowserModel()
+        freshTab.startTarget = .newWindow   // reopened window: its first tab starts with the new-window start page
+        freshTab.skipStartPage = false
         freshTab.appModel = self
         self.tabs = [freshTab]
         self.selectedTabID = freshTab.tabID
         self.selectedTab = .browser
-        freshTab.showBuiltInHome()
         requestAddressFocus(for: freshTab, isNewTab: true, isExplicit: true)
     }
 
@@ -1194,8 +1196,9 @@ public final class AppModel: ObservableObject {
 
     /// "+": a blank tab with the usual start behaviour (built-in home or the user's start page).
     @discardableResult
-    func newTab() -> LoginBrowserModel? {
+    func newTab(explicitURL: Bool = false) -> LoginBrowserModel? {
         let tab = LoginBrowserModel()
+        tab.skipStartPage = explicitURL
         tab.appModel = self
         let index = tabs.firstIndex(where: { $0.tabID == selectedTabID }) ?? (tabs.count - 1)
         let previous = browser
@@ -1251,7 +1254,7 @@ public final class AppModel: ObservableObject {
             let current = browser
             if current.isShowingHome {   // blank/home tab: open() drops its stale home view
                 current.open(url)
-            } else if tabs.count < Self.maxTabs, let tab = newTab() {
+            } else if tabs.count < Self.maxTabs, let tab = newTab(explicitURL: true) {
                 tab.open(url)
             } else {
                 continue

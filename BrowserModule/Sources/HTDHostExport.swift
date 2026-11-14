@@ -19,6 +19,9 @@ public final class HTDHostExport: ObservableObject {
     public var onThemeChanged: ((String) -> Void)? = nil
     public var hostedTranslationControl: ((String) -> AnyView?)? = nil
     public var hostedFeatureSettings: ((String) -> AnyView?)? = nil
+    /// 호스트의 번역 OCR(ImageTextRecognizer) 연결. 없으면 nil(OCR 불가). 이미지는 호출 전에 이미 마스킹된 것이어야 하고,
+    /// 결과는 인식 순서대로 합친 텍스트다. 취소는 CancellationError로 전파된다.
+    public var hostedImageTextRecognizer: ((CGImage) async throws -> String)? = nil
 
     private var cachedController: NSViewController? = nil
     private var themeCancellable: AnyCancellable? = nil
@@ -73,10 +76,6 @@ public final class HTDHostExport: ObservableObject {
 
     /// 브라우저 뷰로 전환하고 선택적으로 주소들을 엽니다.
     public func showBrowser(urls: [URL] = []) {
-        if cachedController?.view.window?.isVisible != true && appModel.isAIPanelOpen {
-            HanaPanelHost.shared.setPreferredWidth(HanaPanelHost.defaultWidth)
-            appModel.thirdPartyAIHost.setPreferredWidth(ThirdPartyAIPanelHost.defaultWidth)
-        }
         if self.hostedToolID != nil {
             cachedController?.view.window?.makeFirstResponder(nil)
         }

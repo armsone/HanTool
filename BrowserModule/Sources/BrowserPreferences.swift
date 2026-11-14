@@ -15,6 +15,13 @@ public enum StartPageMode: String, Codable, CaseIterable {
     }
 }
 
+/// Which kind of fresh browser surface is being started. `startPageMode`/`customHomeURL` keep the "new window" choice
+/// (the pre-split storage fields); the "new tab" choice is stored beside them.
+public enum StartPageTarget {
+    case newWindow
+    case newTab
+}
+
 public struct BookmarkCategory: Identifiable, Codable, Equatable {
     public let id: UUID
     public var name: String
@@ -136,6 +143,9 @@ public struct AdHideSiteRule: Codable, Equatable {
 public struct BrowserPreferencesData: Codable {
     public var startPageMode: StartPageMode = .builtInHome
     public var customHomeURL: String = ""
+    /// nil = file written before the split: the new-tab choice is restored from the new-window one on load.
+    public var newTabStartPageMode: StartPageMode?
+    public var newTabCustomHomeURL: String?
     public var bookmarks: [BookmarkItem] = []
     public var categories: [BookmarkCategory] = []
     public var mouseGesturesEnabled: Bool = true
@@ -147,6 +157,8 @@ public struct BrowserPreferencesData: Codable {
     public init(
         startPageMode: StartPageMode = .builtInHome,
         customHomeURL: String = "",
+        newTabStartPageMode: StartPageMode? = nil,
+        newTabCustomHomeURL: String? = nil,
         bookmarks: [BookmarkItem] = [],
         categories: [BookmarkCategory] = [],
         mouseGesturesEnabled: Bool = true,
@@ -157,6 +169,8 @@ public struct BrowserPreferencesData: Codable {
     ) {
         self.startPageMode = startPageMode
         self.customHomeURL = customHomeURL
+        self.newTabStartPageMode = newTabStartPageMode
+        self.newTabCustomHomeURL = newTabCustomHomeURL
         self.bookmarks = bookmarks
         self.categories = categories
         self.mouseGesturesEnabled = mouseGesturesEnabled
@@ -167,13 +181,15 @@ public struct BrowserPreferencesData: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case startPageMode, customHomeURL, bookmarks, categories, mouseGesturesEnabled, autoRetryTLS, adBlockingEnabled, adHideRules, adHideSiteRules
+        case startPageMode, customHomeURL, newTabStartPageMode, newTabCustomHomeURL, bookmarks, categories, mouseGesturesEnabled, autoRetryTLS, adBlockingEnabled, adHideRules, adHideSiteRules
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.startPageMode = try container.decodeIfPresent(StartPageMode.self, forKey: .startPageMode) ?? .builtInHome
         self.customHomeURL = try container.decodeIfPresent(String.self, forKey: .customHomeURL) ?? ""
+        self.newTabStartPageMode = try? container.decodeIfPresent(StartPageMode.self, forKey: .newTabStartPageMode)
+        self.newTabCustomHomeURL = try? container.decodeIfPresent(String.self, forKey: .newTabCustomHomeURL)
         self.bookmarks = try container.decodeIfPresent([BookmarkItem].self, forKey: .bookmarks) ?? []
         self.categories = try container.decodeIfPresent([BookmarkCategory].self, forKey: .categories) ?? []
         self.mouseGesturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .mouseGesturesEnabled) ?? true
@@ -195,6 +211,8 @@ public final class BrowserPreferences: ObservableObject {
 
     @Published public private(set) var startPageMode: StartPageMode = .builtInHome
     @Published public private(set) var customHomeURL: String = ""
+    @Published public private(set) var newTabStartPageMode: StartPageMode = .builtInHome
+    @Published public private(set) var newTabCustomHomeURL: String = ""
     @Published public private(set) var bookmarks: [BookmarkItem] = []
     @Published public private(set) var categories: [BookmarkCategory] = []
     @Published public private(set) var mouseGesturesEnabled: Bool = true
@@ -282,17 +300,14 @@ public final class BrowserPreferences: ObservableObject {
             }
             self.bookmarks = validBookmarks
 
-            if decoded.startPageMode == .customURL {
-                if let validCustom = Self.validateWebURL(decoded.customHomeURL) {
-                    self.startPageMode = .customURL
-                    self.customHomeURL = validCustom
-                } else {
-                    self.startPageMode = .builtInHome
-                    self.customHomeURL = ""
-                }
+            (self.startPageMode, self.customHomeURL) = Self.validatedStartPage(decoded.startPageMode, decoded.customHomeURL)
+            // First run after the split: the user's existing choice is restored into both entries unchanged.
+            if let tabMode = decoded.newTabStartPageMode {
+                (self.newTabStartPageMode, self.newTabCustomHomeURL) =
+                    Self.validatedStartPage(tabMode, decoded.newTabCustomHomeURL ?? "")
             } else {
-                self.startPageMode = .builtInHome
-                self.customHomeURL = ""
+                self.newTabStartPageMode = self.startPageMode
+                self.newTabCustomHomeURL = self.customHomeURL
             }
 
             self.mouseGesturesEnabled = decoded.mouseGesturesEnabled
@@ -331,6 +346,8 @@ public final class BrowserPreferences: ObservableObject {
             let dataObj = BrowserPreferencesData(
                 startPageMode: startPageMode,
                 customHomeURL: customHomeURL,
+                newTabStartPageMode: newTabStartPageMode,
+                newTabCustomHomeURL: newTabCustomHomeURL,
                 bookmarks: bookmarks,
                 categories: categories,
                 mouseGesturesEnabled: mouseGesturesEnabled,
@@ -1059,22 +1076,37 @@ public final class BrowserPreferences: ObservableObject {
 
     // MARK: - Home / Start Page Settings
 
+    private static func validatedStartPage(_ mode: StartPageMode, _ url: String) -> (StartPageMode, String) {
+        if mode == .customURL, let valid = validateWebURL(url) { return (.customURL, valid) }
+        return (.builtInHome, "")
+    }
+
+    /// The saved start page for a new window or a new tab.
+    public func startPage(for target: StartPageTarget) -> (mode: StartPageMode, url: String) {
+        switch target {
+        case .newWindow: return (startPageMode, customHomeURL)
+        case .newTab: return (newTabStartPageMode, newTabCustomHomeURL)
+        }
+    }
+
     @discardableResult
-    public func setStartPage(mode: StartPageMode, customURL: String) -> (success: Bool, error: String?) {
-        if mode == .builtInHome {
-            self.startPageMode = .builtInHome
-            self.customHomeURL = ""
-            let ok = persist()
-            return (ok, ok ? nil : "설정을 저장하지 못했습니다.")
-        } else {
+    public func setStartPage(mode: StartPageMode, customURL: String,
+                             target: StartPageTarget = .newWindow) -> (success: Bool, error: String?) {
+        var newMode = StartPageMode.builtInHome
+        var newURL = ""
+        if mode == .customURL {
             guard let valid = Self.validateWebURL(customURL) else {
                 return (false, "유효한 http 또는 https 주소를 입력해 주세요.")
             }
-            self.startPageMode = .customURL
-            self.customHomeURL = valid
-            let ok = persist()
-            return (ok, ok ? nil : "설정을 저장하지 못했습니다.")
+            newMode = .customURL
+            newURL = valid
         }
+        switch target {
+        case .newWindow: (startPageMode, customHomeURL) = (newMode, newURL)
+        case .newTab: (newTabStartPageMode, newTabCustomHomeURL) = (newMode, newURL)
+        }
+        let ok = persist()
+        return (ok, ok ? nil : "설정을 저장하지 못했습니다.")
     }
 
     // MARK: - Markdown Import/Export

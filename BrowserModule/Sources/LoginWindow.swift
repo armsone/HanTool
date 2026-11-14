@@ -201,6 +201,10 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
 
     private var observations: [NSKeyValueObservation] = []
     private var pendingURL: URL?
+    /// Which start page applies when this tab starts up empty (first tab of a window = new window, "+" tab = new tab).
+    var startTarget: StartPageTarget = .newTab
+    /// The tab is created for an explicit address: the saved start page must not be loaded first.
+    var skipStartPage = false
     /// The user asked for the browser (tab shown or address opened); only then is a session store created.
     private var wanted = false
     /// Bumped for every new WebView/session and on teardown: late callbacks of an old browser are ignored.
@@ -475,9 +479,12 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             if let pending = pendingURL {
                 isShowingHome = false
                 prepare()
+            } else if skipStartPage {
+                isShowingHome = true
+                prepare()
             } else {
-                let prefs = appModel?.preferences
-                if prefs?.startPageMode == .customURL, let custom = prefs?.customHomeURL, !custom.isEmpty {
+                let start = appModel?.preferences.startPage(for: startTarget)
+                if start?.mode == .customURL, let custom = start?.url, !custom.isEmpty {
                     isShowingHome = false
                     prepare()
                     open(custom)
@@ -1279,9 +1286,10 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             return
         }
         let prefs = app.preferences
-        if prefs.startPageMode == .customURL && !prefs.customHomeURL.isEmpty {
+        let start = prefs.startPage(for: .newTab)
+        if start.mode == .customURL && !start.url.isEmpty {
             discardStaleHomeView()
-            open(prefs.customHomeURL)
+            open(start.url)
         } else {
             showBuiltInHome()
         }

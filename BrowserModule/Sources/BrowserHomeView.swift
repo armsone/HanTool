@@ -188,7 +188,7 @@ struct BrowserHomeView: View {
             }
             if let onOpenNewTab = onOpenNewTab {
                 onOpenNewTab(validURL)
-            } else if let tab = appModel.newTab() {
+            } else if let tab = appModel.newTab(explicitURL: true) {
                 tab.open(validURL)
             }
         }
@@ -771,11 +771,15 @@ struct BrowserHomeView: View {
     }
 
     private var startPageSummary: String {
-        switch preferences.startPageMode {
+        "새 창: \(Self.summary(preferences.startPage(for: .newWindow))) · 새 탭: \(Self.summary(preferences.startPage(for: .newTab)))"
+    }
+
+    private static func summary(_ start: (mode: StartPageMode, url: String)) -> String {
+        switch start.mode {
         case .builtInHome:
             return "기본 시작 화면 (즐겨찾기 목록)"
         case .customURL:
-            return preferences.customHomeURL.isEmpty ? "사용자 지정 시작 주소" : preferences.customHomeURL
+            return start.url.isEmpty ? "사용자 지정 시작 주소" : start.url
         }
     }
 }
@@ -1598,6 +1602,7 @@ struct BrowserHomeSettingsSheet: View {
     @Environment(\.bkPalette) private var palette
     let onDismiss: () -> Void
 
+    @State private var target: StartPageTarget = .newWindow
     @State private var selectedMode: StartPageMode
     @State private var customURLText: String
     @State private var validationError: String?
@@ -1606,8 +1611,9 @@ struct BrowserHomeSettingsSheet: View {
         self.preferences = preferences
         self.model = model
         self.onDismiss = onDismiss
-        _selectedMode = State(initialValue: preferences.startPageMode)
-        _customURLText = State(initialValue: preferences.customHomeURL)
+        let start = preferences.startPage(for: .newWindow)
+        _selectedMode = State(initialValue: start.mode)
+        _customURLText = State(initialValue: start.url)
     }
 
     var body: some View {
@@ -1622,9 +1628,22 @@ struct BrowserHomeSettingsSheet: View {
                     .accessibilityLabel("설정 닫기")
             }
 
-            Text("새 창을 열거나 홈 버튼을 눌렀을 때 표시할 방식을 선택하세요.")
+            Text("새 창을 열 때와 새 탭을 열 때 표시할 방식을 각각 선택하세요. 홈 버튼은 해당 탭의 설정을 따릅니다.")
                 .font(.caption)
                 .foregroundColor(palette.mutedColor)
+
+            Picker("적용 대상", selection: $target) {
+                Text("새 창을 열 때").tag(StartPageTarget.newWindow)
+                Text("새 탭을 열 때").tag(StartPageTarget.newTab)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .onChange(of: target) { newTarget in
+                let start = preferences.startPage(for: newTarget)
+                selectedMode = start.mode
+                customURLText = start.url
+                validationError = nil
+            }
 
             VStack(alignment: .leading, spacing: 10) {
                 Picker("시작 방식", selection: $selectedMode) {
@@ -1673,7 +1692,7 @@ struct BrowserHomeSettingsSheet: View {
                 Button("취소") { onDismiss() }
                     .buttonStyle(.bordered)
                 Button("저장") {
-                    let result = preferences.setStartPage(mode: selectedMode, customURL: customURLText)
+                    let result = preferences.setStartPage(mode: selectedMode, customURL: customURLText, target: target)
                     if result.success {
                         onDismiss()
                     } else {

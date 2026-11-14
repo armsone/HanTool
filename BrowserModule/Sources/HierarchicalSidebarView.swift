@@ -141,6 +141,7 @@ struct HierarchicalSidebarView: View {
                 .padding(.horizontal, 8)
             }
 
+            SidebarUsageSection()
             helpFooter
         }
         .frame(minWidth: 200, maxWidth: 260)
@@ -158,6 +159,7 @@ struct HierarchicalSidebarView: View {
                 .padding(.horizontal, 4)
             }
 
+            SidebarUsageCompact()
             helpFooter
         }
         .frame(minWidth: 55, maxWidth: 68)

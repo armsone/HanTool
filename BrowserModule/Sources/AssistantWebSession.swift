@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Combine
 import CryptoKit
 import WebKit
@@ -85,6 +86,22 @@ enum AssistantWebHandoffDecision {
     case refused(String)        // status text; the draft is always preserved
 }
 
+struct AssistantWebPageContextRequest: Equatable {
+    var requestUUID: String
+    var rawQuestion: String
+    /// The question without its slash prefix (what the AI is asked).
+    var question: String
+    var source: AssistantWebHandoffSource
+    var serviceID: String
+    var originToken: String
+}
+
+/// Formatted page prompt plus an optional request-owned masked page image (memory only, never logged or stored).
+struct AssistantWebPagePayload {
+    var text: String
+    var image: Data?
+}
+
 // MARK: - Service adapter (coordinator side)
 
 /// The coordinator keeps one adapter per service ID; this one fans out to the per-host sessions of that service.
@@ -168,6 +185,18 @@ final class AssistantWebSession: NSObject, ObservableObject {
     /// for a refused / stale / uncertain handoff, a changed or uncleared draft, or after a reconfigure. It carries no
     /// execution authority; the owner decides whether presenting the planner is still appropriate.
     var onAcceptedPresentation: ((AssistantWebHandoff) -> Void)?
+    /// Called only for a slash question (`/질문`, `//질문`) or an unprefixed question while this conversation's browser
+    /// mode is on. A success is the formatted prompt written to the composer and submitted; a failure is never sent.
+    var onPageContext: ((AssistantWebPageContextRequest) async -> Result<AssistantWebPagePayload, AIPageCaptureError>)?
+    /// Providers with a verified image-attachment route; only these may receive the page picture next to the text.
+    var supportsPageImage: Bool { ["claude", "chatgpt", "gemini", "perplexity", "grok", "copilot", "meta"].contains(kind) }
+    /// Hana only: its typed-question script lives in the panel host, which mirrors the mode from here.
+    var onPageModeChange: ((Bool) -> Void)?
+    /// Browser mode of THIS conversation. Runtime only: never persisted, reset with a new conversation or host.
+    @Published private(set) var pageModeOn = false
+    private var pageModeKey: String?
+    private var pageModeMayAdopt = false
+    private var pageModeResets = 0
     /// Native status for the common UI (also published in `status`).
     var onStatus: ((AssistantWebStatus) -> Void)?
     /// Idle / ready / visible / input blur / new rows. Only a reason to try the durable outbox again; it never
@@ -241,7 +270,8 @@ final class AssistantWebSession: NSObject, ObservableObject {
         self.kind = Self.kind(serviceID: serviceID, origin: origin)
         self.world = WKContentWorld.world(name: "HTT.planner.\(hostID).\(epoch)")
         self.nonce = UUID().uuidString
-        self.scriptSource = AssistantWebScript.source(kind: kind, origin: origin, pattern: trigger.pattern,
+        self.scriptSource = AssistantWebScript.source(kind: kind, origin: origin,
+                                                      origins: Self.trustedOrigins(serviceID: serviceID, home: origin), pattern: trigger.pattern,
                                                       handler: Self.handlerName, nonce: nonce, watch: watchEnabled)
         guard registerRoute() else {
             publish(.unavailable, "이 서비스에는 이미 다른 전송 방식이 연결되어 있어 공통 연결을 사용하지 않습니다.")
@@ -349,7 +379,9 @@ final class AssistantWebSession: NSObject, ObservableObject {
             return .refused(text)
         }
         guard result["ok"] as? Bool == true else {
-            let text = Self.describe(result["reason"] as? String) + " 입력 중인 내용은 그대로입니다."
+            // Fixed stage codes/counts only (see diagCode); anything else is dropped.
+            let diag = (result["diag"] as? String).flatMap { $0.range(of: "^[a-z0-9:;=._-]{1,400}$", options: .regularExpression) != nil ? " [\($0)]" : nil } ?? ""
+            let text = Self.describe(result["reason"] as? String) + diag + " 입력 중인 내용은 그대로입니다."
             publish(.refused, text, draftPreserved: true)
             return .refused(text)
         }
@@ -360,23 +392,60 @@ final class AssistantWebSession: NSObject, ObservableObject {
 
     // MARK: Message handling
 
+    /// Page-question stage markers in the app's local log: fixed codes and the closed provider kind only (never question
+    /// text, page content, addresses, tokens or image data), bounded per document, to locate a runtime receive → submit
+    /// stop. Public at the default level so a normal `log show` / `log stream` reads them; nothing else is made public.
+    private static let diagLog = Logger(subsystem: "com.local.screentranslator", category: "AssistantDiag")
+    private var pcLogBudget = 48
+    private func pcLog(_ code: String) {
+        guard pcLogBudget > 0 else { return }
+        pcLogBudget -= 1
+        Self.diagLog.notice("[HttpsDown] afpc \(self.kind, privacy: .public) \(code, privacy: .public)")
+    }
+
+    /// Which receive guard refused a message, as fixed bits in guard order: epoch, world, main frame, web view, trusted
+    /// origin, nonce, document token. Logging only; the guard itself is unchanged and nothing is sent back to the page.
+    private func receiveGate(_ message: WKScriptMessage, epoch messageEpoch: Int) -> String {
+        let body = message.body as? [String: Any]
+        let bits = [messageEpoch == epoch, world != nil && message.world == world, message.frameInfo.isMainFrame,
+                    webView != nil && message.webView === webView,
+                    isTrustedOrigin(Self.origin(of: message.frameInfo.securityOrigin)),
+                    body?["n"] as? String == nonce,(body?["doc"] as? String).map(Self.isToken) == true]
+        return bits.map { $0 ? "1" : "0" }.joined()
+    }
+
     fileprivate func receive(_ message: WKScriptMessage, epoch messageEpoch: Int) {
         guard messageEpoch == epoch, let world, message.world == world, message.frameInfo.isMainFrame,
               let webView, message.webView === webView,
-              Self.origin(of: message.frameInfo.securityOrigin) == homeOrigin,
+              isTrustedOrigin(Self.origin(of: message.frameInfo.securityOrigin)),
               let body = message.body as? [String: Any], body["n"] as? String == nonce,
-              let doc = body["doc"] as? String, Self.isToken(doc), let type = body["t"] as? String else { return }
+              let doc = body["doc"] as? String, Self.isToken(doc), let type = body["t"] as? String else {
+            if (message.body as? [String: Any])?["t"] as? String == "pageContext" { pcLog("rx-drop g=" + receiveGate(message, epoch: messageEpoch)) }
+            return
+        }
         if type == "hello" {
+            pcLogBudget = 48
             docID = doc
             docGeneration += 1
             observedStable = nil
             hanaProof = nil
             noteObservation(body)
             capability = .unknown("페이지를 확인하는 중입니다.")
+            reconcilePageMode()
+            pushPageMode()
             return
         }
-        guard doc == docID else { return }
+        guard doc == docID else {
+            // Our own (nonce-checked) script on a document this session no longer tracks: nothing was sent and the
+            // composer is untouched, so a page question is refused with a fixed code instead of staying silent.
+            if type == "pageContext" {
+                pcLog("rx-doc")
+                publish(.refused, "대화 화면이 바뀌어 보내지 않았습니다. [pc-doc] 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
+            }
+            return
+        }
         noteObservation(body)
+        reconcilePageMode()
         let currentEpoch = epoch
         let generation = docGeneration
         switch type {
@@ -388,15 +457,235 @@ final class AssistantWebSession: NSObject, ObservableObject {
         case "touch":
             userTouched = true
         case "refused":
+            if let r = body["reason"] as? String, r.hasPrefix("pagecontext-"), r.range(of: "^[a-z-]{1,40}$", options: .regularExpression) != nil {
+                pcLog("rx-refused " + r)
+            }
             let reason = Self.describe(body["reason"] as? String)
             publish(.refused, "플래너에 넘기지 못했습니다. \(reason) 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
         case "trigger":
             Task { [weak self] in
                 await self?.handleTrigger(body, epoch: currentEpoch, generation: generation)
             }
+        case "pageContext":
+            pcLog("rx-ok")
+            Task { [weak self] in
+                await self?.handlePageContext(body, epoch: currentEpoch, generation: generation)
+            }
         default:
             break
         }
+    }
+
+    private func handlePageContext(_ body: [String: Any], epoch triggerEpoch: Int, generation: Int) async {
+        guard triggerEpoch == epoch, let request = body["req"] as? String, Self.isToken(request), !seenRequests.contains(request) else {
+            pcLog("h-drop e\(triggerEpoch == epoch ? 1 : 0)")
+            return
+        }
+        guard generation == docGeneration, let ctx = currentContext() else {
+            pcLog("h-stale")
+            seenRequests.append(request)
+            // Only releases this request's pending lock when the current document still owns it (the page checks its
+            // document and request); the composer is never written.
+            if let ctx = currentContext() { _ = await call("cancelPageContext", [ctx.doc, request], ctx) }
+            publish(.refused, "대화 화면이 바뀌어 보내지 않았습니다. [pc-stale] 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
+            return
+        }
+        guard let raw = body["raw"] as? String, !raw.isEmpty else {
+            pcLog("h-raw")
+            seenRequests.append(request)
+            _ = await call("cancelPageContext", [ctx.doc, request], ctx)
+            publish(.refused, "질문 내용을 확인하지 못해 보내지 않았습니다. 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
+            return
+        }
+        seenRequests.append(request)
+        if seenRequests.count > 64 { seenRequests.removeFirst(seenRequests.count - 64) }
+        let source: AssistantWebHandoffSource = (body["via"] as? String) == "click" ? .sendButton : .enter
+        let command = AIPageSlashCommand(parsing: raw)
+        /// Nothing is sent: the pending request is dropped and the composer keeps the exact raw text.
+        func refuse(_ text: String, _ code: String) async {
+            pcLog("h-" + code)
+            _ = await call("cancelPageContext", [ctx.doc, request], ctx)
+            publish(.refused, "\(text) 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
+        }
+        pcLog("h-parse")
+        reconcilePageMode()
+        let resetsAtStart = pageModeResets
+        switch command.kind {
+        case .toggle:
+            pcLog("h-toggle")
+            applyPageMode(!pageModeOn)
+            // Consume the "//" only while the composer still holds exactly it; newer typing is never touched.
+            var cleared = false
+            if case .value(let dict) = await call("consumePageContext", [ctx.doc, request], ctx) { cleared = dict["ok"] as? Bool == true }
+            let state = pageModeOn ? "브라우저 모드를 켰습니다. 질문마다 현재 페이지를 함께 읽습니다. 끄려면 //" : "브라우저 모드를 껐습니다."
+            publish(.accepted, state + (cleared ? "" : " 입력창의 //는 직접 지워 주세요."), draftPreserved: !cleared)
+            return
+        case .empty:
+            await refuse("/ 뒤에 질문을 입력해 주세요. (/질문: 이번만 현재 페이지, //질문: 브라우저 모드 켜기, //: 켜기/끄기)", "empty")
+            return
+        case .plain where !pageModeOn:
+            pushPageMode()
+            await refuse("브라우저 모드가 꺼져 있어 보내지 않았습니다. 다시 보내 주세요.", "mode-off")
+            return
+        default:
+            break
+        }
+        if raw.utf16.count > 10_000 {
+            await refuse("질문이 너무 길어 페이지와 함께 보내지 못했습니다(최대 10,000자).", "long")
+            return
+        }
+        if body["att"] as? Bool != false {
+            let ak = body["ak"] as? String ?? ""
+            let code = ak.range(of: "^[a-z-]{1,20}$", options: .regularExpression) != nil ? " [att-\(ak)]" : ""
+            await refuse("첨부 파일이 있어 페이지 본문을 함께 보낼 수 없습니다. 첨부를 지우거나 슬래시 없이 보내 주세요.\(code)", "att")
+            return
+        }
+        if body["gen"] as? Bool != false {
+            await refuse("AI가 응답하는 중이라 보내지 않았습니다.", "gen")
+            return
+        }
+        let req = AssistantWebPageContextRequest(requestUUID: request, rawQuestion: raw, question: command.question,
+                                                 source: source, serviceID: serviceID, originToken: originToken)
+        guard let onPageContext else {
+            await refuse("페이지를 읽는 기능이 연결되지 않아 보내지 않았습니다.", "no-callback")
+            return
+        }
+        publish(.pending, "현재 페이지를 읽는 중…")
+        pcLog("cb-call")
+        let formattedPrompt: String
+        var pageImage: Data?
+        switch await onPageContext(req) {
+        case .success(let payload):
+            pcLog(payload.image == nil ? "cb-ok text" : "cb-ok image")
+            formattedPrompt = payload.text
+            pageImage = payload.image
+        case .failure(let error):
+            await refuse("페이지 본문을 읽지 못해 질문을 보내지 않았습니다. \(error.localizedDescription)", "cb-fail")
+            return
+        }
+        reconcilePageMode()
+        guard triggerEpoch == epoch, generation == docGeneration, isCurrent(ctx), resetsAtStart == pageModeResets, command.kind != .plain || pageModeOn else {
+            pcLog("cb-stale")
+            _ = await call("cancelPageContext", [ctx.doc, request], ctx)
+            publish(.refused, "읽는 동안 대화나 화면이 바뀌어 보내지 않았습니다. 입력한 내용은 그대로 두었습니다.", draftPreserved: true)
+            return
+        }
+        if pageImage != nil, !supportsPageImage || pageImage!.count > 8_000_000 {
+            await refuse("이 서비스로 보낼 수 없는 페이지 이미지라 보내지 않았습니다.", "image")
+            return
+        }
+        let imageArgument: Any = pageImage.map { $0.base64EncodedString() } ?? NSNull()
+        pcLog("sub-call")
+        let result = await call("submitPageContextPrompt", [ctx.doc, request, formattedPrompt, imageArgument], ctx)
+        pageImage = nil
+        if case .value(let dict) = result, dict["ok"] as? Bool == true {
+            pcLog("sub-ok")
+            if command.kind == .enable { applyPageMode(true) }
+            // A first reply may turn the new-chat address into a conversation ID: that is still this conversation.
+            if pageModeOn && pageModeKey == nil { pageModeMayAdopt = true }
+            // Shown in the entry bar (a .ready status is not), so a completed send is distinguishable from silence.
+            publish(.accepted, imageArgument is NSNull ? "질문과 페이지 본문을 전송했습니다." : "질문과 페이지 본문·화면 이미지를 전송했습니다.")
+        } else if kind == "meta", Self.postUnconfirmed(result) {
+            // Meta only: the send was clicked (or the page moved during the check) without proof of our own new message.
+            // Unconfirmed, not failed: the site may still post it late, so nothing is resent.
+            let restored: Bool
+            if case .value(let dict) = result { restored = dict["restored"] as? Bool == true } else { restored = false }
+            // Without a result (page moved) both bit sets are "-".
+            pcLog((restored ? "sub-unconfirmed r1" : "sub-unconfirmed r0") + " g=" + Self.gateBits(result, "g") + " q=" + Self.gateBits(result, "q"))
+            publish(.refused, "전송 버튼은 눌렀지만 대화에 질문이 올라간 것을 확인하지 못했습니다. [post-unconfirmed] 늦게 전송될 수 있으니 다시 보내기 전에 대화를 확인해 주세요."
+                    + (restored ? " 입력한 원문을 입력창에 되돌렸습니다." : " 원문 복원을 확인하지 못했습니다."), draftPreserved: restored)
+        } else {
+            // Stage code only (fixed script identifiers); never question text, image bytes or page addresses.
+            var code = "js-call-failed"
+            // nil = the script never wrote into the composer on this path (the raw text was left as it was).
+            var restored: Bool?
+            if case .value(let dict) = result {
+                let r = dict["reason"] as? String ?? ""
+                code = r.range(of: "^[a-z-]{1,40}$", options: .regularExpression) != nil ? r : "unknown"
+                restored = dict["restored"] as? Bool
+            }
+            // Meta's pre-click check and a failed composer write report their fixed bits and whether the raw text came back.
+            pcLog("sub-fail " + code + (code == "preclick-stale" ? " g=" + Self.gateBits(result, "g") : "")
+                  + (code == "composer-write-failed" ? " w=" + Self.gateBits(result, "w") : "")
+                  + (restored == nil ? "" : (restored == true ? " r1" : " r0")))
+            publish(.refused, "AI 대화창에 전송하지 못했습니다. \(Self.describe(code)) [\(code)]"
+                    + (restored == false ? " 원문 복원을 확인하지 못했습니다." : (restored == true ? " 입력한 원문을 입력창에 되돌렸습니다." : " 입력한 내용은 그대로 두었습니다.")),
+                    draftPreserved: restored != false)
+        }
+    }
+
+    // MARK: Browser mode (this conversation only)
+
+    /// Identity of the conversation this host shows now: Hana's proven host context, otherwise the address path of a
+    /// conversation URL. nil = a new chat / landing page (or, for Hana, a context not proven yet).
+    private var pageModeScope: String? {
+        if kind == "hana" { return liveHanaHash(epoch: epoch) }
+        guard let url = liveConversationURL(epoch: epoch), let c = URLComponents(string: url) else { return nil }
+        return (c.host ?? "") + c.path
+    }
+
+    private func applyPageMode(_ on: Bool) {
+        pageModeOn = on
+        pageModeKey = on ? pageModeScope : nil
+        pageModeMayAdopt = false
+        pushPageMode()
+    }
+
+    /// Turns the mode off when this host now shows another conversation. A new chat that becomes a conversation
+    /// (first reply) is adopted only after a mode question was really sent from it; anything else is conservative.
+    private func reconcilePageMode() {
+        guard pageModeOn, let live = webView?.url?.absoluteString, isTrustedOrigin(Self.normalizedOrigin(live)) else { return }
+        let scope = pageModeScope
+        if kind == "hana" && scope == nil { return }
+        switch (pageModeKey, scope) {
+        case (nil, nil):
+            return
+        case (nil, .some(let now)) where pageModeMayAdopt || kind == "hana":
+            pageModeKey = now
+            pageModeMayAdopt = false
+            return
+        case (.some(let old), .some(let now)) where old == now:
+            return
+        default:
+            break
+        }
+        applyPageMode(false)
+        if status.kind != .pending { publish(.accepted, "다른 대화로 바뀌어 브라우저 모드를 껐습니다.") }
+    }
+
+    /// Mirrors the mode into the page script (third-party) or the Hana host (its own script).
+    private func pushPageMode() {
+        onPageModeChange?(pageModeOn)
+        guard kind != "hana", let ctx = currentContext() else { return }
+        let on = pageModeOn
+        Task { _ = await call("setPageMode", [on], ctx) }
+    }
+
+    /// Hana only: refresh the host-context proof, then drop the mode if the thread changed. Call before a mode question.
+    func prepareScope() async {
+        if kind == "hana" { await refreshHanaProof() }
+        reconcilePageMode()
+    }
+
+    /// Trusted New Chat control: the mode ends now, and any request already reading the page can no longer re-enable it.
+    func resetPageModeForNewChat() {
+        pageModeResets += 1
+        guard pageModeOn else { return }
+        applyPageMode(false)
+        publish(.accepted, "새 대화로 바뀌어 브라우저 모드를 껐습니다.")
+    }
+
+    /// Hana's typed `//`: same state change as the third-party handler; returns the new state.
+    @discardableResult
+    func togglePageMode() -> Bool {
+        applyPageMode(!pageModeOn)
+        publish(.accepted, pageModeOn ? "브라우저 모드를 켰습니다. 질문마다 현재 페이지를 함께 읽습니다. 끄려면 //" : "브라우저 모드를 껐습니다.")
+        return pageModeOn
+    }
+
+    /// Hana's `//질문` after a successful send.
+    func enablePageMode() {
+        applyPageMode(true)
     }
 
     private func handleTrigger(_ body: [String: Any], epoch triggerEpoch: Int, generation: Int) async {
@@ -617,7 +906,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
         }
         guard !targets.isEmpty else { return .none }
         guard targets.count == 1, let identity = targets.first?.validated(),
-              Self.normalizedOrigin(identity.conversationURL) == homeOrigin,
+              isTrustedOrigin(Self.normalizedOrigin(identity.conversationURL)),
               AssistantPlannerURL.safe(identity.conversationURL, hasStableID: identity.stableID != nil) == identity.conversationURL,
               let components = URLComponents(string: identity.conversationURL), components.scheme?.lowercased() == "https",
               AssistantPlannerURL.namesConversation(components.path), let url = components.url else {
@@ -640,7 +929,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
     /// A fresh service landing page: no query and a path that names no conversation and has at most one segment (or
     /// is exactly the configured home path).
     private func isHomeLocation(_ href: String) -> Bool {
-        guard Self.normalizedOrigin(href) == homeOrigin, let components = URLComponents(string: href),
+        guard isTrustedOrigin(Self.normalizedOrigin(href)), let components = URLComponents(string: href),
               (components.queryItems ?? []).isEmpty, !AssistantPlannerURL.namesConversation(components.path) else { return false }
         let path = Self.trimmedPath(components.path)
         return path.split(separator: "/").count <= 1 || path == homePath
@@ -843,7 +1132,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
 
     private func currentContext() -> Ctx? {
         guard let webView, let world, let docID, let href = webView.url?.absoluteString,
-              Self.normalizedOrigin(href) == homeOrigin else { return nil }
+              isTrustedOrigin(Self.normalizedOrigin(href)) else { return nil }
         return Ctx(webView: webView, world: world, doc: docID, epoch: epoch, gen: docGeneration, href: href,
                    sid: scriptSID(liveStableID(epoch: epoch)))
     }
@@ -863,7 +1152,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
         guard host === binding, host.hostID == hostID, host.webView === webView, host.matches(identity),
               identity.serviceID == serviceID, identity.profileID == profileID,
               let webView, let world, let docID, let href = webView.url?.absoluteString,
-              Self.normalizedOrigin(href) == homeOrigin,
+              isTrustedOrigin(Self.normalizedOrigin(href)),
               AssistantPlannerURL.safe(href, hasStableID: identity.stableID != nil) == identity.conversationURL else { return nil }
         return Ctx(webView: webView, world: world, doc: docID, epoch: epoch, gen: docGeneration, href: href,
                    sid: scriptSID(identity.stableID))
@@ -889,7 +1178,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
 
     private func liveConversationURL(epoch expected: Int) -> String? {
         guard expected == epoch, let homeOrigin, let raw = webView?.url?.absoluteString,
-              Self.normalizedOrigin(raw) == homeOrigin else { return nil }
+              isTrustedOrigin(Self.normalizedOrigin(raw)) else { return nil }
         if kind == "hana" {
             // The Hana root names a conversation only while the page's own host context proof is current.
             guard liveHanaHash(epoch: expected) != nil else { return nil }
@@ -934,6 +1223,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
             return nil
         }
         hanaProof = (hash, value, startEpoch, docID, startGen, href)
+        reconcilePageMode()
         return (hash, value)
     }
 
@@ -979,7 +1269,7 @@ final class AssistantWebSession: NSObject, ObservableObject {
         // Hana's identity is the page's host context proof; a DOM observation (absent on /alfred) never replaces it.
         guard kind != "hana" else { return }
         guard let reported = body["u"] as? String, let homeOrigin, let live = webView?.url?.absoluteString,
-              Self.normalizedOrigin(live) == homeOrigin else { return }
+              isTrustedOrigin(Self.normalizedOrigin(live)) else { return }
         if let id = body["s"] as? String, !id.isEmpty, id.count <= AssistantPlannerIdentity.maxFieldLength {
             guard let safe = AssistantPlannerURL.safe(reported, hasStableID: true),
                   safe == AssistantPlannerURL.safe(live, hasStableID: true) else { return }
@@ -1001,6 +1291,12 @@ final class AssistantWebSession: NSObject, ObservableObject {
             webView?.evaluateJavaScript("if (window.__afPlanner) { window.__afPlanner.retire(); }", in: nil, in: old, completionHandler: nil)
         }
         installedControllers.removeAllObjects()
+        if pageModeOn {
+            pageModeOn = false
+            onPageModeChange?(false)
+        }
+        pageModeKey = nil
+        pageModeMayAdopt = false
         if binding != nil { coordinator.detach(hostID: hostID) }
         unregisterRoute()
         serviceID = ""
@@ -1056,6 +1352,8 @@ final class AssistantWebSession: NSObject, ObservableObject {
         case "claude": return "claude"
         case "gemini": return "gemini"
         case "perplexity": return "perplexity"
+        // Catalog providers: Grok / Copilot / Meta have an image route; the rest are read-only page transport (text).
+        case "grok", "copilot", "deepseek", "mistral", "qwen", "kimi", "meta", "poe", "huggingchat": return serviceID.lowercased()
         default: break
         }
         let host = origin.replacingOccurrences(of: "https://", with: "")
@@ -1063,6 +1361,21 @@ final class AssistantWebSession: NSObject, ObservableObject {
         if host == "claude.ai" { return "claude" }
         if host == "gemini.google.com" { return "gemini" }
         return "generic"
+    }
+
+    /// Exact https origins trusted for a configuration. The catalog Copilot address redirects to the official chat
+    /// origin, and its "채팅으로 이동" opens the signed-in personal chat on copilot.cloud.microsoft, so only those exact
+    /// origins are allowed (never the login or wildcard hosts).
+    static func trustedOrigins(serviceID: String, home: String) -> [String] {
+        if serviceID.lowercased() == "copilot", home == "https://copilot.microsoft.com" || home == "https://copilot.com" {
+            return ["https://copilot.microsoft.com", "https://copilot.com", "https://copilot.cloud.microsoft"]
+        }
+        return [home]
+    }
+
+    private func isTrustedOrigin(_ origin: String?) -> Bool {
+        guard let origin, let homeOrigin else { return false }
+        return Self.trustedOrigins(serviceID: serviceID, home: homeOrigin).contains(origin)
     }
 
     static func normalizedOrigin(_ raw: String) -> String? {
@@ -1087,6 +1400,20 @@ final class AssistantWebSession: NSObject, ObservableObject {
         reason.map { unsupportedReasons.contains($0) } ?? false
     }
 
+    /// A page-question submit whose post was not proven: the script's own unconfirmed result, or a call that ended without
+    /// any result (the page may have moved after the click).
+    private static func postUnconfirmed(_ result: CallOutcome) -> Bool {
+        if case .value(let dict) = result { return dict["reason"] as? String == "post-unconfirmed" }
+        return true
+    }
+
+    /// A Meta submit's fixed 0/1 gate bits (never page content), else "-".
+    private static func gateBits(_ result: CallOutcome, _ key: String) -> String {
+        guard case .value(let dict) = result, let s = dict[key] as? String,
+              s.range(of: "^[01]{1,16}$", options: .regularExpression) != nil else { return "-" }
+        return s
+    }
+
     private static func describe(_ reason: String?) -> String {
         switch reason {
         case "composer-missing": return "이 페이지에서 메시지 입력창을 찾지 못했습니다."
@@ -1102,10 +1429,14 @@ final class AssistantWebSession: NSObject, ObservableObject {
         case "user-active": return "직접 사용 중인 화면이라 보류했습니다."
         case "conversation-open": return "이미 다른 대화가 열려 있어 보류했습니다."
         case "attachment-present": return "첨부 중인 파일이 있어 보류했습니다."
+        case "first-use-confirmation": return "이미지 첫 사용 확인 창이 떠 있어 보내지 않았습니다. 확인 후 다시 시도해 주세요."
+        case "first-use-confirmation-uncancelled": return "이미지 첫 사용 확인 창이 떠 있어 보내지 않았습니다. 창을 직접 닫은 뒤 다시 시도해 주세요."
         case "stale-document", "retired", "origin-changed", "url-changed", "thread-changed":
             return "대화 화면이 바뀌어 보류했습니다."
+        case "pagecontext-timeout": return "페이지 본문 전달 응답이 없어 보내지 않았습니다."
         case "composer-write-failed": return "입력창에 메시지를 넣지 못해 보내지 않았습니다."
         case "send-button-not-ready": return "전송 버튼을 하나로 확인하지 못해 보내지 않았습니다."
+        case "preclick-stale": return "전송 직전 입력창의 질문이나 이미지가 그대로인지 확인하지 못해 전송 버튼을 누르지 않았습니다."
         case "no-script": return "대화창 연결 스크립트가 아직 준비되지 않았습니다."
         case .some(let other): return "페이지 상태를 확인하지 못했습니다(\(String(other.prefix(40))))."
         case .none: return "페이지 상태를 확인하지 못했습니다."
@@ -1116,8 +1447,8 @@ final class AssistantWebSession: NSObject, ObservableObject {
 // MARK: - Isolated-world script
 
 enum AssistantWebScript {
-    static func source(kind: String, origin: String, pattern: String, handler: String, nonce: String, watch: Bool) -> String {
-        let config: [String: Any] = ["kind": kind, "origin": origin, "pattern": pattern,
+    static func source(kind: String, origin: String, origins: [String]? = nil, pattern: String, handler: String, nonce: String, watch: Bool) -> String {
+        let config: [String: Any] = ["kind": kind, "origin": origin, "origins": origins ?? [origin], "pattern": pattern,
                                      "handler": handler, "nonce": nonce, "watch": watch]
         let data = (try? JSONSerialization.data(withJSONObject: config)) ?? Data("{}".utf8)
         return template.replacingOccurrences(of: "__CONFIG__", with: String(decoding: data, as: UTF8.self))
@@ -1127,7 +1458,7 @@ enum AssistantWebScript {
 (() => {
 'use strict';
 const CFG = __CONFIG__;
-if (window.__afPlanner || window.top !== window || location.origin !== CFG.origin) return;
+if (window.__afPlanner || window.top !== window || !CFG.origins.includes(location.origin)) return;
 const HANDLER = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[CFG.handler];
 if (!HANDLER) return;
 let TRIG;
@@ -1150,7 +1481,15 @@ const visible = (el) => {
 };
 const norm = (s) => String(s == null ? '' : s).replace(/​/g, '').replace(/\s+/g, ' ').trim();
 const isField = (el) => el.tagName === 'TEXTAREA' || el.tagName === 'INPUT';
-const textOf = (el) => (isField(el) ? String(el.value || '') : String(el.innerText != null ? el.innerText : (el.textContent || '')));
+// Copilot's M365 editor keeps a renderer sentinel (U+200B U+200C) after its content; observed in the live editor and,
+// through the raw capture, inside the written prompt. Only that one trailing pair of that editor is dropped, so capture,
+// readback and restore compare the text itself (norm keeps U+200C for every other editor).
+const isM365Editor = (el) => CFG.kind === 'copilot' && el.id === 'm365-chat-editor-target-element';
+const textOf = (el) => {
+  if (isField(el)) return String(el.value || '');
+  const t = String(el.innerText != null ? el.innerText : (el.textContent || ''));
+  return isM365Editor(el) ? t.replace(/\u200B\u200C(?=\s*$)/, '') : t;
+};
 const rowText = (el) => String(el.innerText || el.textContent || '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, 12000);
 const innermost = (list) => list.filter((el) => !list.some((o) => o !== el && el.contains(o)));
 const clamp = (ms) => Math.max(500, Math.min(15000, Number(ms) || 8000));
@@ -1225,6 +1564,11 @@ function knownComposer() {
     case 'claude': return q('div[contenteditable="true"][role="textbox"], div.ProseMirror[contenteditable="true"]');
     case 'gemini': return geminiComposer();
     case 'perplexity': return q('.composer-editable[data-lexical-editor="true"][role="textbox"][contenteditable="true"]');
+    // Grok's signed-in composer is a tiptap editor (its measuring textarea is never the composer); Copilot's is one span.
+    case 'grok': return q('[data-testid="chat-input"] div[contenteditable="true"][role="combobox"].ProseMirror');
+    case 'copilot': return q('span[id="m365-chat-editor-target-element"][role="textbox"][contenteditable="true"]');
+    // Meta AI: one Lexical div (role=textbox) outside any form; its send button is found by its accessible name.
+    case 'meta': return q('div[data-lexical-editor="true"][role="textbox"][contenteditable="true"]');
     default: return [];
   }
 }
@@ -1238,7 +1582,15 @@ function geminiComposer() {
     return r.width > 0 && r.height > 0;
   }));
 }
+// Accessible name of a button from its own label sources (the name the AX tree shows), never a sibling's text.
+function accName(b) {
+  const lb = (b.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map((id) => { const x = document.getElementById(id); return x ? x.textContent : ''; }).join(' ');
+  const svg = b.querySelector('svg title');
+  return norm(b.getAttribute('aria-label') || lb || b.getAttribute('title') || b.textContent || (svg && svg.textContent) || '');
+}
 function isSendLike(b) {
+  // Meta's send button carries no send attribute; it is the one button whose accessible name is exactly 보내기.
+  if (CFG.kind === 'meta') return accName(b) === '보내기';
   const t = [b.getAttribute('data-testid'), b.getAttribute('aria-label'), b.getAttribute('title'), b.id, b.getAttribute('name')].filter(Boolean).join(' ');
   if (NOT_SEND_RE.test(t)) return false;
   if (CFG.kind === 'gemini') return SEND_RE.test(t);
@@ -1248,11 +1600,12 @@ function isSendLike(b) {
 function sendCandidates(root) {
   return innermost(q('button, [role="button"]', root).filter((b) => visible(b) && isSendLike(b)));
 }
+const ROOT_DEPTH = CFG.kind === 'meta' ? 14 : 8;
 function chatRoot(el) {
   const form = el.closest('form, [role="form"]');
   if (form) return form;
   let p = el.parentElement;
-  for (let i = 0; i < 8 && p && p !== document.body && p !== document.documentElement; i++, p = p.parentElement) {
+  for (let i = 0; i < ROOT_DEPTH && p && p !== document.body && p !== document.documentElement; i++, p = p.parentElement) {
     if (sendCandidates(p).length) return p;
   }
   return null;
@@ -1263,7 +1616,7 @@ function genericComposer() {
     && !el.closest('[aria-hidden="true"], nav, header, dialog, [role="dialog"], [role="search"], [role="navigation"]')
     && el.getAttribute('role') !== 'searchbox' && el.type !== 'search');
   list = innermost(list);
-  return list.filter((el) => chatRoot(el));
+  return list.filter((el) => { const r = chatRoot(el); return !!r && !r.querySelector('input[type="password"], input[autocomplete~="username"], input[autocomplete~="current-password"]'); });
 }
 function composerInfo() {
   let list = innermost(Array.from(new Set(knownComposer())).filter(visible));
@@ -1459,16 +1812,94 @@ function refuseAmbiguous(e, via, c, hit) {
   post({ t: 'refused', req: uuid(), via, reason: c.reason });
   return true;
 }
+const IMAGE_PAGE_KINDS = new Set(['chatgpt', 'claude', 'gemini', 'perplexity', 'grok', 'copilot', 'meta']);
+const SUPPORTED_PAGE_KINDS = new Set(['chatgpt', 'claude', 'gemini', 'perplexity', 'grok', 'copilot', 'deepseek', 'mistral', 'qwen', 'kimi', 'meta', 'poe', 'huggingchat']);
+let pageContextInFlight = false;
+// Browser mode of this conversation, mirrored from native (default off; native pushes it on every new document).
+let PAGE_MODE = false;
+// The provider's own slash menu is open: an expanded composer or a shown listbox with a shown option (Perplexity keeps an
+// option-less listbox mounted, which is not a menu). Diagnostic only: an explicit slash question is still ours, never the
+// provider's ordinary send.
+function menuOptions() { return q('[role="listbox"]').filter(visible).reduce((n, l) => n + q('[role="option"]', l).filter(visible).length, 0); }
+function slashMenuOpen(comp) {
+  try { return comp.getAttribute('aria-expanded') === 'true' || menuOptions() > 0; } catch (e) { return false; }
+}
+// 'intercept' only for a slash question or, while browser mode is on, any non-empty question; 'swallow' while our own
+// page question is still being read / written (a second send must never reach the site as a plain message).
+function pageContextVerdict(comp, raw, via) {
+  if (!SUPPORTED_PAGE_KINDS.has(CFG.kind)) return null;
+  if (!comp || !comp.isConnected) return null;
+  if (norm(raw).length === 0) return null;
+  if (pageContextInFlight) return 'swallow';
+  const slash = String(raw).trim().startsWith('/');
+  if (!slash && !PAGE_MODE) return null;
+  return 'intercept';
+}
+function interceptPageContext(e, via, comp, raw) {
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  pcStage = 'i';
+  let ak = '', gen = false;
+  // A failed page check never leaves the request silently pending: nothing was sent and the composer is untouched.
+  try { ak = attachmentKind(); gen = generating(); } catch (err) {
+    pcStage += 't';
+    post({ t: 'refused', req: uuid(), via, reason: 'pagecontext-exception' });
+    return;
+  }
+  pageContextInFlight = true;
+  const req = uuid();
+  const entry = { kind: 'pageContext', raw, t: Date.now(), comp, href: location.href, sid: domId(), timer: 0 };
+  entry.timer = setTimeout(() => {
+    if (pending[req] !== entry) return;
+    delete pending[req];
+    pageContextInFlight = false;
+    pcStage += 'o';
+    post({ t: 'refused', req: uuid(), via, reason: 'pagecontext-timeout' });
+  }, IMAGE_PAGE_KINDS.has(CFG.kind) ? 75000 : 15000);
+  pending[req] = entry;
+  pcStage += post({ t: 'pageContext', req, via, raw: String(raw).slice(0, 10001), att: !!ak, ak, gen }) ? 'p' : 'x';
+}
+function pageContextGuard(e, via, comp, raw) {
+  const v = pageContextVerdict(comp, raw, via);
+  lastKey = via.charAt(0) + (v ? v.charAt(0) : (String(raw).trim().startsWith('/') && slashMenuOpen(comp) ? 'm' : 'n'));
+  if (v === 'swallow') { e.preventDefault(); e.stopImmediatePropagation(); }
+  else if (v === 'intercept') interceptPageContext(e, via, comp, raw);
+}
 function onKey(e) {
   if (!alive || !e.isTrusted || e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing || e.keyCode === 229 || e.repeat) return;
   const host = e.target && e.target.closest ? e.target.closest(EDITABLE) : null;
-  if (!host) return;
+  if (!host) { lastKey = 'nh'; return; }
   const raw = textOf(host);
-  if (!isTrigger(raw)) return;
   const c = composerInfo();
-  if (!c.el) { refuseAmbiguous(e, 'enter', c, (x) => x === host || x.contains(host) || host.contains(x)); return; }
-  if (!(c.el === host || c.el.contains(host) || host.contains(c.el))) return;
-  intercept(e, 'enter', c.el, textOf(c.el));
+  if (isTrigger(raw)) {
+    lastKey = 'tr';
+    if (!c.el) { refuseAmbiguous(e, 'enter', c, (x) => x === host || x.contains(host) || host.contains(x)); return; }
+    if (!(c.el === host || c.el.contains(host) || host.contains(c.el))) return;
+    intercept(e, 'enter', c.el, textOf(c.el));
+    return;
+  }
+  // A slash page question in an unidentified composer must never reach the AI as a plain message: refuse with the code.
+  const slash = String(raw).trim().startsWith('/');
+  if (!c.el && SUPPORTED_PAGE_KINDS.has(CFG.kind) && slash) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    lastKey = 'sr';
+    post({ t: 'refused', req: uuid(), via: 'enter', reason: c.reason });
+    return;
+  }
+  if (!c.el || !(c.el === host || c.el.contains(host) || host.contains(c.el))) { lastKey = c.el ? 'nc' : slash ? 'sm' : 'cm'; return; }
+  pageContextGuard(e, 'enter', c.el, textOf(c.el));
+}
+// The send-button twin of the Enter rule: a slash draft next to the clicked send button never reaches the AI as a plain
+// message while its composer or send root is unidentified.
+function refuseSlashClick(e, b, els, reason) {
+  if (!SUPPORTED_PAGE_KINDS.has(CFG.kind)) return;
+  const near = (x) => { for (let i = 0, p = x.parentElement; i < ROOT_DEPTH && p; i++, p = p.parentElement) if (p.contains(b)) return true; return false; };
+  if (!els.some((x) => String(textOf(x)).trim().startsWith('/') && near(x))) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  lastKey = 'cs';
+  post({ t: 'refused', req: uuid(), via: 'click', reason: reason || 'composer-missing' });
 }
 function onClick(e) {
   if (!alive || !e.isTrusted || e.button !== 0) return;
@@ -1476,14 +1907,19 @@ function onClick(e) {
   if (!b || !isSendLike(b)) return;
   const c = composerInfo();
   if (!c.el) {
-    refuseAmbiguous(e, 'click', c, (x) => { const r = chatRoot(x); return !!r && r.contains(b) && isTrigger(textOf(x)); });
+    if (!refuseAmbiguous(e, 'click', c, (x) => { const r = chatRoot(x); return !!r && r.contains(b) && isTrigger(textOf(x)); })) {
+      refuseSlashClick(e, b, q(EDITABLE).filter(visible), c.reason);
+    }
     return;
   }
   const root = chatRoot(c.el);
-  if (!root || !root.contains(b)) return;
+  if (!root || !root.contains(b)) { if (!root) refuseSlashClick(e, b, [c.el], 'composer-missing'); return; }
   const raw = textOf(c.el);
-  if (!isTrigger(raw)) return;
-  intercept(e, 'click', c.el, raw);
+  if (isTrigger(raw)) {
+    intercept(e, 'click', c.el, raw);
+    return;
+  }
+  pageContextGuard(e, 'click', c.el, raw);
 }
 // Genuine human input only (isTrusted). A composer that merely auto-focuses never sets this. Every trusted event
 // advances touchGen (even when already touched) so an ack can tell new user activity from its own clear; only the first
@@ -1495,13 +1931,99 @@ function onTouch(e) {
   touched = true;
   post({ t: 'touch' });
 }
-const ATTACH_SEL = '[data-testid*="attachment" i], [data-testid*="file-preview" i], [data-testid*="file-chip" i], [class*="attachment" i], [class*="file-preview" i], [class*="file-chip" i], [class*="uploaded" i]';
-const ATTACH_REMOVE = /(?:remove|delete|제거|삭제).*(?:attach|file|upload|첨부|파일)|(?:attach|file|upload|첨부|파일).*(?:remove|delete|제거|삭제)/i;
-function hasAttachment() {
-  if (q('input[type="file"]').some((i) => i.files && i.files.length > 0)) return true;
-  const shown = q(ATTACH_SEL).some((el) => visible(el) && !el.closest('button, [role="button"], nav, [role="navigation"]')
+const ATTACH_PARTS = ['[data-testid*="attachment" i]', '[data-testid*="file-preview" i]', '[data-testid*="file-chip" i]', '[class*="attachment" i]', '[class*="file-preview" i]', '[class*="file-chip" i]', '[class*="uploaded" i]'];
+const ATTACH_SEL = ATTACH_PARTS.join(', ');
+// The attachment nodes the 'attach-node' clause counts. A class hit counts only from a plain class token: a compound
+// utility token that merely mentions an attachment (Claude's has-[…]/group variants on its layout divs) names no card.
+const ATTACH_CLASS_RE = /attachment|file-preview|file-chip|uploaded/i;
+function attachNodes() {
+  return q(ATTACH_SEL).filter((el) => visible(el) && !el.closest('button, [role="button"], nav, [role="navigation"]')
+    && (ATTACH_PARTS.slice(0, 3).some((s) => el.matches(s)) || (el.getAttribute('class') || '').split(/\s+/).some((t) => /^[a-z0-9_-]+$/i.test(t) && ATTACH_CLASS_RE.test(t)))
     && ((el.textContent || '').trim() || el.querySelector('img, canvas, video')));
-  return shown || q('button, [role="button"]').some((b) => ATTACH_REMOVE.test(b.getAttribute('aria-label') || ''));
+}
+const ATTACH_REMOVE = /(?:remove|delete|제거|삭제).*(?:attach|file|upload|첨부|파일)|(?:attach|file|upload|첨부|파일).*(?:remove|delete|제거|삭제)/i;
+// Which check saw an attachment ('' = none); fixed codes only, so a refusal names its exact clause.
+function attachmentKind() {
+  if (q('input[type="file"]').some((i) => i.files && i.files.length > 0)) return 'file-input';
+  if (attachNodes().length) return 'attach-node';
+  if (q('button, [role="button"]').some((b) => ATTACH_REMOVE.test(b.getAttribute('aria-label') || ''))) return 'remove-label';
+  // A remove button named after a file inside the composer's own send root (Claude's "<file>.jpg 삭제").
+  const c = composerInfo(), r = c.el ? chatRoot(c.el) : null;
+  return r && q('button, [role="button"]', r).some((b) => { const l = b.getAttribute('aria-label') || ''; return visible(b) && IMG_REMOVE_RE.test(l) && FILE_NAME_RE.test(l); }) ? 'scope-remove' : '';
+}
+const FILE_NAME_RE = /\.[a-z0-9]{2,5}(?![a-z0-9])/i;
+function hasAttachment() { return !!attachmentKind(); }
+// Stage metadata for a manual capture refusal: fixed codes and counts only (never text, names, addresses or image data),
+// so the composer / attachment stage of a page can be identified without reading it.
+let lastKey = '-';
+// Page-question stage of the latest intercept (fixed letters only): i intercepted, t check threw, p/x posted / post
+// failed, s/u native submit for a known / unknown request, k/f submit sent / failed, c native cancel, o timed out.
+let pcStage = '-';
+function diagCode() {
+  try {
+    const n = (b) => (b ? 1 : 0);
+    const out = ['k=' + lastKey, 'pc=' + pcStage.slice(-12), 'ed' + q('textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]').filter(visible).length,
+      'kn' + knownComposer().filter(visible).length, 'gn' + genericComposer().length,
+      'lb' + q('[role="listbox"]').filter(visible).length, 'lo' + menuOptions(), 'dl' + q('[role="dialog"], dialog').filter(visible).length];
+    const a = document.activeElement && document.activeElement.closest ? document.activeElement.closest(EDITABLE) : null;
+    if (a) {
+      let s = 0;
+      for (let i = 0, p = a.parentElement; i < ROOT_DEPTH && p && p !== document.body && !s; i++, p = p.parentElement) s = sendCandidates(p).length;
+      if (CFG.kind === 'meta') {
+        // Depth of the first ancestor holding a shown button named 보내기, and which label source names it.
+        let d = -1, src = '-';
+        for (let i = 0, p = a.parentElement; i < 20 && p && d < 0; i++, p = p.parentElement) {
+          const hit = q('button, [role="button"]', p).find((b) => visible(b) && accName(b) === '보내기');
+          if (hit) {
+            d = i;
+            src = hit.getAttribute('aria-label') ? 'l' : hit.getAttribute('aria-labelledby') ? 'b' : hit.getAttribute('title') ? 't' : norm(hit.textContent) ? 'x' : 'g';
+            src += hit.tagName === 'BUTTON' ? 'n' : 'r';
+          }
+        }
+        out.push('sv' + d + src);
+      }
+      out.push('a=' + a.tagName.toLowerCase().replace(/[^a-z]/g, '').slice(0, 10), 'lx' + n(a.hasAttribute('data-lexical-editor')),
+        'pm' + n(a.classList.contains('ProseMirror')), 'rt' + n(a.getAttribute('role') === 'textbox'), 'fm' + n(a.closest('form')),
+        'cr' + n(chatRoot(a)), 'sd' + s, 'ex' + n(a.getAttribute('aria-expanded') === 'true'),
+        'hx' + n(a.closest('[aria-hidden="true"], nav, header, dialog, [role="dialog"], [role="search"], [role="navigation"]')));
+    }
+    const fi = q('input[type="file"]');
+    out.push('fi' + fi.length);
+    for (const i of fi.slice(0, 4)) {
+      const ac = i.accept || '';
+      out.push('f:' + (ac ? '' : 'any') + (/image/i.test(ac) ? 'i' : '') + (/video/i.test(ac) ? 'v' : '') + (/pdf|text|doc/i.test(ac) ? 'd' : '')
+        + (i.multiple ? 'm' : '') + (i.files && i.files.length ? 'f' + i.files.length : '') + (i.disabled ? 'x' : '') + (i.isConnected && visible(i) ? 'v' : ''));
+    }
+    const rm = q('button, [role="button"]').filter((b) => visible(b) && IMG_REMOVE_RE.test(b.getAttribute('aria-label') || ''));
+    out.push('ak=' + (attachmentKind() || 'none'), 'rm' + rm.length);
+    // The first counted attachment node: selector clause, tag, site testid / matching class token (markup names only),
+    // image child, and whether it sits in the composer's send root.
+    const an = attachNodes();
+    if (an.length) {
+      const el = an[0], cc = composerInfo(), r = cc.el ? chatRoot(cc.el) : null;
+      const tok = (s) => (/^[a-z0-9_-]{1,40}$/i.test(s || '') ? s.toLowerCase() : '-');
+      const cls = (el.getAttribute('class') || '').split(/\s+/).find((t) => /attachment|file-preview|file-chip|uploaded/i.test(t));
+      out.push('an' + an.length, 'ap' + ATTACH_PARTS.findIndex((s) => el.matches(s)), 'at=' + el.tagName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10),
+        'ai=' + tok(el.getAttribute('data-testid')), 'ac=' + tok(cls), 'ag' + n(el.querySelector('img, canvas, video')), 'ar' + n(r && r.contains(el)));
+    }
+    if (rm.length) {
+      let d = 0;
+      for (let p = rm[0].parentElement; p && d < 6 && !p.querySelector('img'); p = p.parentElement) d++;
+      out.push('ri' + d, 'rf' + n(rm[0].closest('form')));
+    }
+    if (CFG.kind === 'claude') {
+      // Thumbnails in the document / Claude scope, and how the first one names its file (text, own label, own remove button).
+      const cc = composerInfo(), sc = cc.el ? claudeScope(cc.el) : null, th = q(CLAUDE_THUMB).filter(visible);
+      out.push('ct' + th.length, 'cs' + n(sc), 'ci' + (sc ? claudeThumbs(sc).length : 0));
+      if (th.length) out.push('cn' + n(FILE_NAME_RE.test(th[0].textContent || '')), 'ca' + n(FILE_NAME_RE.test(th[0].getAttribute('aria-label') || '')),
+        'cb' + n(q('button, [role="button"]', th[0]).some((b) => FILE_NAME_RE.test(b.getAttribute('aria-label') || ''))));
+      const rb = q('button, [role="button"]').find((b) => visible(b) && IMG_REMOVE_RE.test(b.getAttribute('aria-label') || '') && FILE_NAME_RE.test(b.getAttribute('aria-label') || ''));
+      if (rb) out.push('rh' + n(rb.closest(CLAUDE_THUMB)), 'rs' + n(sc && sc.root.contains(rb)));
+    }
+    const route = IMG_ROUTE[CFG.kind], c = composerInfo();
+    if (route && c.el) { const sc = imgScope(c.el); out.push('sc' + n(sc)); if (sc) out.push('it' + route.items(sc.root).length, 'in' + route.inputs().length); }
+    return out.join(';').slice(0, 400);
+  } catch (e) { return 'err'; }
 }
 function onBlur(e) {
   if (!alive || !e.isTrusted) return;
@@ -1547,6 +2069,7 @@ function writeQuillEditor(el, text) {
   return true;
 }
 function isLexicalEditor(el) {
+  if (el && CFG.kind === 'meta') return el.matches('div[data-lexical-editor="true"][role="textbox"][contenteditable="true"]');
   return !!(el && CFG.kind === 'perplexity' && el.matches('.composer-editable[data-lexical-editor="true"][role="textbox"][contenteditable="true"]'));
 }
 // Perplexity's composer is Lexical: exactly one native insertText of the normalized single-line payload into the
@@ -1555,29 +2078,45 @@ function isLexicalEditor(el) {
 // the edit after execCommand has already returned (even false), so the complete normalized payload is awaited once with
 // the finite mutation-driven observe. There is no paste, DOM rebuild or second insert on a mismatch. The result is
 // rejected if proof or touch generation changes.
-async function writeLexicalEditor(el, text, still) {
+async function writeLexicalEditor(el, text, still, exact) {
   el.focus();
   const selection = window.getSelection();
   const range = document.createRange();
   range.selectNodeContents(el);
   selection.removeAllRanges();
   selection.addRange(range);
-  try { document.execCommand('insertText', false, norm(text)); } catch (e) { /* the editor content is verified below */ }
+  try { document.execCommand('insertText', false, exact ? String(text) : norm(text)); } catch (e) { /* the editor content is verified below */ }
   const gen = touchGen;
   const live = () => alive && el.isConnected && touchGen === gen && (!still || still());
   const matches = () => live() && norm(textOf(el)) === norm(text);
   const hit = await observe(() => (matches() ? 'match' : null), 1500);
-  return !!hit && matches();
+  if (!!hit && matches()) return true;
+  // A raw restore tries the exact text (spaces, line breaks) first; the normalized write stays the fallback.
+  return exact && live() ? writeLexicalEditor(el, text, still, false) : false;
 }
-async function writeComposer(el, text, still) {
+// Generic path only, for the write-failure bits: whether insertText reported success and whether the paste fallback ran.
+let genericWrite = { typed: false, pasted: false };
+async function writeComposer(el, text, still, exact) {
+  genericWrite = { typed: false, pasted: false };
   if (isField(el)) { setFieldValue(el, text); return textOf(el) === text; }
   if (CFG.kind === 'gemini' && isQuillEditor(el)) return writeQuillEditor(el, text);
-  if (isLexicalEditor(el)) return writeLexicalEditor(el, text, still);
+  if (isLexicalEditor(el)) return writeLexicalEditor(el, text, still, exact);
   el.focus();
   document.execCommand('selectAll', false, null);
   let ok = false;
   try { ok = document.execCommand('insertText', false, text); } catch (e) { ok = false; }
+  genericWrite.typed = ok;
+  // The M365 editor adds a paste after its content instead of replacing it (observed: insertText's prompt plus the
+  // pasted one), so a paste can never make an exact match there: the full match is awaited once, with no paste.
+  if (isM365Editor(el)) {
+    if (norm(textOf(el)) === norm(text)) return true;
+    const gen = touchGen;
+    const live = () => alive && el.isConnected && touchGen === gen && (!still || still());
+    const hit = await observe(() => (!live() ? 'gone' : norm(textOf(el)) === norm(text) ? 'match' : null), 1500);
+    return hit === 'match' && live();
+  }
   if (!ok || norm(textOf(el)) !== norm(text)) {
+    genericWrite.pasted = true;
     try {
       const dt = new DataTransfer();
       dt.setData('text/plain', text);
@@ -1630,7 +2169,7 @@ function observe(pred, ms, quiet) {
 function gate(docID, url, sid) {
   if (!alive) return 'retired';
   if (docID !== DOC) return 'stale-document';
-  if (location.origin !== CFG.origin) return 'origin-changed';
+  if (!CFG.origins.includes(location.origin)) return 'origin-changed';
   if (url && String(location.href).split('#')[0] !== String(url).split('#')[0]) return 'url-changed';
   if (sid && domId() !== sid) return 'thread-changed';
   return null;
@@ -1662,6 +2201,13 @@ function lifeSig() {
 function startWatch() {
   if (!alive) return;
   sig = lifeSig();
+  // A single-page address change (new chat, other conversation) is reported so browser mode can follow its conversation.
+  let lastHref = location.href;
+  new MutationObserver(() => {
+    if (!alive || location.href === lastHref) return;
+    lastHref = location.href;
+    post({ t: 'nav' });
+  }).observe(document.documentElement, { childList: true, subtree: true });
   new MutationObserver(() => {
     if (!alive || !watch) return;
     const s = lifeSig();
@@ -1676,7 +2222,8 @@ function startWatch() {
 
 // ---- native entry points -----------------------------------------------------------------------------------
 window.__afPlanner = {
-  retire() { alive = false; for (const k of Object.keys(pending)) delete pending[k]; return true; },
+  setPageMode(on) { PAGE_MODE = on === true; return { ok: true }; },
+  retire() { alive = false; pageContextInFlight = false; PAGE_MODE = false; for (const k of Object.keys(pending)) { clearTimeout(pending[k].timer); delete pending[k]; } return true; },
   setWatch(on) { watch = !!on; sig = lifeSig(); return { ok: true }; },
   probe(docID) {
     const g = gate(docID);
@@ -1689,7 +2236,10 @@ window.__afPlanner = {
   },
   capture(docID) {
     const g = gate(docID);
-    return g ? { ok: false, reason: g } : captureNow();
+    if (g) return { ok: false, reason: g };
+    const r = captureNow();
+    if (!r.ok) r.diag = diagCode();
+    return r;
   },
   // Positive proof of a fresh, idle, empty home page (read only; nothing is focused, written or clicked).
   restoreState(docID) {
@@ -1826,8 +2376,523 @@ window.__afPlanner = {
     const g2 = gate(docID, url, sid);
     if (g2) return { state: 'unknown', reason: g2 };
     return { state: 'unknown', reason: 'completeness-unproven' };
+  },
+  async submitPageContextPrompt(docID, req, promptText, imageB64) {
+    if (docID !== DOC) return { ok: false, reason: 'stale-document' };
+    const p = pending[req];
+    if (!p || p.kind !== 'pageContext') { pcStage += 'u'; return { ok: false, reason: 'unknown-request' }; }
+    clearTimeout(p.timer);
+    delete pending[req];
+    pcStage += 's';
+    // Stays in flight until the send click: a second Enter meanwhile is swallowed, never sent as a plain message.
+    try {
+      const r = await submitPageContextNow(docID, p, promptText, typeof imageB64 === 'string' && imageB64 ? imageB64 : null);
+      pcStage += r && r.ok ? 'k' : 'f';
+      return r;
+    } finally {
+      pageContextInFlight = false;
+    }
+  },
+  // Clears the composer only while it still holds exactly the control input ("//"); newer typing is never touched.
+  consumePageContext(docID, req) {
+    if (docID !== DOC) return { ok: false, reason: 'stale-document' };
+    const p = pending[req];
+    if (!p || p.kind !== 'pageContext') return { ok: false, reason: 'unknown-request' };
+    clearTimeout(p.timer);
+    delete pending[req];
+    pageContextInFlight = false;
+    const c = composerInfo();
+    if (!c.el || c.el !== p.comp || !p.comp.isConnected || String(location.href) !== p.href) return { ok: false, reason: 'composer-changed' };
+    if (norm(textOf(c.el)) !== norm(p.raw)) return { ok: false, reason: 'user-active' };
+    clearComposer(c.el);
+    return { ok: true };
+  },
+  cancelPageContext(docID, req) {
+    if (docID !== DOC) return { ok: false };
+    pcStage += 'c';
+    const p = pending[req];
+    if (p && p.kind === 'pageContext') {
+      clearTimeout(p.timer);
+      delete pending[req];
+      pageContextInFlight = false;
+    }
+    return { ok: true };
   }
 };
+// Claude composer attachments (verified live): thumbnails are [data-testid="file-thumbnail"] and may sit outside the
+// editor's parent. The scope is the nearest bounded ancestor holding this exact editor and exactly one semantic send
+// button, never one that also holds conversation history.
+const CLAUDE_SEND = 'button[data-testid="chat-input-send"]';
+const CLAUDE_THUMB = '[data-testid="file-thumbnail"]';
+function claudeScope(comp) {
+  let el = comp.parentElement;
+  for (let i = 0; i < 10 && el && el !== document.body && el !== document.documentElement; i++, el = el.parentElement) {
+    if (el.matches('main, [role="main"], [role="log"]') || el.querySelector('[data-testid="user-message"], [data-testid*="conversation-turn" i], [data-is-streaming]')) return null;
+    const sends = q(CLAUDE_SEND, el).filter(visible);
+    if (sends.length === 1) return { root: el, send: sends[0] };
+    if (sends.length > 1) return null;
+  }
+  return null;
+}
+function claudeThumbs(scope) { return q(CLAUDE_THUMB, scope.root).filter(visible); }
+// The dock's Claude thumbnail may carry our file name only in its own label or its own named remove button.
+function claudeNamed(t, name) {
+  return (t.textContent || '').includes(name) || imgNameMatches(t.getAttribute('aria-label') || '', name)
+    || q('button, [role="button"]', t).some((b) => imgNameMatches(b.getAttribute('aria-label') || '', name));
+}
+function claudeThumbFailed(t) {
+  const st = (t.getAttribute('data-state') || '').toLowerCase();
+  return st === 'error' || st === 'failed' || t.getAttribute('aria-invalid') === 'true'
+    || /업로드.{0,8}(?:실패|오류)|upload.{0,12}(?:fail|error)|failed to upload/i.test(t.textContent || '');
+}
+function claudeThumbReady(t) {
+  if (t.getAttribute('aria-busy') === 'true' || t.getAttribute('data-state') === 'pending' || claudeThumbFailed(t)) return false;
+  const img = t.querySelector('img');
+  return !!img && img.complete && img.naturalWidth > 0;
+}
+// Removes only the thumbnail node this call created, and only while it is still the single attachment in scope.
+function claudeCleanup(own) {
+  try {
+    if (!own || !own.thumb || !own.thumb.isConnected) return;
+    const scope = claudeScope(own.comp);
+    if (!scope || claudeThumbs(scope).length !== 1 || claudeThumbs(scope)[0] !== own.thumb) return;
+    const dels = q('button', own.thumb).filter((b) => /삭제|제거|remove|delete/i.test(b.getAttribute('aria-label') || ''));
+    if (dels.length === 1) dels[0].click();
+  } catch (e) {}
+}
+// Attaches the masked page image and waits for a verified finished upload. Returns { ok, own } or { reason, own }.
+async function attachClaudeImage(docID, p, comp, b64) {
+  const scope = claudeScope(comp);
+  if (!scope) return { reason: 'attach-scope-unsafe' };
+  if (claudeThumbs(scope).length || q('input[type="file"]').some((i) => i.files && i.files.length)) return { reason: 'attachment-present' };
+  const inputs = q('input[type="file"][data-testid="file-upload"]');
+  if (inputs.length !== 1 || inputs[0].disabled) return { reason: 'file-input-unavailable' };
+  let file;
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    file = new File([bytes], 'hantool-page-' + uuid().slice(0, 8) + '.jpg', { type: 'image/jpeg' });
+  } catch (e) { return { reason: 'image-invalid' }; }
+  const own = { comp, file, thumb: null };
+  const input = inputs[0];
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  } catch (e) { return { reason: 'attach-failed', own }; }
+  const appeared = await observe(() => {
+    if (gate(docID) || !comp.isConnected) return 'gone';
+    const list = claudeThumbs(scope);
+    const hit = list.filter((t) => claudeNamed(t, file.name));
+    return list.length === 1 && hit.length === 1 ? hit[0] : (list.length > 1 ? 'gone' : null);
+  }, 8000);
+  if (!appeared || appeared === 'gone') {
+    if (appeared === 'gone' && input.files && input.files.length === 1 && input.files[0] === file) input.value = '';
+    return { reason: appeared ? 'attach-ambiguous' : 'attach-not-shown', own };
+  }
+  own.thumb = appeared;
+  const ready = await observe(() => {
+    if (gate(docID) || !comp.isConnected || !own.thumb.isConnected) return 'gone';
+    const list = claudeThumbs(scope);
+    if (list.length !== 1 || list[0] !== own.thumb) return 'gone';
+    if (claudeThumbFailed(own.thumb)) return 'failed';
+    return claudeThumbReady(own.thumb) && isEnabled(scope.send) ? 'ready' : null;
+  }, 30000);
+  if (ready !== 'ready') return { reason: ready === 'failed' ? 'upload-failed' : (ready ? 'attach-changed' : 'upload-timeout'), own };
+  return { ok: true, own, scope };
+}
+// ChatGPT / Gemini / Perplexity composer attachments (verified live on the current apps, selectors are exact and
+// semantic, never class-prefix guesses). The scope is the widest bounded ancestor of this exact editor holding exactly one
+// send candidate and no conversation history, so the attachment tray is found even when it is not the editor's parent.
+const IMG_HISTORY = '[data-testid="user-message"], [data-testid*="conversation-turn" i], [data-is-streaming], [data-message-author-role], user-query, model-response, [data-message-bubble], [data-renderer="lm"]';
+const IMG_BUSY_RE = /업로드 중|로드 중|uploading|loading/i;
+const IMG_FAIL_RE = /업로드.{0,8}(?:실패|오류)|upload.{0,12}(?:fail|error)|failed to upload/i;
+const IMG_REMOVE_RE = /삭제|제거|remove|delete/i;
+const IMG_ROUTE = {
+  chatgpt: {
+    inputs: () => q('input[type="file"]').filter((i) => i.accept === 'image/*' && i.multiple),
+    items: (r) => q('.composer-attachment-surface[role="button"]', r).filter(visible),
+    name: (it) => it.getAttribute('aria-label') || '',
+    img: (it) => it.querySelector('img')
+  },
+  gemini: {
+    open: (r) => { const l = q('button', r).filter((b) => visible(b) && (b.getAttribute('aria-label') || '').includes('업로드 및 도구')); return l.length === 1 ? l[0] : null; },
+    inputs: () => q('input[type="file"]').filter((i) => /image\//i.test(i.accept) && /video\//i.test(i.accept) && i.multiple),
+    items: (r) => q('.mat-mdc-chip', r).filter((c) => visible(c) && c.querySelector('img.gem-attachment-style-img')),
+    name: null,
+    img: (it) => it.querySelector('img.gem-attachment-style-img')
+  },
+  perplexity: {
+    inputs: () => q('input[type="file"]').filter((i) => /image\/|\.jpe?g|\.png/i.test(i.accept) && i.multiple),
+    items: (r) => q('button[aria-label$="미리보기"]', r).filter(visible),
+    name: (it) => (it.getAttribute('aria-label') || '').replace(/\s*미리보기$/, ''),
+    img: (it) => it.querySelector('img')
+  },
+  // Grok: one always-mounted file input; each attachment is a role=listitem whose text is the file name and whose own
+  // remove button carries no name.
+  grok: {
+    inputs: () => q('input[type="file"]').filter((i) => !i.accept && i.multiple),
+    items: (r) => q('[role="listitem"]', r).filter((it) => visible(it) && it.querySelector('button[aria-label="이 첨부파일 제거"]')),
+    name: (it) => it.textContent || '',
+    nameOptional: true,
+    img: (it) => it.querySelector('img'),
+    remove: (it) => q('button[aria-label="이 첨부파일 제거"]', it)
+  },
+  // Copilot: the attach button mounts the single image input; each attachment is .fx-Attachment, named only by its
+  // remove button's aria-label.
+  copilot: {
+    open: (r) => { const l = q('button[data-testid="chat-input-attach-button"][aria-label="추가"]', r).filter(visible); return l.length === 1 ? l[0] : null; },
+    inputs: () => q('input[type="file"][id="upload-file-button"]').filter((i) => i.multiple && /image\//i.test(i.accept)),
+    items: (r) => q('.fx-Attachment', r).filter((it) => visible(it) && it.querySelector('button.fx-Attachment__dismissButton')),
+    name: (it) => { const b = it.querySelector('button.fx-Attachment__dismissButton'); return b ? (b.getAttribute('aria-label') || '').replace(/^첨부 파일 제거\s*/, '') : ''; },
+    img: (it) => it.querySelector('img')
+  },
+  // Meta AI: one always-mounted hidden file input; each attachment is the nearest box holding one img (alt = file name)
+  // and its own "Remove image" button, shown inside the Lexical editor itself.
+  meta: {
+    inputs: () => q('input[type="file"]').filter((i) => i.multiple && /image\//i.test(i.accept)),
+    items: (r) => q('button[aria-label="Remove image"]', r).filter(visible).map(metaItem).filter(Boolean),
+    name: (it) => { const im = it.querySelector('img'); return im ? im.getAttribute('alt') || '' : ''; },
+    img: (it) => it.querySelector('img'),
+    remove: (it) => q('button[aria-label="Remove image"]', it)
+  }
+};
+function metaItem(b) {
+  let el = b.parentElement;
+  for (let i = 0; i < 3 && el; i++, el = el.parentElement) {
+    if (el.querySelector('img')) return q('img', el).length === 1 && q('button[aria-label="Remove image"]', el).length === 1 ? el : null;
+  }
+  return null;
+}
+function imgScope(comp) {
+  let good = null, el = comp.parentElement;
+  for (let i = 0; i < (CFG.kind === 'meta' ? ROOT_DEPTH : 10) && el && el !== document.body && el !== document.documentElement; i++, el = el.parentElement) {
+    if (el.matches('main, [role="main"], [role="log"]') || el.querySelector(IMG_HISTORY)) break;
+    const sends = sendCandidates(el);
+    if (sends.length > 1) break;
+    if (sends.length === 1) good = { root: el };
+  }
+  return good;
+}
+function imgSend(scope) {
+  const l = sendCandidates(scope.root);
+  return l.length === 1 ? l[0] : null;
+}
+// The site may shorten a long file name with an ellipsis; a shortened label still has to start and end like our name.
+function imgNameMatches(label, name) {
+  const l = norm(label);
+  if (!l) return false;
+  if (l.includes(name)) return true;
+  const parts = l.split(/…|\.\.\./);
+  return parts.length === 2 && parts[0].length >= 1 && parts[1].length >= 3 && name.startsWith(parts[0]) && name.endsWith(parts[1]);
+}
+// The single attachment in scope that is ours: by file name where the site shows one, else the only one (the scope held
+// none before the attach).
+function imgFind(route, scope, file) {
+  const list = route.items(scope.root);
+  if (list.length !== 1) return list.length ? 'many' : null;
+  const fresh = file.injected && file.base && !file.base.has(list[0]);
+  if (!route.name) return fresh ? list[0] : 'many';
+  if (imgNameMatches(route.name(list[0]), file.name)) return list[0];
+  // Grok's narrow dock layout shows no file name in the item: the single new item after our own injected file counts as
+  // ours only while it names no file at all (an item naming another file is never ours).
+  return route.nameOptional && fresh && !FILE_NAME_RE.test(norm(route.name(list[0]))) ? list[0] : 'many';
+}
+function imgOwned(own, scope) {
+  const it = imgFind(own.route, scope, own.file);
+  if (!it || it === 'many') return false;
+  own.item = it;
+  return imgReady(own, scope);
+}
+function imgFailed(own, scope) {
+  return IMG_FAIL_RE.test(own.item.textContent || '') || q('[role="alert"]', scope.root).some((a) => visible(a) && IMG_FAIL_RE.test(a.textContent || ''));
+}
+// Finished: loaded thumbnail, no busy attribute, and none of the scope's own progress indicators still shown.
+// '' when finished, else the fixed code of the first unmet condition (reported with an upload timeout).
+function imgPending(own, scope) {
+  const img = own.route.img(own.item);
+  if (!img) return 'img-none';
+  // Load stage: thumbnail source scheme (blob / data / https / none) and whether the element still loads or finished empty.
+  if (!img.complete || !(img.naturalWidth > 0)) {
+    const sch = (img.currentSrc || img.getAttribute('src') || '').slice(0, 6).toLowerCase();
+    return 'img-' + (sch.startsWith('blob:') ? 'b' : sch.startsWith('data:') ? 'd' : sch.startsWith('https:') ? 'h' : sch ? 'o' : 'n') + (img.complete ? 'z' : 'w');
+  }
+  if (own.item.getAttribute('aria-busy') === 'true' || own.item.querySelector('[aria-busy="true"]')) return 'busy';
+  if (q('[role="progressbar"]', scope.root).some((b) => visible(b) && (own.item.contains(b) || IMG_BUSY_RE.test(b.getAttribute('aria-label') || '') || (own.route.name && imgNameMatches(b.getAttribute('aria-label') || '', own.file.name))))) return 'progress';
+  return imgFailed(own, scope) ? 'failed' : '';
+}
+function imgReady(own, scope) { return !imgPending(own, scope); }
+// Removes only the attachment this call created, and only while it is still the single attachment in scope. The remove
+// button must be named after our file (or, where the site shows no name, sit inside our own item).
+function imageCleanup(own) {
+  try {
+    if (!own) return;
+    if (!own.route) { claudeCleanup(own); return; }
+    if (!own.item || !own.item.isConnected) return;
+    const scope = imgScope(own.comp);
+    if (!scope || imgFind(own.route, scope, own.file) !== own.item) return;
+    // Where the site shows no file name the item must also still carry the thumbnail source seen when it became ready.
+    if (!own.route.name || !imgNameMatches(own.route.name(own.item), own.file.name)) { const im = own.route.img(own.item); if (!own.src || !im || im.src !== own.src) return; }
+    const dels = own.route.remove ? own.route.remove(own.item)
+      : q('button', own.route.name ? scope.root : own.item).filter((b) => IMG_REMOVE_RE.test(b.getAttribute('aria-label') || '')
+        && (own.route.name ? imgNameMatches(b.getAttribute('aria-label') || '', own.file.name) : own.item.contains(b)));
+    if (dels.length === 1) dels[0].click();
+  } catch (e) {}
+}
+// Attaches the masked page image and waits for a verified finished upload. Returns { ok, own, scope } or { reason, own }.
+async function attachPageImage(docID, p, comp, b64) {
+  const route = IMG_ROUTE[CFG.kind];
+  const scope = route && imgScope(comp);
+  if (!scope) return { reason: 'attach-scope-unsafe' };
+  if (route.items(scope.root).length || q('input[type="file"]').some((i) => i.files && i.files.length)) return { reason: 'attachment-present' };
+  let file;
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    file = new File([bytes], 'hp-' + uuid().slice(0, 8) + '.jpg', { type: 'image/jpeg' });
+  } catch (e) { return { reason: 'image-invalid' }; }
+  const own = { comp, file, route, item: null };
+  let opener = null;
+  try {
+    let inputs = route.inputs();
+    if (!inputs.length && route.open) {
+      // Gemini mounts its file inputs only while the upload menu is open.
+      opener = route.open(scope.root);
+      if (!opener) return { reason: 'file-input-unavailable' };
+      opener.click();
+      inputs = (await observe(() => { const l = route.inputs(); return l.length ? l : null; }, 3000)) || [];
+    }
+    if (inputs.length !== 1 || inputs[0].disabled) return { reason: 'file-input-unavailable' };
+    const input = inputs[0];
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      file.base = new Set(route.items(scope.root));
+      input.files = dt.files;
+      file.injected = input.files.length === 1 && input.files[0] === file;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (e) { return { reason: 'attach-failed', own }; }
+    // Each 'gone' keeps its exact cause as a fixed reason code (several items / one unnamed-ours / composer node / document).
+    const GONE = { many: 'attach-ambiguous', name: 'attach-name-mismatch', comp: 'composer-replaced', doc: 'stale-document' };
+    const appeared = await observe(() => {
+      if (gate(docID)) return 'doc';
+      if (!comp.isConnected) return 'comp';
+      const it = imgFind(route, scope, file);
+      return it === 'many' ? (route.items(scope.root).length > 1 ? 'many' : 'name') : it;
+    }, 8000);
+    if (!appeared || typeof appeared === 'string') {
+      const ours = input.files && input.files.length === 1 && input.files[0] === file;
+      if (appeared && ours) input.value = '';
+      // Copilot's first image use asks the person for a confirmation first: never acknowledged here, and our own
+      // pending file is dropped so it cannot attach after a later manual confirmation.
+      if (!appeared && CFG.kind === 'copilot' && q('[role="dialog"], dialog').some(visible)) {
+        // Cancel through the notice's own "나중에" button (never the confirm button), then require proof that the
+        // notice is gone and nothing of ours is left pending; without that proof the reason says so.
+        const dlg = q('[role="dialog"], dialog').filter(visible);
+        const later = dlg.length === 1 ? q('button', dlg[0]).filter((x) => norm(x.textContent) === '나중에') : [];
+        if (later.length === 1) later[0].click();
+        if (ours) input.value = '';
+        const settled = later.length === 1 && await observe(() => (!q('[role="dialog"], dialog').some(visible)
+          && !(input.files && input.files.length) && !route.items(scope.root).length) ? true : null, 3000);
+        return { reason: settled ? 'first-use-confirmation' : 'first-use-confirmation-uncancelled', own };
+      }
+      return { reason: appeared ? GONE[appeared] : 'attach-not-shown', own };
+    }
+    own.item = appeared;
+    let why = 'item';
+    const ready = await observe(() => {
+      if (gate(docID) || !comp.isConnected) return 'gone';
+      const it = imgFind(route, scope, file);
+      if (it === 'many') return 'gone';
+      if (!it) { why = 'item'; return null; }
+      own.item = it;
+      if (imgFailed(own, scope)) return 'failed';
+      why = imgPending(own, scope) || (!imgSend(scope) ? 'send-none' : (isEnabled(imgSend(scope)) ? '' : 'send-off'));
+      if (why) return null;
+      const im = route.img(it);
+      own.src = im ? im.src : '';
+      return 'ready';
+    }, 30000);
+    if (ready !== 'ready') return { reason: ready === 'failed' ? 'upload-failed' : (ready ? 'attach-changed' : 'upload-timeout-' + why), own };
+    return { ok: true, own, scope };
+  } finally {
+    // Leave the provider's upload menu closed again (only the menu this call opened).
+    if (opener && opener.isConnected && opener.getAttribute('aria-expanded') === 'true') opener.click();
+  }
+}
+async function submitPageContextNow(docID, p, promptText, imageB64) {
+    const c = composerInfo();
+    if (!c.el || c.el !== p.comp || !p.comp.isConnected || String(location.href) !== p.href) {
+      return { ok: false, reason: 'composer-changed' };
+    }
+    if (norm(textOf(c.el)) !== norm(p.raw)) {
+      return { ok: false, reason: 'user-active' };
+    }
+    let own = null, scope = null;
+    if (imageB64 && !IMAGE_PAGE_KINDS.has(CFG.kind)) return { ok: false, reason: 'image-route-unsupported' };
+    // Meta shows its attachment inside the Lexical editor, so a later whole-editor text write would replace it: there the
+    // text is written first and the image attached after it.
+    const textFirst = !!imageB64 && CFG.kind === 'meta';
+    const attach = async (expected) => {
+      const a = CFG.kind === 'claude' ? await attachClaudeImage(docID, p, c.el, imageB64) : await attachPageImage(docID, p, c.el, imageB64);
+      own = a.own || null;
+      if (!a.ok) return a.reason;
+      scope = a.scope;
+      if (gate(docID) || composerInfo().el !== c.el || String(location.href) !== p.href || norm(textOf(c.el)) !== norm(expected)) return 'composer-changed';
+      return '';
+    };
+    if (imageB64 && !textFirst) {
+      const why = await attach(p.raw);
+      if (why) {
+        imageCleanup(own);
+        return { ok: false, reason: why };
+      }
+    }
+    const writeGen = touchGen;
+    const wrote = writeComposer(c.el, promptText, () => !gate(docID) && composerInfo().el === c.el);
+    const ok = await wrote;
+    // Our own readback right after a failed write with no input since it: the editor held exactly the raw text when
+    // the write began, so this value is still only ours (raw and / or our partial write) and may be replaced by the raw.
+    let after = null;
+    // reacquire (Meta, after the click only): a guard for taking the one new, empty current editor when ours was replaced.
+    const restoreRaw = async (reacquire) => {
+      // Only undo our own injected text; never overwrite newer typing or a different composer.
+      try {
+        if (String(location.href) !== p.href) return false;
+        if (!c.el.isConnected) {
+          if (!reacquire || !reacquire()) return false;
+          const cn = composerInfo().el, sc = cn ? imgScope(cn) : null;
+          if (!cn || cn === c.el || norm(textOf(cn)) !== '' || !sc || IMG_ROUTE.meta.items(sc.root).length) return false;
+          return await writeComposer(cn, p.raw, () => reacquire() && composerInfo().el === cn, true);
+        }
+        if (composerInfo().el !== c.el) return false;
+        const cur = norm(textOf(c.el));
+        if (cur === norm(promptText) || cur === '' || (after !== null && cur === after && touchGen === writeGen)) return await writeComposer(c.el, p.raw, null, true);
+      } catch (e) {}
+      return false;
+    };
+    if (!ok) {
+      // Fixed bits (1 = holds), logged only: editor connected, still the current editor, same address, same document,
+      // no input since the write, insertText reported success, paste fallback ran, readback empty, readback = raw,
+      // readback starts with raw, readback starts with the prompt's head, prompt starts with readback (non-empty),
+      // readback shorter than the prompt, readback longer, the prompt twice in it. Text stays in this page.
+      let w = '';
+      try {
+        const cur = c.el.isConnected ? norm(textOf(c.el)) : null, np = norm(promptText), nr = norm(p.raw);
+        if (cur !== null && touchGen === writeGen && composerInfo().el === c.el) after = cur;
+        w = [c.el.isConnected, composerInfo().el === c.el, String(location.href) === p.href, !gate(docID), touchGen === writeGen,
+          genericWrite.typed, genericWrite.pasted, cur === '', cur === nr, cur !== null && cur.startsWith(nr),
+          cur !== null && cur.startsWith(np.slice(0, 40)), !!cur && np.startsWith(cur), cur !== null && cur.length < np.length,
+          cur !== null && cur.length > np.length, cur !== null && cur.indexOf(np) >= 0 && cur.indexOf(np) !== cur.lastIndexOf(np)]
+          .map((b) => (b ? '1' : '0')).join('');
+      } catch (e) { w = '0'; }
+      const restored = await restoreRaw() === true;
+      imageCleanup(own);
+      return { ok: false, reason: 'composer-write-failed', restored, w };
+    }
+    if (textFirst) {
+      // Our prompt is already in the editor: a throw here must still end in the raw restore below.
+      const why = await attach(promptText).catch(() => 'attach-exception');
+      if (why) {
+        // Our own attachment goes first so the raw text is restored into an editor without it.
+        imageCleanup(own);
+        const restored = await restoreRaw() === true;
+        return { ok: false, reason: why, restored };
+      }
+    }
+    // With an image the semantic send button also needs the single owned, loaded, settled thumbnail.
+    const stillOwned = () => !own || (own.route ? imgOwned(own, scope) : own.thumb.isConnected && claudeThumbs(scope).length === 1 && claudeThumbs(scope)[0] === own.thumb && claudeThumbReady(own.thumb));
+    const btn = await observe(() => {
+      const cn = composerInfo();
+      if (cn.el !== c.el || norm(textOf(c.el)) !== norm(promptText) || !stillOwned()) return null;
+      const b = own ? (own.route ? imgSend(scope) : scope.send) : sendButton(c.el);
+      return b && isEnabled(b) ? b : null;
+    }, own ? 4000 : 1500);
+    let sendable = false;
+    try { sendable = !!btn && !gate(docID) && !generating() && stillOwned(); } catch (e) { sendable = false; }
+    if (!sendable) {
+      // Meta's attachment sits inside the editor, so it is removed before the raw restore (as after a failed attach).
+      if (textFirst) imageCleanup(own);
+      const restored = await restoreRaw() === true;
+      if (!textFirst) imageCleanup(own);
+      return { ok: false, reason: 'send-button-not-ready', restored };
+    }
+    // Meta: the click alone is not a send (seen live: click, then an empty editor and a disabled send button with nothing
+    // posted). Only our own new message counts; without it the result is unconfirmed and never resent (it may post late).
+    const meta = CFG.kind === 'meta';
+    // Meta: one-shot state right before the click, as fixed bits (1 = holds): same document, still the current editor,
+    // connected, same address, the full prompt in it, our own image still ready (or none), send button live, no new
+    // input since our write, not generating. Any miss = no click (never an empty or stale question).
+    let pre = '';
+    if (meta) {
+      try {
+        pre = [!gate(docID), composerInfo().el === c.el, c.el.isConnected, String(location.href) === p.href,
+          norm(textOf(c.el)) === norm(promptText), stillOwned(), btn.isConnected && isEnabled(btn), touchGen === writeGen,
+          !generating()].map((b) => (b ? '1' : '0')).join('');
+      } catch (e) { pre = '0'; }
+      if (pre !== '111111111') {
+        imageCleanup(own);
+        const restored = await restoreRaw() === true;
+        return { ok: false, reason: 'preclick-stale', g: pre, restored };
+      }
+    }
+    const before = meta ? metaOwnPosts(promptText, c.el) : null;
+    const clickGen = touchGen;
+    btn.click();
+    if (!meta) return { ok: true };
+    const posted = await observe(() => {
+      if (gate(docID)) return 'doc';
+      const now = metaOwnPosts(promptText, c.el);
+      return now.size > before.size && Array.from(now).some((el) => !before.has(el)) ? 'found' : null;
+    }, 8000);
+    if (posted === 'found') return { ok: true };
+    // Restore guard at this point as fixed bits (logged only): no document move, same document, no input since the click,
+    // our editor connected, still the current editor, same address, our editor empty or ours, a different current editor
+    // that is empty (remount), our own image card still shown.
+    let q = '';
+    try {
+      const cn = composerInfo().el, cur = c.el.isConnected ? norm(textOf(c.el)) : null;
+      q = [posted !== 'doc', !gate(docID), touchGen === clickGen, c.el.isConnected, cn === c.el, String(location.href) === p.href,
+        cur === '' || cur === norm(promptText), !!cn && cn !== c.el && norm(textOf(cn)) === '', !!own && !!own.item && own.item.isConnected]
+        .map((b) => (b ? '1' : '0')).join('');
+    } catch (e) { q = '0'; }
+    // Same document, no newer input: our own attachment goes first, then the exact raw text (restoreRaw keeps newer typing).
+    // Our editor replaced (seen live: q=111001010) → only the one new, empty current editor, while still the same document
+    // and address, no input since the click and no own new message even now (it may post late; nothing is resent).
+    let restored = false;
+    if (posted !== 'doc' && !gate(docID) && touchGen === clickGen) {
+      imageCleanup(own);
+      const reacquire = () => !gate(docID) && touchGen === clickGen
+        && !Array.from(metaOwnPosts(promptText, composerInfo().el || c.el)).some((el) => !before.has(el));
+      restored = touchGen === clickGen && await restoreRaw(reacquire) === true;
+    }
+    return { ok: false, reason: 'post-unconfirmed', restored, g: pre, q };
+}
+// Meta's shown nodes holding our prompt's start: outside the composer, its send root and side / dialog chrome. Counted
+// against the same scan taken just before the click, so earlier history with the same page header (or a re-render of it)
+// never counts. The text is compared inside this page only and never leaves it.
+function metaOwnPosts(promptText, comp) {
+  const squash = (s) => String(s == null ? '' : s).replace(/\s+/g, '');
+  const out = new Set();
+  const probe = squash(promptText).slice(0, 80);
+  const anchor = squash(String(promptText).split('\n').find((l) => l.trim()) || '').slice(0, 12);
+  if (!probe || !anchor) return out;
+  const root = chatRoot(comp);
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!squash(n.data).includes(anchor)) continue;
+    let el = n.parentElement;
+    for (let i = 0; i < 8 && el && el !== document.body && !squash(el.textContent).includes(probe); i++) el = el.parentElement;
+    if (!el || el === document.body || !squash(el.textContent).includes(probe)) continue;
+    if (el.contains(comp) || comp.contains(el) || (root && (root.contains(el) || el.contains(root)))) continue;
+    if (!visible(el) || el.closest('[contenteditable="true"], textarea, nav, aside, header, dialog, [role="dialog"], [role="navigation"], [aria-hidden="true"]')) continue;
+    out.add(el);
+  }
+  return out;
+}
 
 for (const type of ['keydown', 'pointerdown', 'mousedown', 'touchstart', 'paste', 'drop', 'input']) window.addEventListener(type, onTouch, true);
 window.addEventListener('keydown', onKey, true);
