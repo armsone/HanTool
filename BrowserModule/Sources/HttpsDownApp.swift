@@ -343,6 +343,47 @@ struct MainWindowKeyMonitor: NSViewRepresentable {
                     }
                 }
 
+                // Page zoom: Cmd + Plus (Cmd=, Cmd+Shift+=, physical key 24), Cmd + Minus (Cmd-, physical key 27), Cmd + 0 (reset 100%, physical key 29)
+                // Active main browser tab only; respects Option/Control modifier guard and tab overview guard.
+                let isZoomIn = (flags == .command || flags == [.command, .shift]) &&
+                    (event.keyCode == 24 || event.charactersIgnoringModifiers == "=" || event.charactersIgnoringModifiers == "+")
+                let isZoomOut = flags == .command &&
+                    (event.keyCode == 27 || event.charactersIgnoringModifiers == "-")
+                let isZoomReset = flags == .command &&
+                    (event.keyCode == 29 || event.charactersIgnoringModifiers == "0")
+
+                if isZoomIn || isZoomOut || isZoomReset {
+                    if let app = self.appModel, !app.isTabOverviewPresented {
+                        let activeBrowser: LoginBrowserModel?
+                        if app.selectedTab == .browser {
+                            activeBrowser = app.browser
+                        } else if app.selectedTab == .saw,
+                                  let pid = app.sawWorkspace.selectedProjectID,
+                                  let session = app.sawWorkspace.sessions[pid] {
+                            activeBrowser = session.activeBrowser
+                        } else {
+                            activeBrowser = nil
+                        }
+
+                        if let targetBrowser = activeBrowser, let webView = targetBrowser.webView {
+                            Task { @MainActor in
+                                if isZoomReset {
+                                    webView.pageZoom = 1.0
+                                } else if isZoomIn {
+                                    let current = webView.pageZoom > 0 ? webView.pageZoom : 1.0
+                                    let next = min(3.0, (round((current + 0.1) * 100)) / 100.0)
+                                    webView.pageZoom = next
+                                } else if isZoomOut {
+                                    let current = webView.pageZoom > 0 ? webView.pageZoom : 1.0
+                                    let next = max(0.25, (round((current - 0.1) * 100)) / 100.0)
+                                    webView.pageZoom = next
+                                }
+                            }
+                            return nil
+                        }
+                    }
+                }
+
                 return event
             }
         }
