@@ -258,6 +258,11 @@ struct BrowserPane: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay {
+                if plannerSession == nil && appModel.isTabOverviewPresented {
+                    TabOverviewView(appModel: appModel)
+                }
+            }
             Divider()
             bottomStatusBar
         }
@@ -282,6 +287,20 @@ struct BrowserPane: View {
             } else {
                 webPageAgent.syncContext(tab: model)
                 consumeAddressFocusRequest()
+            }
+        }
+        .onChange(of: appModel.isTabOverviewPresented) { _, presented in
+            guard plannerSession == nil else { return }
+            if presented {
+                addressFocused = false
+                fieldFocused = false
+                pickerHovering = false
+                addressFlow.cancel()
+            }
+        }
+        .onChange(of: model.isLoading) { _, loading in
+            if !loading, plannerSession == nil {
+                appModel.captureTabThumbnail(for: model, force: true)
             }
         }
         .onDisappear {
@@ -350,7 +369,10 @@ struct BrowserPane: View {
 
     private var navigationGroup: some View {
         HStack(spacing: 3) {
-            Button { model.goBack() } label: {
+            Button {
+                if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
+                model.goBack()
+            } label: {
                 Image(systemName: "chevron.left")
                     .frame(width: 22, height: 22)
             }
@@ -359,7 +381,10 @@ struct BrowserPane: View {
             .help("뒤로")
             .accessibilityLabel("뒤로 가기")
 
-            Button { model.goForward() } label: {
+            Button {
+                if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
+                model.goForward()
+            } label: {
                 Image(systemName: "chevron.right")
                     .frame(width: 22, height: 22)
             }
@@ -369,6 +394,7 @@ struct BrowserPane: View {
             .accessibilityLabel("앞으로 가기")
 
             Button {
+                if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
                 if model.isLoading { model.stopLoading() } else { model.reload() }
             } label: {
                 Image(systemName: model.isLoading ? "xmark" : "arrow.clockwise")
@@ -379,7 +405,11 @@ struct BrowserPane: View {
             .help(model.isLoading ? "불러오기 중지" : "새로 고침")
             .accessibilityLabel(model.isLoading ? "불러오기 중지" : "새로 고침")
 
-            Button { model.goHome(); appModel.requestAddressFocus(for: model) } label: {
+            Button {
+                if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
+                model.goHome()
+                appModel.requestAddressFocus(for: model)
+            } label: {
                 Image(systemName: "house")
                     .frame(width: 22, height: 22)
             }
@@ -582,8 +612,10 @@ struct BrowserPane: View {
         case .empty:
             break
         case .open(let text):
+            if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
             model.open(text)
         case .openURL(let url):
+            if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
             finishAddressEntry()
             model.open(url.absoluteString)
         case .openAI:
@@ -625,6 +657,7 @@ struct BrowserPane: View {
             finishAddressEntry()
             openExternalHanaWindow()
         case .route(let request):
+            if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
             finishAddressEntry()
             addressFlow.start(request, owner: model, appModel: appModel)
         case .pickEngine:
@@ -662,6 +695,7 @@ struct BrowserPane: View {
         let engines = SearchEngine.allCases
         guard engines.indices.contains(index), let query = pickerQuery,
               let url = engines[index].url(for: query, store: addressStore) else { return }
+        if plannerSession == nil && appModel.isTabOverviewPresented { appModel.setTabOverviewPresented(false) }
         finishAddressEntry()
         model.open(url.absoluteString)
     }
@@ -1021,7 +1055,7 @@ struct BrowserPane: View {
         if let wv = model.webView {
             // Keyed by instance: a WebView replaced for a new session is never left showing the old one.
             LoginWebViewRepresentable(webView: wv, nativeInputAllowed: {
-                isPaneActive
+                isPaneActive && !(plannerSession == nil && appModel.isTabOverviewPresented)
             })
                 .id(ObjectIdentifier(wv))
                 .onAppear { keepSystemAppearance(wv) }

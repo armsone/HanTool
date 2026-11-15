@@ -2029,6 +2029,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             }
         }
         guard webView === self.webView, !isShowingHome else { return }
+        appModel?.captureTabThumbnail(for: self, force: true)
         armGoogleFill()
         scheduleAdWallChecks(for: webView)
         BrowserAdHideManager.shared.reapply(for: self)
@@ -2352,6 +2353,9 @@ final class LinkMenuHandler: NSObject, WKScriptMessageHandler {
 final class LinkMenuWebView: WKWebView {
     weak var owner: LoginBrowserModel?
     private static let itemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.sendLinkToDownloads")
+    private static let translateItemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.translatePage")
+    private static let captureAreaItemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.captureArea")
+    private static let captureFullItemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.captureFull")
     private struct Capture { let link: String?; let page: URL; let eventTime: TimeInterval; let uptime: TimeInterval }
     private static let eventTolerance: TimeInterval = 0.5
     private var clickGeneration = 0
@@ -2667,7 +2671,46 @@ final class LinkMenuWebView: WKWebView {
         pendingItem = nil
         // A reused menu object must never collect a second copy of our item from an earlier click.
         for old in menu.items where old.identifier == Self.itemID { menu.removeItem(old) }
+        for old in menu.items where old.identifier == Self.translateItemID { menu.removeItem(old) }
+        for old in menu.items where old.identifier == Self.captureAreaItemID { menu.removeItem(old) }
+        for old in menu.items where old.identifier == Self.captureFullItemID { menu.removeItem(old) }
         for old in menu.items where old.identifier == AutoShorts.menuItemID { menu.removeItem(old) }
+
+        if let model = owner, let app = model.appModel, app.selectedTab == .browser,
+           app.browser === model, model.webView === self {
+            let translateItem = NSMenuItem(title: "번역", action: #selector(translateCurrentPage(_:)), keyEquivalent: "")
+            translateItem.identifier = Self.translateItemID
+            translateItem.target = self
+            if let img = NSImage(systemSymbolName: "translate", accessibilityDescription: "번역") {
+                translateItem.image = img
+            }
+            translateItem.isEnabled = true
+            translateItem.isHidden = false
+            menu.addItem(translateItem)
+
+            let isCaptureBusy = BrowserScreenshotManager.shared.isCapturing
+            let isHomeOrNoWeb = model.isShowingHome || model.webView == nil
+
+            let areaItem = NSMenuItem(title: "영역 캡처", action: #selector(captureAreaPage(_:)), keyEquivalent: "")
+            areaItem.identifier = Self.captureAreaItemID
+            areaItem.target = self
+            if let img = NSImage(systemSymbolName: "camera", accessibilityDescription: "영역 캡처") {
+                areaItem.image = img
+            }
+            areaItem.isEnabled = !isHomeOrNoWeb && !isCaptureBusy
+            areaItem.isHidden = false
+            menu.addItem(areaItem)
+
+            let fullItem = NSMenuItem(title: "전체 캡처", action: #selector(captureFullPage(_:)), keyEquivalent: "")
+            fullItem.identifier = Self.captureFullItemID
+            fullItem.target = self
+            if let img = NSImage(systemSymbolName: "doc.viewfinder", accessibilityDescription: "전체 캡처") {
+                fullItem.image = img
+            }
+            fullItem.isEnabled = !isHomeOrNoWeb && !isCaptureBusy
+            fullItem.isHidden = false
+            menu.addItem(fullItem)
+        }
 
         let credentialItemID = NSUserInterfaceItemIdentifier("com.hanstree.HttpsDown.fillSavedAccount")
         for old in menu.items where old.identifier == credentialItemID { menu.removeItem(old) }
@@ -2765,6 +2808,29 @@ final class LinkMenuWebView: WKWebView {
         SiteCredentialCapture.triggerManualFill(model: owner)
     }
 
+    @objc private func translateCurrentPage(_ sender: Any?) {
+        guard let model = owner, let app = model.appModel,
+              app.selectedTab == .browser, app.browser === model,
+              model.webView === self else { return }
+        app.extensions.performAction()
+    }
+
+    @objc private func captureAreaPage(_ sender: Any?) {
+        guard let model = owner, let app = model.appModel,
+              app.selectedTab == .browser, app.browser === model,
+              model.webView === self, !model.isShowingHome,
+              !BrowserScreenshotManager.shared.isCapturing else { return }
+        BrowserScreenshotManager.shared.captureVisibleArea(appModel: app, model: model)
+    }
+
+    @objc private func captureFullPage(_ sender: Any?) {
+        guard let model = owner, let app = model.appModel,
+              app.selectedTab == .browser, app.browser === model,
+              model.webView === self, !model.isShowingHome,
+              !BrowserScreenshotManager.shared.isCapturing else { return }
+        BrowserScreenshotManager.shared.captureFullPage(appModel: app, model: model)
+    }
+
     @objc func toggleAutoShorts(_ sender: Any?) {
         guard AutoShorts.isBundledInHTT else { return }
         AutoShorts.isEnabled.toggle()
@@ -2813,7 +2879,10 @@ struct LoginWebViewRepresentable: NSViewRepresentable {
         }
 
         func attach(_ wv: WKWebView) {
-            guard webView !== wv else { return }
+            guard webView !== wv else {
+                reattachIfNeeded()
+                return
+            }
             webView = wv
             observation = wv.observe(\.fullscreenState, options: [.new]) { [weak self] v, _ in
                 guard v.fullscreenState == .notInFullscreen else { return }

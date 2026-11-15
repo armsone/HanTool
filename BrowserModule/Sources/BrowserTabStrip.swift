@@ -35,6 +35,8 @@ public struct BrowserTabStrip: View {
     public var body: some View {
         HStack(alignment: .bottom, spacing: 4) {
             Color.clear.frame(width: leadingInset, height: 1)
+            tabOverviewButton
+                .padding(.bottom, Self.tabBottomExtension + 3)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 2) {
                     ForEach(appModel.tabs, id: \.tabID) { tab in
@@ -56,6 +58,31 @@ public struct BrowserTabStrip: View {
         .frame(minWidth: stripWidth == nil ? 240 : nil, idealWidth: stripWidth == nil ? 720 : nil, maxWidth: stripWidth == nil ? .infinity : nil)
         .frame(height: Self.titlebarHeight, alignment: .bottom)
         .background(WindowMinXReader(minX: $itemMinX).allowsHitTesting(false))
+    }
+
+    private var tabOverviewButton: some View {
+        let isActive = appModel.isTabOverviewPresented && appModel.selectedTab == .browser
+        return Button {
+            appModel.toggleTabOverview()
+        } label: {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isActive ? palette.accentColor : palette.mutedColor)
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isActive ? palette.accentSoftColor : palette.surfaceColor.opacity(0.6))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isActive ? palette.accentColor.opacity(0.45) : Color.clear, lineWidth: 0.75)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(isActive ? "탭 전체보기 닫기 (Esc)" : "열린 탭 전체보기 (\(appModel.tabs.count)개)")
+        .accessibilityLabel("열린 탭 전체보기")
+        .accessibilityValue(isActive ? "열림, 탭 \(appModel.tabs.count)개" : "닫힘, 탭 \(appModel.tabs.count)개")
+        .accessibilityAddTraits(isActive ? [.isButton, .isSelected] : [.isButton])
     }
 
     private var newTabButton: some View {
@@ -101,7 +128,7 @@ private struct BrowserTabItem: View {
         let audioState = audioController.audioState(for: tab.webView)
 
         Button {
-            if !isSelected {
+            if !isSelected || appModel.isTabOverviewPresented {
                 appModel.selectTab(tab.tabID)
             }
         } label: {

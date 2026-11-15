@@ -112,7 +112,12 @@ enum WindowGeometry {
     /// 한 화면의 사용 가능 영역(visibleFrame, 메뉴 막대·Dock 제외) 안으로 크기·위치를 맞춘다.
     /// 최소 크기보다는 작게 줄이지 않으며, 그래도 넘치면 위쪽(헤더)이 보이도록 위·왼쪽에 맞춘다.
     static func clamp(_ frame: NSRect, into visible: NSRect) -> NSRect {
-        let minSize = OverlayGeometry.minWindowSize
+        clamp(frame, into: visible, minSize: OverlayGeometry.minWindowSize)
+    }
+
+    /// 지정된 최소 크기를 존중하여 한 화면의 사용 가능 영역(visibleFrame) 안으로 크기·위치를 맞춘다.
+    /// 화면을 벗어나거나 화면이 바뀐 경우 창 헤더(위쪽)와 왼쪽이 먼저 보이도록 안전하게 보정한다.
+    static func clamp(_ frame: NSRect, into visible: NSRect, minSize: NSSize) -> NSRect {
         var f = frame
         f.size.width = max(minSize.width, min(f.width, visible.width))
         f.size.height = max(minSize.height, min(f.height, visible.height))

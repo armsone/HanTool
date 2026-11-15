@@ -167,10 +167,11 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 780, height: 560)
-        window.delegate = self
         window.setContentSize(NSSize(width: 1040, height: 760))
-        if !window.setFrameUsingName("HTTWorkbenchWindow") { window.center() }
         window.setFrameAutosaveName("HTTWorkbenchWindow")
+        restoreWorkbenchGeometry(for: window)
+        workbenchWindow = window
+        window.delegate = self
         if let toolbar = window.toolbar {
             toolbar.allowsUserCustomization = false
             if #available(macOS 15.0, *) {
@@ -178,7 +179,6 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
             }
         }
         if AppModel.shared.keepOnTop { window.level = .floating }
-        workbenchWindow = window
         return window
     }
 
@@ -297,15 +297,100 @@ final class MailWindowCoordinator: NSObject, NSWindowDelegate {
 
     /// 앱 종료 중에는 캡처 영역을 내리면서 작업 창을 다시 띄우지 않는다.
     func prepareForTermination() {
+        if let window = workbenchWindow {
+            persistWorkbenchGeometry(for: window)
+        }
         isTerminating = true
         captureSuspendedForAuxiliary = false
         restoreWorkbenchAfterCapture = false
     }
 
+    // MARK: - 작업 창 위치 및 화면 영속성
+
+    private static let workbenchFrameKey = "HTTWorkbenchWindowSavedFrame"
+    private static let workbenchDisplayIDKey = "HTTWorkbenchWindowDisplayID"
+    private static let workbenchDisplayUUIDKey = "HTTWorkbenchWindowDisplayUUID"
+
+    private func persistWorkbenchGeometry(for window: NSWindow) {
+        guard !window.styleMask.contains(.fullScreen) else { return }
+        let normalFrame = window.frame
+        UserDefaults.standard.set(NSStringFromRect(normalFrame), forKey: Self.workbenchFrameKey)
+        if let screen = window.screen {
+            if let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value {
+                UserDefaults.standard.set(displayID, forKey: Self.workbenchDisplayIDKey)
+                if let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() {
+                    let uuidString = CFUUIDCreateString(nil, uuid) as String
+                    UserDefaults.standard.set(uuidString, forKey: Self.workbenchDisplayUUIDKey)
+                }
+            }
+        }
+    }
+
+    private func restoreWorkbenchGeometry(for window: NSWindow) {
+        let savedFrameString = UserDefaults.standard.string(forKey: Self.workbenchFrameKey)
+        let savedDisplayID = UserDefaults.standard.object(forKey: Self.workbenchDisplayIDKey) as? UInt32
+        let savedUUIDString = UserDefaults.standard.string(forKey: Self.workbenchDisplayUUIDKey)
+
+        var targetScreen: NSScreen?
+        if let savedUUIDString {
+            targetScreen = NSScreen.screens.first { screen in
+                guard let devNum = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+                      let uuid = CGDisplayCreateUUIDFromDisplayID(devNum)?.takeRetainedValue() else { return false }
+                let str = CFUUIDCreateString(nil, uuid) as String
+                return str == savedUUIDString
+            }
+        }
+        if targetScreen == nil, let savedDisplayID {
+            targetScreen = NSScreen.screens.first { screen in
+                (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == savedDisplayID
+            }
+        }
+
+        if let savedFrameString, !savedFrameString.isEmpty {
+            let parsedFrame = NSRectFromString(savedFrameString)
+            if parsedFrame.width >= window.minSize.width, parsedFrame.height >= window.minSize.height {
+                if let screen = targetScreen {
+                    let visible = screen.visibleFrame
+                    if visible.intersects(parsedFrame) {
+                        let clamped = WindowGeometry.clamp(parsedFrame, into: visible, minSize: window.minSize)
+                        window.setFrame(clamped, display: true)
+                        return
+                    }
+                    let shifted = NSRect(x: visible.minX + max(0, min(parsedFrame.origin.x - screen.frame.minX, visible.width - parsedFrame.width)),
+                                         y: visible.minY + max(0, min(parsedFrame.origin.y - screen.frame.minY, visible.height - parsedFrame.height)),
+                                         width: parsedFrame.width,
+                                         height: parsedFrame.height)
+                    let clamped = WindowGeometry.clamp(shifted, into: visible, minSize: window.minSize)
+                    window.setFrame(clamped, display: true)
+                    return
+                } else if let fallbackScreen = WindowGeometry.screen(mostOverlapping: parsedFrame) ?? NSScreen.main {
+                    let clamped = WindowGeometry.clamp(parsedFrame, into: fallbackScreen.visibleFrame, minSize: window.minSize)
+                    window.setFrame(clamped, display: true)
+                    return
+                }
+            }
+        }
+
+        if !window.setFrameUsingName("HTTWorkbenchWindow") {
+            window.center()
+        }
+    }
+
     // MARK: - NSWindowDelegate
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === workbenchWindow else { return }
+        persistWorkbenchGeometry(for: window)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === workbenchWindow else { return }
+        persistWorkbenchGeometry(for: window)
+    }
 
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window === workbenchWindow else { return }
+        persistWorkbenchGeometry(for: window)
         // 잠시 내려 둔 캡처가 있으면 복귀 없이 포기한다(복귀 표시를 먼저 지운 뒤 화면 번역 취소).
         abandonSuspendedCapture()
         // 열려 있던 브라우저 화면·웹 번역 진행 줄은 사용자가 닫은 것과 같게 취소한다(onUserClose).

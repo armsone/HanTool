@@ -423,6 +423,9 @@ struct MainWindowKeyMonitor: NSViewRepresentable {
             guard let window = attachedView?.window else { return }
             appModel?.browserWindow = window
             if let appModel { MainActor.assumeIsolated { ExternalURLCoordinator.shared.bind(appModel) } }
+            #if HTT_HOST
+            return
+            #endif
             if observedWindow !== window {
                 observedWindow = window
                 observers.append(NotificationCenter.default.addObserver(

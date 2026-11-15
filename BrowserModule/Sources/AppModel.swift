@@ -107,6 +107,9 @@ public final class AppModel: ObservableObject {
             }
             if selectedTab != .browser {
                 cancelPendingPopupBurstFocus()
+                if isTabOverviewPresented {
+                    isTabOverviewPresented = false
+                }
             }
         }
     }
@@ -165,7 +168,20 @@ public final class AppModel: ObservableObject {
     /// with its own WebView, history, candidates and callbacks; they share this app's one session store.
     @Published private(set) var tabs: [LoginBrowserModel]
     @Published private(set) var selectedTabID: UUID
-    static let maxTabs = 8
+    static let maxTabs = 20
+    /// Whether the browser tab overview grid is shown over the browser content area (memory only).
+    @Published public private(set) var isTabOverviewPresented: Bool = false
+    /// Lightweight bounded in-memory page snapshots keyed by tabID (never persisted to disk).
+    struct TabThumbnailEntry {
+        let tabID: UUID
+        let urlString: String
+        let attemptId: Int
+        let image: NSImage
+    }
+    @Published private(set) var tabThumbnails: [UUID: TabThumbnailEntry] = [:]
+    private var tabThumbnailGeneration: [UUID: Int] = [:]
+    private var tabThumbnailCaptures: Set<UUID> = []
+    private static let maxThumbnailWidth: CGFloat = 320
     /// Tab whose address field should take input focus once its view is attached (built-in New Tab only).
     /// BrowserPane consumes and clears it; it is never persisted.
     /// One-shot address-field focus request bound to a tab and (when known) its logical navigation attempt.
@@ -513,6 +529,8 @@ public final class AppModel: ObservableObject {
         connection.onStatusChange = nil
         browsingConnection.onStatusChange = nil
         for tab in tabs { tab.teardown() }
+        clearAllTabThumbnails()
+        isTabOverviewPresented = false
         connection.stop()
         browsingConnection.stop()
         thirdPartyAIHost.teardown()
@@ -526,6 +544,8 @@ public final class AppModel: ObservableObject {
     /// 다음 실행 시 주소창 포커스를 가진 새 탭 홈 상태로 시작할 수 있도록 초기화한다.
     public func terminateBrowserExecution() {
         cancelPendingPopupBurstFocus()
+        isTabOverviewPresented = false
+        clearAllTabThumbnails()
         tabOpeners.removeAll()
         for tab in tabs {
             tab.webView?.stopLoading()
@@ -962,6 +982,7 @@ public final class AppModel: ObservableObject {
 
     /// Clears the one shared session: every tab's page is reset (their views used the cleared store).
     public func clearLoginSession() {
+        clearAllTabThumbnails()
         for tab in allBrowserTabs { tab.teardown() }
         if let ws = _sawWorkspace {
             for session in ws.sessions.values {
@@ -1052,7 +1073,10 @@ public final class AppModel: ObservableObject {
         if let incoming = skippingActiveReopen {
             incoming.teardown()
         }
-        for (tab, _) in snapshots { tab.teardown() }
+        for (tab, _) in snapshots {
+            removeTabThumbnail(for: tab.tabID)
+            tab.teardown()
+        }
         session.detachConnectionStore()
         session.detachAlternateStore()
         // With the global switch on, the assist route is the global helper; the browsing-only helper is not needed.
@@ -1150,7 +1174,10 @@ public final class AppModel: ObservableObject {
         let affected = allBrowserTabs.filter { !$0.usesPrimaryStore && $0.hasWebView }
         let activeID = selectedTabID
         let snapshots = affected.map { ($0, $0.captureModeSnapshot(carryPending: true)) }
-        for (tab, _) in snapshots { tab.teardown() }
+        for (tab, _) in snapshots {
+            removeTabThumbnail(for: tab.tabID)
+            tab.teardown()
+        }
         session.detachAlternateStore()
         for (tab, snapshot) in snapshots {
             let isActive: Bool
@@ -1182,6 +1209,7 @@ public final class AppModel: ObservableObject {
             schedulePopupBurstFocus(firstTabID: tab.tabID, openerID: opener.tabID)
             tab.prepare()
         } else {
+            captureTabThumbnail(for: opener, force: true)
             opener.didDeactivate()
             tabs.insert(tab, at: index + 1)
             selectedTabID = tab.tabID
@@ -1194,14 +1222,181 @@ public final class AppModel: ObservableObject {
 
     // MARK: - Browser tabs
 
+    public func setTabOverviewPresented(_ presented: Bool) {
+        if presented {
+            if selectedTab != .browser {
+                selectedTab = .browser
+            }
+            clearAddressFocusRequest()
+            isMediaCandidatePresented = false
+            refreshTabOverviewThumbnails()
+            isTabOverviewPresented = true
+        } else {
+            guard isTabOverviewPresented else { return }
+            isTabOverviewPresented = false
+        }
+    }
+
+    public func toggleTabOverview() {
+        if selectedTab != .browser {
+            setTabOverviewPresented(true)
+        } else {
+            setTabOverviewPresented(!isTabOverviewPresented)
+        }
+    }
+
+    public func selectTabFromOverview(_ id: UUID) {
+        if selectedTab != .browser {
+            selectedTab = .browser
+        }
+        isTabOverviewPresented = false
+        selectTab(id)
+    }
+
+    func tabThumbnail(for tab: LoginBrowserModel) -> NSImage? {
+        guard !tab.isShowingHome,
+              let currentURL = tab.currentURL?.absoluteString,
+              !currentURL.isEmpty,
+              let entry = tabThumbnails[tab.tabID],
+              entry.urlString == currentURL else {
+            return nil
+        }
+        return entry.image
+    }
+
+    func removeTabThumbnail(for tabID: UUID) {
+        tabThumbnailGeneration[tabID, default: 0] &+= 1
+        tabThumbnails.removeValue(forKey: tabID)
+    }
+
+    func clearAllTabThumbnails() {
+        for key in tabThumbnailGeneration.keys {
+            tabThumbnailGeneration[key, default: 0] &+= 1
+        }
+        tabThumbnails.removeAll()
+    }
+
+    func pruneOrphanedTabThumbnails() {
+        let validIDs = Set(tabs.map(\.tabID))
+        for key in Array(tabThumbnails.keys) where !validIDs.contains(key) {
+            tabThumbnails.removeValue(forKey: key)
+        }
+        for key in Array(tabThumbnailGeneration.keys) where !validIDs.contains(key) {
+            tabThumbnailGeneration.removeValue(forKey: key)
+        }
+    }
+
+    /// Keep detached tabs in the real window's rendering tree behind its content while WebKit paints their preview.
+    func captureTabThumbnail(for tab: LoginBrowserModel, force: Bool = false) {
+        let tabID = tab.tabID
+        guard tabs.contains(where: { $0.tabID == tabID }), !tab.isShowingHome,
+              let currentURL = tab.currentURL?.absoluteString,
+              let webView = tab.webView, webView.fullscreenState == .notInFullscreen else { return }
+        let expectedAttempt = tab.logicalAttemptId
+        if !force, let entry = tabThumbnails[tabID],
+           entry.urlString == currentURL, entry.attemptId == expectedAttempt { return }
+        guard tabThumbnailCaptures.insert(tabID).inserted else { return }
+
+        let generation = (tabThumbnailGeneration[tabID] ?? 0) &+ 1
+        tabThumbnailGeneration[tabID] = generation
+        let originalParent = webView.superview
+        let originalFrame = webView.frame
+        let originalAutoresizing = webView.autoresizingMask
+        var renderHost: NSView?
+        if webView.window == nil || webView.bounds.width <= 1 || webView.bounds.height <= 1 {
+            let window = browser.webView?.window ?? NSApp.windows.first {
+                $0.isVisible && $0.identifier?.rawValue == "htt-workbench"
+            }
+            guard let content = window?.contentView else {
+                tabThumbnailCaptures.remove(tabID)
+                return
+            }
+            let size = originalFrame.width > 10 && originalFrame.height > 10
+                ? originalFrame.size : NSSize(width: 1000, height: 700)
+            let host = NSView(frame: NSRect(origin: .zero, size: size))
+            host.wantsLayer = true
+            host.layer?.masksToBounds = true
+            content.addSubview(host, positioned: .below, relativeTo: content.subviews.first)
+            webView.removeFromSuperview()
+            webView.autoresizingMask = [.width, .height]
+            webView.frame = host.bounds
+            host.addSubview(webView)
+            host.layoutSubtreeIfNeeded()
+            renderHost = host
+        }
+
+        var finished = false
+        func finish() {
+            guard !finished else { return }
+            finished = true
+            // A user selecting this tab may already have reclaimed its web view; never move it back then.
+            if let host = renderHost, webView.superview === host {
+                webView.removeFromSuperview()
+                webView.frame = originalFrame
+                webView.autoresizingMask = originalAutoresizing
+                if let parent = originalParent as? LoginWebViewRepresentable.Container {
+                    if parent.webView === webView { parent.addSubview(webView) }
+                } else {
+                    originalParent?.addSubview(webView)
+                }
+            }
+            renderHost?.removeFromSuperview()
+            self.tabThumbnailCaptures.remove(tabID)
+        }
+        func isCurrentCapture() -> Bool {
+            !finished && self.tabThumbnailGeneration[tabID] == generation
+                && self.tabs.contains(where: { $0 === tab })
+                && tab.webView === webView && !tab.isShowingHome
+                && tab.logicalAttemptId == expectedAttempt
+                && tab.currentURL?.absoluteString == currentURL
+        }
+        func snapshot(_ retries: Int) {
+            guard isCurrentCapture() else { finish(); return }
+            let config = WKSnapshotConfiguration()
+            config.afterScreenUpdates = true
+            config.snapshotWidth = NSNumber(value: Double(Self.maxThumbnailWidth))
+            let bounds = webView.bounds
+            config.rect = CGRect(x: bounds.minX, y: bounds.minY,
+                                 width: max(1, bounds.width), height: max(1, min(bounds.height, bounds.width * 0.72)))
+            webView.takeSnapshot(with: config) { [weak self] image, error in
+                Task { @MainActor in
+                    guard let self, isCurrentCapture() else { finish(); return }
+                    if error == nil, let image, image.size.width > 1, image.size.height > 1 {
+                        self.tabThumbnails[tabID] = TabThumbnailEntry(tabID: tabID, urlString: currentURL,
+                                                                   attemptId: expectedAttempt, image: image)
+                        finish()
+                    } else if retries > 0 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { snapshot(retries - 1) }
+                    } else {
+                        finish()
+                    }
+                }
+            }
+        }
+        // A real window attachment needs a layout/paint turn before its first snapshot.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (renderHost == nil ? 0 : 0.15)) { snapshot(2) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish() }
+    }
+
+    func refreshTabOverviewThumbnails() {
+        pruneOrphanedTabThumbnails()
+        for tab in tabs {
+            captureTabThumbnail(for: tab, force: true)
+        }
+    }
+
     /// "+": a blank tab with the usual start behaviour (built-in home or the user's start page).
     @discardableResult
     func newTab(explicitURL: Bool = false) -> LoginBrowserModel? {
+        if isTabOverviewPresented {
+            isTabOverviewPresented = false
+        }
         let tab = LoginBrowserModel()
         tab.skipStartPage = explicitURL
         tab.appModel = self
         let index = tabs.firstIndex(where: { $0.tabID == selectedTabID }) ?? (tabs.count - 1)
         let previous = browser
+        captureTabThumbnail(for: previous, force: true)
         browser.didDeactivate()
         tabs.insert(tab, at: index + 1)
         selectedTabID = tab.tabID
@@ -1267,8 +1462,12 @@ public final class AppModel: ObservableObject {
     /// Switching only changes which tab is shown: no page, view, candidate list or session is touched.
     func selectTab(_ id: UUID) {
         cancelPendingPopupBurstFocus()
+        if isTabOverviewPresented {
+            isTabOverviewPresented = false
+        }
         guard id != selectedTabID, let next = tabs.first(where: { $0.tabID == id }) else { return }
         let previous = browser
+        captureTabThumbnail(for: previous, force: true)
         browser.didDeactivate()
         selectedTabID = id
         next.activate()
@@ -1283,6 +1482,7 @@ public final class AppModel: ObservableObject {
         if id == pendingPopupBurstFirstTabID {
             cancelPendingPopupBurstFocus()
         }
+        removeTabThumbnail(for: id)
         tabOpeners.removeValue(forKey: id)
         guard let index = tabs.firstIndex(where: { $0.tabID == id }) else { return }
         let closing = tabs[index]
@@ -1294,6 +1494,7 @@ public final class AppModel: ObservableObject {
         closing.teardown()
         guard tabs.count > 1 else {
             // Last loaded tab: always come back as a fresh New Tab (built-in home), never the custom start page.
+            isTabOverviewPresented = false
             selectedTab = .browser
             closing.showBuiltInHome()
             closing.activate()
@@ -1302,6 +1503,7 @@ public final class AppModel: ObservableObject {
         }
         let wasSelected = id == selectedTabID
         tabs.remove(at: index)
+        pruneOrphanedTabThumbnails()
         extensions.tabClosed(closing)
         if wasSelected {
             let next = tabs[min(index, tabs.count - 1)]
@@ -1433,6 +1635,7 @@ public final class AppModel: ObservableObject {
             extensions.tabOpened(tab)
             schedulePopupBurstFocus(firstTabID: tab.tabID, openerID: opener.tabID)
         } else {
+            captureTabThumbnail(for: opener, force: true)
             opener.didDeactivate()
             tabs.insert(tab, at: index + 1)
             selectedTabID = tab.tabID
