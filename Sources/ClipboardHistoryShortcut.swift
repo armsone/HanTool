@@ -196,9 +196,13 @@ public final class ClipboardHistoryShortcut: ObservableObject {
                     let interval = timestamp - releaseTime
                     if interval <= maxTapInterval {
                         phase = .secondTriggered(keyCode: keyCode)
-                        // HanTool 활성화 전에 origin target을 즉시 캡처
-                        ClipboardPasteCoordinator.shared.captureOriginTarget()
-                        ClipboardHistoryPanelController.shared.showAndFocus()
+                        if ClipboardHistoryPanelController.shared.isVisible {
+                            ClipboardHistoryPanelController.shared.hideFromHotkey()
+                        } else {
+                            // HanTool 활성화 전에 origin target을 즉시 캡처
+                            ClipboardPasteCoordinator.shared.captureOriginTarget()
+                            ClipboardHistoryPanelController.shared.showAndFocus()
+                        }
                     } else {
                         // 간격이 너무 길어 새 첫 번째 누름으로 전환
                         phase = .firstPressed(keyCode: keyCode, timestamp: timestamp)

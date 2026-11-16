@@ -166,7 +166,7 @@ public final class ClipboardHistoryPanelController: NSObject, ObservableObject {
     private var outsideGlobalMonitor: Any?
     private var shownAt: TimeInterval = 0
 
-    private enum CloseReason { case selection, escape, outsideClick, toggle }
+    private enum CloseReason { case selection, escape, outsideClick, toggle, hotkeyToggle }
 
     // 뷰 모델 상태
     @Published var searchQuery: String = "" {
@@ -276,6 +276,10 @@ public final class ClipboardHistoryPanelController: NSObject, ObservableObject {
         close(.toggle)
     }
 
+    public func hideFromHotkey() {
+        close(.hotkeyToggle)
+    }
+
     /// 닫힘의 단일 경로: 관찰자 해제 + 즉시 orderOut. 선택 확정은 대상 토큰을 건드리지 않고, 그 외는 취소로 토큰을 무효화한다.
     private func close(_ reason: CloseReason) {
         removeOutsideClickObservers()
@@ -285,7 +289,7 @@ public final class ClipboardHistoryPanelController: NSObject, ObservableObject {
         switch reason {
         case .selection:
             break
-        case .escape:
+        case .escape, .hotkeyToggle:
             let target = ClipboardPasteCoordinator.shared.consumePendingTarget()
             ClipboardPasteCoordinator.shared.cancelPendingPaste()
             if wasVisible, let target = target {
