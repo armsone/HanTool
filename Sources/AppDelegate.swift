@@ -357,15 +357,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// 앱 아이콘을 메뉴 막대 크기(18pt)로 축소한 이미지. 여백이 큰 전체 아이콘을 그대로 쓰면 다른
-    /// 메뉴 막대 아이콘보다 작아 보이므로, 아이콘의 둥근 사각형 부분만 중앙 크롭해 꽉 채운다.
+    /// 앱 아이콘 전체를 메뉴 막대 크기(18pt)로 축소한 이미지.
+    /// 기존의 8.5% 모서리 크롭을 제거하여 앱 아이콘 본래의 둥근 모서리 실루엣과 투명 여백을 그대로 보존한다.
     private func menuBarIconImage() -> NSImage? {
         guard let icon = NSApp.applicationIconImage else { return nil }
         let size = NSSize(width: 18, height: 18)
-        let cropInset: CGFloat = icon.size.width * 0.085 // AppIcon-source.png 실측 여백 비율과 동일
-        let sourceRect = NSRect(x: cropInset, y: cropInset,
-                                 width: icon.size.width - cropInset * 2,
-                                 height: icon.size.height - cropInset * 2)
+        let sourceRect = NSRect(origin: .zero, size: icon.size)
         let image = NSImage(size: size)
         image.lockFocus()
         icon.draw(in: NSRect(origin: .zero, size: size), from: sourceRect, operation: .sourceOver, fraction: 1)
