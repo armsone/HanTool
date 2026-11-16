@@ -198,7 +198,11 @@ public struct MainView: View {
     @State private var sidebarEdgeX: CGFloat = 0
     @State private var controlBarWidth: CGFloat = 0
     #if HTT_HOST
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @AppStorage("hantool.sidebar.isExpanded") private var isSidebarExpanded: Bool = true
+    private var columnVisibility: NavigationSplitViewVisibility {
+        get { isSidebarExpanded ? .all : .detailOnly }
+        nonmutating set { isSidebarExpanded = (newValue != .detailOnly) }
+    }
     #else
     @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
     #endif
