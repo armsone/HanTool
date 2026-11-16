@@ -558,6 +558,9 @@ public final class AppModel: ObservableObject {
         freshTab.appModel = self
         self.tabs = [freshTab]
         self.selectedTabID = freshTab.tabID
+        // 확장 컨트롤러에도 새 탭을 알려야 번역 팝업·내용 스크립트의 발신 탭을 찾을 수 있다(없으면 "Tab not found").
+        extensions.tabOpened(freshTab)
+        extensions.tabActivated(freshTab, previous: nil)
         self.selectedTab = .browser
         requestAddressFocus(for: freshTab, isNewTab: true, isExplicit: true)
     }

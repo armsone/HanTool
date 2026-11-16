@@ -30,7 +30,7 @@ private struct MenuBarNetworkRateView: View {
                 label: "다운로드"
             )
         }
-        .frame(width: 68, height: 22, alignment: .leading)
+        .frame(width: 60, height: 22, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "Mac 이더넷 및 Wi-Fi 전체 네트워크 속도: 업로드 \(upload.value) \(upload.unit), 다운로드 \(download.value) \(download.unit)"
@@ -38,7 +38,7 @@ private struct MenuBarNetworkRateView: View {
     }
 
     private func rateRow(color: Color, rate: (value: String, unit: String), label: String) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Circle()
                 .fill(color)
                 .frame(width: 4.5, height: 4.5)
@@ -49,13 +49,13 @@ private struct MenuBarNetworkRateView: View {
                 .monospacedDigit()
                 .foregroundColor(.primary)
                 .lineLimit(1)
-                .frame(width: 31, alignment: .trailing)
+                .frame(width: 29, alignment: .trailing)
 
             Text(rate.unit)
                 .font(.system(size: 7.5, weight: .regular, design: .monospaced))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
-                .frame(width: 23, alignment: .leading)
+                .frame(width: 20, alignment: .leading)
         }
         .accessibilityLabel("\(label): \(rate.value) \(rate.unit)")
     }
@@ -415,12 +415,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func buildNetworkRateStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: 68)
+        let item = NSStatusBar.system.statusItem(withLength: 60)
         if let button = item.button {
             button.imagePosition = .noImage
             button.title = ""
             let hosting = PassthroughHostingView(rootView: MenuBarNetworkRateView())
-            hosting.frame = NSRect(x: 0, y: 0, width: 68, height: 22)
+            hosting.frame = NSRect(x: 0, y: 0, width: 60, height: 22)
             hosting.autoresizingMask = [.width, .height]
             button.addSubview(hosting)
             button.toolTip = "네트워크 전송률 (Mac 이더넷/Wi-Fi 전체 합산, VPN 제외)"
@@ -475,7 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let item = networkRateStatusItem else { return }
         switch location {
         case .menuBar:
-            item.length = 68
+            item.length = 60
             item.isVisible = true
         case .appTop:
             item.length = 0

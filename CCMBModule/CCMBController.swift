@@ -5354,7 +5354,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             appendStatusPart(part.text, providerColor: part.color, font: font, to: title)
         }
         button.attributedTitle = title
-        statusItem.length = ceil(title.size().width + 8)
+        statusItem.length = ceil(title.size().width + 4)
     }
 
     /// The percent sign is dropped from the menu bar readout and the number
