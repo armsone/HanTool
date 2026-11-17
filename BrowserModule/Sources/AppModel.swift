@@ -3291,6 +3291,7 @@ public final class AppModel: ObservableObject {
         dependencyPlans[jobId] = nil
         guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
         let job = jobs[index]
+        if isFileDownload(job), holdFilePartRecord(index: index, suppressAlert: suppressAlert) { return }
         if isFileDownload(job), job.state == .downloading {
             fileDownloadCancels[jobId]?()
             fileDownloadCancels[jobId] = nil
@@ -3312,7 +3313,6 @@ public final class AppModel: ObservableObject {
             }
         }
         if activeRuns[jobId] == nil { removeWorkDirectory(for: job) }
-
         jobs.remove(at: index)
         JobThumbnailCache.remove(jobId: jobId, directory: thumbnailDirectory)
         connectionRecoveries[jobId] = nil
@@ -3321,21 +3321,102 @@ public final class AppModel: ObservableObject {
         persistJobs()
     }
 
+    /// A file-download record whose owned `.HanTool-<UUID>.part` folder may still hold received data is never dropped
+    /// from the list before the transfer has ended and the folder is confirmed gone: the record is the only place that
+    /// remembers where the data is. Returns true when the record was kept (the caller must not remove it).
+    /// - live transfer: it is cancelled (the coordinator removes only its own folder when WebKit confirms) and the record
+    ///   is removed by `clearFilePart` once that cleanup is confirmed;
+    /// - settled record: an empty folder is removed with `rmdir` (cannot touch content); any other folder is kept and
+    ///   the record stays so the location is still shown after a restart.
+    private func holdFilePartRecord(index: Int, suppressAlert: Bool) -> Bool {
+        let job = jobs[index]
+        guard let dir = job.filePartDirectory, Self.isOwnedPartFolderName((dir as NSString).lastPathComponent) else { return false }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
+            if job.state != .downloading {
+                // `fileExists == false` also happens when a NAS volume is detached or access is temporarily denied,
+                // so the record is dropped only when the folder is positively confirmed absent.
+                if Self.isPartFolderConfirmedAbsent(dir) { return false }
+                if !suppressAlert {
+                    showAlert("임시 폴더를 확인할 수 없어 목록에서 지우지 않았습니다. NAS 등 저장 볼륨의 연결과 접근 권한을 확인한 뒤 다시 시도하세요: \(dir)")
+                }
+                return true
+            }
+            return startFilePartCancelAndDelete(index: index, dir: dir, suppressAlert: suppressAlert)
+        }
+        if job.state == .downloading {
+            return startFilePartCancelAndDelete(index: index, dir: dir, suppressAlert: suppressAlert)
+        }
+        if rmdir(dir) == 0 { return false }
+        if !suppressAlert {
+            showAlert("받은 파일이 남아 있는 임시 폴더가 있어 목록에서 지우지 않았습니다. 파일을 확인한 뒤 폴더를 직접 정리하면 지울 수 있습니다: \(dir)")
+        }
+        return true
+    }
+
+    /// True only when `lstat` reports ENOENT while the parent folder is readable and, for `/Volumes/<name>/…` paths,
+    /// the volume itself is a live mount. Any other outcome (permission error, detached volume, unreadable parent) is
+    /// "unknown" and must keep the record.
+    static func isPartFolderConfirmedAbsent(_ dir: String) -> Bool {
+        var st = stat()
+        guard lstat(dir, &st) != 0, errno == ENOENT else { return false }
+        let parent = (dir as NSString).deletingLastPathComponent
+        var parentStat = stat()
+        guard stat(parent, &parentStat) == 0, (parentStat.st_mode & S_IFMT) == S_IFDIR,
+              access(parent, R_OK | X_OK) == 0 else { return false }
+        let comps = (dir as NSString).pathComponents
+        if comps.count >= 3, comps[0] == "/", comps[1] == "Volumes" {
+            let volume = "/Volumes/" + comps[2]
+            var volStat = stat(), volumesStat = stat()
+            guard stat(volume, &volStat) == 0, stat("/Volumes", &volumesStat) == 0,
+                  volStat.st_dev != volumesStat.st_dev else { return false }
+        }
+        return true
+    }
+
+    private func startFilePartCancelAndDelete(index: Int, dir: String, suppressAlert: Bool) -> Bool {
+        let jobId = jobs[index].id
+        let hasCleanup = fileDownloadCancels[jobId] != nil
+        fileDownloadCancels[jobId]?()
+        fileDownloadCancels[jobId] = nil
+        jobs[index].state = .cancelled
+        jobs[index].speed = 0
+        jobs[index].stateMessage = hasCleanup
+            ? "다운로드를 취소하고 받던 임시 폴더를 정리하는 중입니다. 정리가 끝나면 목록에서 지워집니다."
+            : "다운로드를 취소했습니다. 받던 임시 폴더는 자동 삭제하지 않고 보존했습니다: \(dir)"
+        jobs[index].updatedAt = Date()
+        if hasCleanup { fileDownloadDeletesPending.insert(jobId) }
+        persistJobs()
+        return true
+    }
+
+    /// Short note for batch deletes: records that were kept because a file-download folder still exists or is being cleaned.
+    func heldFilePartNotice(ids: [String]) -> String {
+        let idSet = Set(ids)
+        let held = jobs.filter { idSet.contains($0.id) && isFileDownload($0) && $0.filePartDirectory != nil }.count
+        return held > 0 ? " 받은 파일의 임시 폴더가 남아 있는 \(held)개 기록은 위치 안내를 위해 남겼습니다." : ""
+    }
+
     // MARK: - Plain file downloads (WebKit saves the file; the job only mirrors it in the same list)
 
     static let fileDownloadTag = "파일"
     private var fileDownloadCancels: [String: () -> Void] = [:]
+    /// Deleted by the user while its transfer was still being cancelled: removed from the list once cleanup is confirmed.
+    private var fileDownloadDeletesPending: Set<String> = []
     private var fileDownloadStamps: [String: (time: Date, bytes: Int64)] = [:]
     lazy var fileDownloads = FileDownloadCoordinator(app: self)
 
     func isFileDownload(_ job: JobRecord) -> Bool { job.extractor == Self.fileDownloadTag }
 
     /// Adds a running file download to the list. `cancel` stops the transfer and removes the partial file.
-    func beginFileDownload(source: String, destination: String, cancel: @escaping () -> Void) -> String {
+    func beginFileDownload(source: String, destination: String, partDirectory: String? = nil, partFile: String? = nil,
+                           cancel: @escaping () -> Void) -> String {
         let url = URL(fileURLWithPath: destination)
         var job = JobRecord(sourceURL: source, destinationFolder: url.deletingLastPathComponent().path,
                             title: url.lastPathComponent)
         job.extractor = Self.fileDownloadTag
+        job.filePartDirectory = partDirectory
+        job.filePartFile = partFile
         job.state = .downloading
         job.stateMessage = "파일을 받는 중입니다."
         jobs.insert(job, at: 0)
@@ -3359,10 +3440,44 @@ public final class AppModel: ObservableObject {
         jobs[i].progressPercent = total > 0 ? min(99.9, Double(downloaded) / Double(total) * 100) : 0
     }
 
+    /// The transfer itself finished: the partial file is complete. Persisted before the final move so a stop in between
+    /// is reported as "complete, preserved" instead of "maybe incomplete".
+    func markFileDownloadTransferred(jobId: String) {
+        guard let i = jobs.firstIndex(where: { $0.id == jobId }), jobs[i].filePartDirectory != nil else { return }
+        jobs[i].filePartFinished = true
+        persistJobs()
+    }
+
+    /// The coordinator removed the work folder (confirmed gone). A delete requested meanwhile is completed now.
+    func clearFilePart(jobId: String) {
+        guard let i = jobs.firstIndex(where: { $0.id == jobId }) else { fileDownloadDeletesPending.remove(jobId); return }
+        if jobs[i].filePartDirectory != nil {
+            jobs[i].filePartDirectory = nil; jobs[i].filePartFile = nil; jobs[i].filePartFinished = false
+            persistJobs()
+        }
+        if fileDownloadDeletesPending.remove(jobId) != nil {
+            deleteJob(jobId: jobId, removeFile: false, suppressAlert: true)
+        }
+    }
+
+    /// Cleanup could not remove the folder: its location stays on the record (and a pending delete is dropped).
+    func keepFilePart(jobId: String) {
+        fileDownloadDeletesPending.remove(jobId)
+        guard let i = jobs.firstIndex(where: { $0.id == jobId }), let dir = jobs[i].filePartDirectory else { return }
+        if jobs[i].state == .cancelled {
+            jobs[i].stateMessage = "다운로드를 취소했지만 받던 임시 폴더를 정리하지 못해 보존했습니다(자동 삭제하지 않음): \(dir)"
+        }
+        persistJobs()
+    }
+
     /// `error == nil` is a verified success (file exists at `path`); anything else is recorded as a failure.
-    func finishFileDownload(jobId: String, path: String, error: String?) {
+    /// `keepPart`: the work folder still holds the received file, so its recorded location is kept.
+    func finishFileDownload(jobId: String, path: String, error: String?, keepPart: Bool = false) {
         fileDownloadCancels[jobId] = nil
         fileDownloadStamps[jobId] = nil
+        if !keepPart, let i = jobs.firstIndex(where: { $0.id == jobId }), jobs[i].filePartDirectory != nil {
+            jobs[i].filePartDirectory = nil; jobs[i].filePartFile = nil; jobs[i].filePartFinished = false
+        }
         guard let i = jobs.firstIndex(where: { $0.id == jobId }), jobs[i].state == .downloading else { return }
         jobs[i].speed = 0
         jobs[i].updatedAt = Date()
@@ -3409,6 +3524,7 @@ public final class AppModel: ObservableObject {
 
         jobs = loaded.map { job in
             var j = job
+            let wasActive = j.state.isActive && j.state != .publishing
             if let retry = j.retryPageURL,
                let validated = validateSafeRetryPageURL(retry, fromBrowser: j.fromBrowser, hasPageProvenance: true),
                isConsistentReference(retryURL: validated, sourceURL: j.sourceURL) {
@@ -3457,9 +3573,60 @@ public final class AppModel: ObservableObject {
                 j.state = .interrupted
                 j.stateMessage = "이전 실행 중 앱이 종료되어 안전하게 중단되었습니다."
             }
+            // Rebuilt on every start from the stored (never redacted) folder/file paths: the persisted status text may have
+            // had a long id in the path masked, so it is not trusted to carry the location.
+            if j.extractor == Self.fileDownloadTag, j.filePartDirectory != nil, j.state != .completed {
+                describeFilePart(&j, interruptedNow: wasActive)
+            }
             return j
         }
         persistJobs()
+    }
+
+    /// An ordinary-file download record that still names its work folder (cut short by an app/system stop, cancelled while
+    /// the cleanup was pending, or finished but not moved). Nothing is deleted or moved: the message only says where the
+    /// received data is and whether it was complete. An empty folder (the file was already moved) is removed with
+    /// `rmdir`, which cannot touch any content.
+    private func describeFilePart(_ job: inout JobRecord, interruptedNow: Bool) {
+        guard let dir = job.filePartDirectory,
+              Self.isOwnedPartFolderName((dir as NSString).lastPathComponent) else { return }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue else {
+            // `fileExists == false` also happens for a detached NAS volume or denied access: forget the location only
+            // when the folder is positively confirmed absent, otherwise keep it so the next launch can still find it.
+            if Self.isPartFolderConfirmedAbsent(dir) {
+                job.filePartDirectory = nil; job.filePartFile = nil; job.filePartFinished = false
+            } else {
+                job.stateMessage = "임시 폴더를 확인할 수 없어 위치 기록을 보존했습니다. NAS 등 저장 볼륨의 연결과 접근 권한을 확인해 주세요: \(dir)"
+            }
+            return
+        }
+        let cancelled = job.state == .cancelled
+        let file = job.filePartFile.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        if let file {
+            let size = (try? FileManager.default.attributesOfItem(atPath: file)[.size] as? NSNumber)?.int64Value ?? 0
+            let sizeText = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            if job.filePartFinished {
+                job.stateMessage = "받기는 끝났지만 최종 폴더로 옮기지 못했거나 옮기기 전에 앱이 종료되었습니다. 완성된 파일(\(sizeText))이 여기에 보존되어 있습니다: \(file)"
+            } else if cancelled {
+                job.stateMessage = "취소 정리가 끝나기 전에 앱이 종료되어 받던 파일(\(sizeText))이 여기에 남아 있습니다. 완성 여부는 알 수 없어 자동 삭제하지 않았습니다: \(file)"
+            } else {
+                job.stateMessage = "받는 도중 앱이 종료되었습니다. 받은 부분(\(sizeText))은 완성되지 않았을 수 있으며 여기에 보존되어 있습니다(자동 삭제하지 않음): \(file)"
+            }
+        } else if rmdir(dir) == 0 {
+            job.filePartDirectory = nil; job.filePartFile = nil
+            if job.filePartFinished && !cancelled {
+                job.stateMessage = "받기를 마친 뒤 앱이 종료되었습니다. 파일이 이미 \(job.destinationFolder) 폴더로 옮겨졌을 수 있으니 확인해 주세요."
+            }
+            job.filePartFinished = false
+        } else {
+            job.stateMessage = "앱이 종료되어 임시 폴더를 자동 삭제하지 않고 보존했습니다: \(dir)"
+        }
+    }
+
+    static func isOwnedPartFolderName(_ name: String) -> Bool {
+        guard name.hasPrefix(".HanTool-"), name.hasSuffix(".part") else { return false }
+        return UUID(uuidString: String(name.dropFirst(9).dropLast(5))) != nil
     }
 
     /// An app/system crash during publish: decide from the write-ahead journal what actually reached the destination.
@@ -3544,7 +3711,8 @@ final class FileDownloadCoordinator: NSObject, WKDownloadDelegate {
 
         let key = ObjectIdentifier(download)
         let jobId = app.beginFileDownload(source: download.originalRequest?.url?.absoluteString ?? response.url?.absoluteString ?? "",
-                                          destination: folder.appendingPathComponent(name).path) { [weak self, weak download] in
+                                          destination: folder.appendingPathComponent(name).path,
+                                          partDirectory: workDir.path, partFile: partial.path) { [weak self, weak download] in
             self?.requestCancel(key: key, download: download)
         }
         var entry = entries[key] ?? Entry()
@@ -3574,13 +3742,15 @@ final class FileDownloadCoordinator: NSObject, WKDownloadDelegate {
         if entry.cancelRequested { return }   // the cancel completion cleans up
         entries[key] = nil
         guard let jobId = entry.jobId, let folder = entry.folder, let partial = entry.partial else { return }
+        app.markFileDownloadTransferred(jobId: jobId)
         if let final = Self.moveWithoutReplacing(partial, intoFolder: folder, name: entry.name) {
-            removeOwnedWorkDir(entry)
-            app.finishFileDownload(jobId: jobId, path: final.path, error: nil)
+            let gone = removeOwnedWorkDir(entry)
+            app.finishFileDownload(jobId: jobId, path: final.path, error: nil, keepPart: !gone)
         } else {
             // The finished file stays in our work directory (not deleted) so nothing already received is lost.
             app.finishFileDownload(jobId: jobId, path: partial.path,
-                                   error: "받은 파일을 \(folder.path) 폴더에 저장하지 못했습니다. 완성된 파일은 여기에 보존되어 있습니다: \(partial.path)")
+                                   error: "받은 파일을 \(folder.path) 폴더에 저장하지 못했습니다. 완성된 파일은 여기에 보존되어 있습니다: \(partial.path)",
+                                   keepPart: true)
         }
     }
 
@@ -3589,10 +3759,11 @@ final class FileDownloadCoordinator: NSObject, WKDownloadDelegate {
         guard let entry = entries[key] else { return }
         if entry.cancelRequested { return }   // the cancel completion cleans up
         entries[key] = nil
-        removeOwnedWorkDir(entry)
+        let gone = removeOwnedWorkDir(entry)
         guard let jobId = entry.jobId, let folder = entry.folder else { return }
+        let left = gone ? "" : " 받던 임시 폴더는 자동 삭제하지 않고 보존했습니다: \(entry.workDir?.path ?? "")"
         app.finishFileDownload(jobId: jobId, path: folder.appendingPathComponent(entry.name).path,
-                               error: "파일을 받지 못했습니다: \(error.localizedDescription)")
+                               error: "파일을 받지 못했습니다: \(error.localizedDescription)" + left, keepPart: !gone)
     }
 
     /// User cancel: the job is already marked cancelled by AppModel. The entry (and so the work directory) stays owned
@@ -3604,14 +3775,26 @@ final class FileDownloadCoordinator: NSObject, WKDownloadDelegate {
         download.cancel { [weak self] _ in
             Task { @MainActor in
                 guard let self, let done = self.entries.removeValue(forKey: key) else { return }
-                self.removeOwnedWorkDir(done)
+                let gone = self.removeOwnedWorkDir(done)
+                if let jobId = done.jobId {
+                    if gone { self.app.clearFilePart(jobId: jobId) } else { self.app.keepFilePart(jobId: jobId) }
+                }
             }
         }
     }
 
     /// Only the directory this coordinator created for this transfer (never a path that merely had a chosen name).
-    private func removeOwnedWorkDir(_ entry: Entry) {
-        if let dir = entry.workDir { try? FileManager.default.removeItem(at: dir) }
+    /// Returns whether the directory is confirmed gone; only then may the record forget its location.
+    @discardableResult
+    private func removeOwnedWorkDir(_ entry: Entry) -> Bool {
+        guard let dir = entry.workDir else { return true }
+        do {
+            try FileManager.default.removeItem(at: dir)
+            return true
+        } catch {
+            // A failed removal (e.g. NAS dropped mid-transfer) is "gone" only if the folder is positively confirmed absent.
+            return AppModel.isPartFolderConfirmedAbsent(dir.path)
+        }
     }
 
     /// Final name " (2)", " (3)", ... when taken. `renamex_np(RENAME_EXCL)` fails instead of replacing, so a file another

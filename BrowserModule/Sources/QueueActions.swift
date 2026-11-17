@@ -128,8 +128,9 @@ extension AppModel {
         let skippedCount = targetIds.filter { remainingIds.contains($0) }.count
         let deletedCount = targetIds.count - skippedCount
 
+        let held = heldFilePartNotice(ids: targetIds)
         if skippedCount > 0 {
-            setDropFeedback("\(deletedCount)개 작업을 대기열에서 지웠습니다. (\(skippedCount)개 제외)")
+            setDropFeedback("\(deletedCount)개 작업을 대기열에서 지웠습니다. (\(skippedCount)개 제외)" + held)
         } else {
             setDropFeedback("\(deletedCount)개 작업을 대기열에서 지웠습니다.")
         }
@@ -157,7 +158,7 @@ extension AppModel {
         let deletedCount = targetIds.count - skippedCount
 
         if skippedCount > 0 {
-            setDropFeedback("\(deletedCount)개 완료 기록을 목록에서 지웠습니다. (\(skippedCount)개 제외)")
+            setDropFeedback("\(deletedCount)개 완료 기록을 목록에서 지웠습니다. (\(skippedCount)개 제외)" + heldFilePartNotice(ids: targetIds))
         } else {
             setDropFeedback("\(deletedCount)개 완료 기록을 목록에서 지웠습니다.")
         }
@@ -255,10 +256,11 @@ extension AppModel {
             }
         }
 
+        let heldNotice = heldFilePartNotice(ids: clearIds)
         if failedJobs > 0 {
-            setDropFeedback("\(clearIds.count)개 기록을 지우고 파일 \(trashedCount)개를 휴지통으로 옮겼습니다. 파일을 옮기지 못한 \(failedJobs)개 기록은 남겼습니다. (\(firstError ?? "알 수 없는 오류"))")
+            setDropFeedback("\(clearIds.count)개 기록을 지우고 파일 \(trashedCount)개를 휴지통으로 옮겼습니다. 파일을 옮기지 못한 \(failedJobs)개 기록은 남겼습니다. (\(firstError ?? "알 수 없는 오류"))" + heldNotice)
         } else {
-            setDropFeedback("\(clearIds.count)개 완료 기록을 지우고 파일 \(trashedCount)개를 휴지통으로 옮겼습니다.")
+            setDropFeedback("\(clearIds.count)개 완료 기록을 지우고 파일 \(trashedCount)개를 휴지통으로 옮겼습니다." + heldNotice)
         }
     }
 

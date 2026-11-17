@@ -278,6 +278,12 @@ public struct JobRecord: Identifiable, Codable {
 
     public var destinationFolder: String
     public var workDirectory: String?
+    /// Ordinary-file downloads only: the `.HanTool-<UUID>.part` folder this app created next to the destination, the
+    /// partial file inside it, and whether the transfer had finished (the file is complete) before the final move.
+    /// Recorded so a crash leaves a findable, never auto-deleted location. Optional additive keys.
+    public var filePartDirectory: String?
+    public var filePartFile: String?
+    public var filePartFinished: Bool = false
     public var publishedMediaPath: String?
     public var publishedSubtitlePaths: [String] = []
     public var manifest: OutputManifest?
@@ -339,6 +345,7 @@ public struct JobRecord: Identifiable, Codable {
         case destinationFolder, workDirectory, publishedMediaPath, publishedSubtitlePaths, manifest, createdAt, updatedAt
         case isLive, liveStatus, recordLimitSeconds, useLoginSession, loginSite, fromBrowser, pageHost, frameHost, sourceRoute
         case retryPageURL, browserPageReference
+        case filePartDirectory, filePartFile, filePartFinished
     }
 
     public init(from decoder: Decoder) throws {
@@ -369,6 +376,9 @@ public struct JobRecord: Identifiable, Codable {
         phase = try c.decodeIfPresent(String.self, forKey: .phase) ?? ""
         destinationFolder = try c.decode(String.self, forKey: .destinationFolder)
         workDirectory = try c.decodeIfPresent(String.self, forKey: .workDirectory)
+        filePartDirectory = try c.decodeIfPresent(String.self, forKey: .filePartDirectory)
+        filePartFile = try c.decodeIfPresent(String.self, forKey: .filePartFile)
+        filePartFinished = try c.decodeIfPresent(Bool.self, forKey: .filePartFinished) ?? false
         publishedMediaPath = try c.decodeIfPresent(String.self, forKey: .publishedMediaPath)
         publishedSubtitlePaths = try c.decodeIfPresent([String].self, forKey: .publishedSubtitlePaths) ?? []
         manifest = try c.decodeIfPresent(OutputManifest.self, forKey: .manifest)
@@ -432,6 +442,9 @@ public struct JobRecord: Identifiable, Codable {
         try c.encode(phase, forKey: .phase)
         try c.encode(destinationFolder, forKey: .destinationFolder)
         try c.encodeIfPresent(workDirectory, forKey: .workDirectory)
+        try c.encodeIfPresent(filePartDirectory, forKey: .filePartDirectory)
+        try c.encodeIfPresent(filePartFile, forKey: .filePartFile)
+        if filePartDirectory != nil { try c.encode(filePartFinished, forKey: .filePartFinished) }
         try c.encodeIfPresent(publishedMediaPath, forKey: .publishedMediaPath)
         try c.encode(publishedSubtitlePaths, forKey: .publishedSubtitlePaths)
         try c.encodeIfPresent(manifest, forKey: .manifest)
