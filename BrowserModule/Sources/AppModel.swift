@@ -3046,7 +3046,7 @@ public final class AppModel: ObservableObject {
     // MARK: - Pause, Cancel, Retry Actions
 
     public func pauseJob(jobId: String) {
-        guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
+        guard let index = jobs.firstIndex(where: { $0.id == jobId }), !isFileDownload(jobs[index]) else { return }
         guard [.extracting, .downloading, .processing, .verifying, .queued].contains(jobs[index].state) else { return }
         // A live recording cannot be paused and resumed later; it is finished (saved) or cancelled.
         if jobs[index].isLive && jobs[index].pendingDownload { return }
@@ -3081,6 +3081,19 @@ public final class AppModel: ObservableObject {
     public func cancelJob(jobId: String) {
         dependencyPlans[jobId] = nil
         guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
+
+        if isFileDownload(jobs[index]) {
+            if jobs[index].state == .downloading {
+                fileDownloadCancels[jobId]?()
+                fileDownloadCancels[jobId] = nil
+                jobs[index].state = .cancelled
+                jobs[index].speed = 0
+                jobs[index].stateMessage = "다운로드가 취소되었습니다. 받던 파일은 저장하지 않았습니다."
+                jobs[index].updatedAt = Date()
+                persistJobs()
+            }
+            return
+        }
 
         if jobs[index].state == .publishing, let run = activeRuns[jobId], run.generation == jobs[index].generation,
            run.kind == .publish, let control = run.publishControl {
@@ -3118,7 +3131,7 @@ public final class AppModel: ObservableObject {
 
     public func retryJob(jobId: String) {
         guard activeRuns[jobId] == nil else { return }
-        guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
+        guard let index = jobs.firstIndex(where: { $0.id == jobId }), !isFileDownload(jobs[index]) else { return }
         connectionRecoveries[jobId] = nil
         resetAutoRecovery(jobId)   // a user retry (also '허용 후 다시 시도') is a new logical attempt
 
@@ -3278,6 +3291,10 @@ public final class AppModel: ObservableObject {
         dependencyPlans[jobId] = nil
         guard let index = jobs.firstIndex(where: { $0.id == jobId }) else { return }
         let job = jobs[index]
+        if isFileDownload(job), job.state == .downloading {
+            fileDownloadCancels[jobId]?()
+            fileDownloadCancels[jobId] = nil
+        }
         if let run = activeRuns[jobId] {
             if run.kind == .publish, run.publishControl?.requestCancel() == .alreadyCommitted {
                 if !suppressAlert { showAlert("저장이 진행 중이라 지금은 삭제할 수 없습니다.") }
@@ -3301,6 +3318,67 @@ public final class AppModel: ObservableObject {
         connectionRecoveries[jobId] = nil
         resetAutoRecovery(jobId)
         if selectedJobId == jobId { selectedJobId = nil }
+        persistJobs()
+    }
+
+    // MARK: - Plain file downloads (WebKit saves the file; the job only mirrors it in the same list)
+
+    static let fileDownloadTag = "파일"
+    private var fileDownloadCancels: [String: () -> Void] = [:]
+    private var fileDownloadStamps: [String: (time: Date, bytes: Int64)] = [:]
+    lazy var fileDownloads = FileDownloadCoordinator(app: self)
+
+    func isFileDownload(_ job: JobRecord) -> Bool { job.extractor == Self.fileDownloadTag }
+
+    /// Adds a running file download to the list. `cancel` stops the transfer and removes the partial file.
+    func beginFileDownload(source: String, destination: String, cancel: @escaping () -> Void) -> String {
+        let url = URL(fileURLWithPath: destination)
+        var job = JobRecord(sourceURL: source, destinationFolder: url.deletingLastPathComponent().path,
+                            title: url.lastPathComponent)
+        job.extractor = Self.fileDownloadTag
+        job.state = .downloading
+        job.stateMessage = "파일을 받는 중입니다."
+        jobs.insert(job, at: 0)
+        fileDownloadCancels[job.id] = cancel
+        persistJobs()
+        return job.id
+    }
+
+    /// total <= 0 means the server gave no size: the list then shows an indeterminate bar.
+    func updateFileDownload(jobId: String, downloaded: Int64, total: Int64) {
+        guard let i = jobs.firstIndex(where: { $0.id == jobId }), jobs[i].state == .downloading else { return }
+        let now = Date()
+        if let last = fileDownloadStamps[jobId], now.timeIntervalSince(last.time) >= 1 {
+            jobs[i].speed = Double(max(0, downloaded - last.bytes)) / now.timeIntervalSince(last.time)
+            fileDownloadStamps[jobId] = (now, downloaded)
+        } else if fileDownloadStamps[jobId] == nil {
+            fileDownloadStamps[jobId] = (now, downloaded)
+        }
+        jobs[i].downloadedBytes = max(0, downloaded)
+        jobs[i].totalBytes = max(0, total)
+        jobs[i].progressPercent = total > 0 ? min(99.9, Double(downloaded) / Double(total) * 100) : 0
+    }
+
+    /// `error == nil` is a verified success (file exists at `path`); anything else is recorded as a failure.
+    func finishFileDownload(jobId: String, path: String, error: String?) {
+        fileDownloadCancels[jobId] = nil
+        fileDownloadStamps[jobId] = nil
+        guard let i = jobs.firstIndex(where: { $0.id == jobId }), jobs[i].state == .downloading else { return }
+        jobs[i].speed = 0
+        jobs[i].updatedAt = Date()
+        let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value
+        if error == nil, let size {
+            jobs[i].state = .completed
+            jobs[i].publishedMediaPath = path
+            jobs[i].title = URL(fileURLWithPath: path).lastPathComponent
+            jobs[i].downloadedBytes = size
+            jobs[i].totalBytes = size
+            jobs[i].progressPercent = 100
+            jobs[i].stateMessage = "파일을 받았습니다."
+        } else {
+            jobs[i].state = .failed
+            jobs[i].stateMessage = error ?? "파일을 받았지만 저장된 파일을 확인하지 못했습니다."
+        }
         persistJobs()
     }
 
@@ -3414,8 +3492,144 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    private func showAlert(_ message: String) {
+    func showAlert(_ message: String) {
         self.alertMessage = message
         self.showingAlert = true
+    }
+}
+
+
+/// Owns WebKit's WKDownload objects for ordinary files (not tied to a browser tab, so closing the tab keeps the
+/// transfer and its list entry consistent). Progress, success and failure are mirrored into AppModel.jobs.
+@MainActor
+final class FileDownloadCoordinator: NSObject, WKDownloadDelegate {
+    private unowned let app: AppModel
+    /// `workDir` is a fresh, uniquely named directory created by this coordinator next to the final folder: WebKit writes
+    /// only inside it, and only this directory is ever deleted. The finished file is then moved to its final name
+    /// without replacing anything (see `moveWithoutReplacing`).
+    private struct Entry {
+        var jobId: String?; var folder: URL?; var name = ""; var workDir: URL?; var partial: URL?
+        var cancelRequested = false; var observers: [NSKeyValueObservation] = []
+    }
+    private var entries: [ObjectIdentifier: Entry] = [:]
+
+    init(app: AppModel) { self.app = app }
+
+    func adopt(_ download: WKDownload) {
+        download.delegate = self
+        entries[ObjectIdentifier(download)] = Entry()
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
+                  completionHandler: @escaping (URL?) -> Void) {
+        let folder: URL
+        if !app.destinationFolder.isEmpty {
+            folder = URL(fileURLWithPath: (app.destinationFolder as NSString).expandingTildeInPath, isDirectory: true)
+        } else {
+            folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        }
+        let name = Self.safeFileName(suggestedFilename)
+        let workDir = folder.appendingPathComponent(".HanTool-\(UUID().uuidString).part", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            // Not `withIntermediateDirectories`: this fails if the name already exists, so the directory is certainly new.
+            try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: false)
+        } catch {
+            entries[ObjectIdentifier(download)] = nil
+            app.showAlert("파일을 받을 폴더를 준비하지 못했습니다: \(error.localizedDescription)")
+            completionHandler(nil)
+            return
+        }
+        let partial = workDir.appendingPathComponent(name)
+
+        let key = ObjectIdentifier(download)
+        let jobId = app.beginFileDownload(source: download.originalRequest?.url?.absoluteString ?? response.url?.absoluteString ?? "",
+                                          destination: folder.appendingPathComponent(name).path) { [weak self, weak download] in
+            self?.requestCancel(key: key, download: download)
+        }
+        var entry = entries[key] ?? Entry()
+        entry.jobId = jobId
+        entry.folder = folder
+        entry.name = name
+        entry.workDir = workDir
+        entry.partial = partial
+        let progress = download.progress
+        let expected = response.expectedContentLength
+        let push: @Sendable (Progress) -> Void = { [weak self] p in
+            let done = p.completedUnitCount
+            let total = p.totalUnitCount > 0 ? p.totalUnitCount : expected
+            Task { @MainActor in self?.app.updateFileDownload(jobId: jobId, downloaded: done, total: total) }
+        }
+        entry.observers = [
+            progress.observe(\.completedUnitCount, options: [.new]) { p, _ in push(p) },
+            progress.observe(\.totalUnitCount, options: [.new]) { p, _ in push(p) }
+        ]
+        entries[key] = entry
+        completionHandler(partial)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        let key = ObjectIdentifier(download)
+        guard let entry = entries[key] else { return }
+        if entry.cancelRequested { return }   // the cancel completion cleans up
+        entries[key] = nil
+        guard let jobId = entry.jobId, let folder = entry.folder, let partial = entry.partial else { return }
+        if let final = Self.moveWithoutReplacing(partial, intoFolder: folder, name: entry.name) {
+            removeOwnedWorkDir(entry)
+            app.finishFileDownload(jobId: jobId, path: final.path, error: nil)
+        } else {
+            // The finished file stays in our work directory (not deleted) so nothing already received is lost.
+            app.finishFileDownload(jobId: jobId, path: partial.path,
+                                   error: "받은 파일을 \(folder.path) 폴더에 저장하지 못했습니다. 완성된 파일은 여기에 보존되어 있습니다: \(partial.path)")
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        let key = ObjectIdentifier(download)
+        guard let entry = entries[key] else { return }
+        if entry.cancelRequested { return }   // the cancel completion cleans up
+        entries[key] = nil
+        removeOwnedWorkDir(entry)
+        guard let jobId = entry.jobId, let folder = entry.folder else { return }
+        app.finishFileDownload(jobId: jobId, path: folder.appendingPathComponent(entry.name).path,
+                               error: "파일을 받지 못했습니다: \(error.localizedDescription)")
+    }
+
+    /// User cancel: the job is already marked cancelled by AppModel. The entry (and so the work directory) stays owned
+    /// until WebKit reports the cancel as completed; only then is our own work directory removed.
+    private func requestCancel(key: ObjectIdentifier, download: WKDownload?) {
+        guard var entry = entries[key], !entry.cancelRequested, let download else { return }
+        entry.cancelRequested = true
+        entries[key] = entry
+        download.cancel { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let done = self.entries.removeValue(forKey: key) else { return }
+                self.removeOwnedWorkDir(done)
+            }
+        }
+    }
+
+    /// Only the directory this coordinator created for this transfer (never a path that merely had a chosen name).
+    private func removeOwnedWorkDir(_ entry: Entry) {
+        if let dir = entry.workDir { try? FileManager.default.removeItem(at: dir) }
+    }
+
+    /// Final name " (2)", " (3)", ... when taken. `renamex_np(RENAME_EXCL)` fails instead of replacing, so a file another
+    /// app or the user created in the meantime is never overwritten.
+    private static func moveWithoutReplacing(_ source: URL, intoFolder folder: URL, name: String) -> URL? {
+        let ext = (name as NSString).pathExtension
+        let stem = (name as NSString).deletingPathExtension
+        for n in 1...10_000 {
+            let leaf = n == 1 ? name : (ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)")
+            let target = folder.appendingPathComponent(leaf)
+            if renamex_np(source.path, target.path, UInt32(RENAME_EXCL)) == 0 { return target }
+            if errno != EEXIST { return nil }
+        }
+        return nil
+    }
+
+    private static func safeFileName(_ raw: String) -> String {
+        let base = (raw as NSString).lastPathComponent.replacingOccurrences(of: ":", with: "_")
+        return base.isEmpty || base == "." || base == ".." ? "download" : String(base.prefix(200))
     }
 }

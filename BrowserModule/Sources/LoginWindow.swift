@@ -201,6 +201,8 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
 
     private var observations: [NSKeyValueObservation] = []
     private var pendingURL: URL?
+    /// The original action was a link with the HTML `download` attribute: the replayed load on `pendingURL` stays a save.
+    private var pendingAsDownload = false
     /// Which start page applies when this tab starts up empty (first tab of a window = new window, "+" tab = new tab).
     var startTarget: StartPageTarget = .newTab
     /// The tab is created for an explicit address: the saved start page must not be loaded first.
@@ -570,8 +572,10 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         resetAdWall()
         refreshAdBlock()
         if let url = pendingURL {
+            let asDownload = pendingAsDownload
             pendingURL = nil
-            loadWhenAllowed(url, in: wv)
+            pendingAsDownload = false
+            loadWhenAllowed(url, in: wv, asDownload: asDownload)
         }
     }
 
@@ -656,7 +660,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
 
     /// With connection assist on, navigation starts only after the helper confirmed the site policy; a failed or
     /// late confirmation leaves the page unopened with the reason shown (no direct fallback).
-    private func loadWhenAllowed(_ url: URL, in wv: WKWebView) {
+    private func loadWhenAllowed(_ url: URL, in wv: WKWebView, asDownload: Bool = false) {
         // The first navigation waits (the compile always ends, with or without a list) until the desired rule list is
         // installed, so it is never started unprotected; the mode is re-read when the wait is over.
         loadTicket += 1
@@ -668,22 +672,22 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
                 guard let self = self, let wv = wv, self.webView === wv, self.sessionToken == token,
                       self.loadTicket == loadTick else { return }
                 self.refreshAdBlock()
-                self.startLoadWhenAllowed(url, in: wv, loadTick: loadTick)
+                self.startLoadWhenAllowed(url, in: wv, loadTick: loadTick, asDownload: asDownload)
             }
             return
         }
-        startLoadWhenAllowed(url, in: wv, loadTick: loadTick)
+        startLoadWhenAllowed(url, in: wv, loadTick: loadTick, asDownload: asDownload)
     }
 
-    private func startLoadWhenAllowed(_ url: URL, in wv: WKWebView, loadTick: Int) {
+    private func startLoadWhenAllowed(_ url: URL, in wv: WKWebView, loadTick: Int, asDownload: Bool = false) {
         guard let connection = routeConnection, connection.enabled else {
-            wv.load(URLRequest(url: url))
+            startLoad(URLRequest(url: url), in: wv, asDownload: asDownload)
             return
         }
         if connection.autoAllowPublicConfirmed {
             notice = nil
             pageStartedAt = Date()
-            wv.load(URLRequest(url: url))
+            startLoad(URLRequest(url: url), in: wv, asDownload: asDownload)
             return
         }
         policyTicket += 1
@@ -698,11 +702,25 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
                 return
             }
             self.pageStartedAt = Date()
-            wv.load(URLRequest(url: url))
+            startLoad(URLRequest(url: url), in: wv, asDownload: asDownload)
         }
     }
 
-    /// "허용 후 다시 시도" in the browser: allows exactly the listed hosts (refused as not_allowed for this browser
+        /// Same request either way; a link with the HTML `download` attribute is saved instead of displayed (it was already
+    /// cancelled and replayed here for the connection policy, which would otherwise drop that intent).
+    private func startLoad(_ request: URLRequest, in wv: WKWebView, asDownload: Bool) {
+        guard asDownload, let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            wv.load(request)
+            return
+        }
+        wv.startDownload(using: request) { [weak self] download in
+            Task { @MainActor in
+                if let app = self?.appModel { app.fileDownloads.adopt(download) } else { download.cancel { _ in } }
+            }
+        }
+    }
+
+/// "허용 후 다시 시도" in the browser: allows exactly the listed hosts (refused as not_allowed for this browser
     /// since the current page started loading), waits for the helper's acknowledgement, then reloads the page.
     func allowBlockedAndReload(_ list: [String]) {
         guard let connection = routeConnection, connection.enabled, connection.isReady,
@@ -1079,6 +1097,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         hasStartedUp = true
         isShowingHome = false
         pendingURL = nil
+        pendingAsDownload = false
         prepare()
         guard let wv = webView else { return false }
         wv.stopLoading()
@@ -1112,6 +1131,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         hasStartedUp = true
         isShowingHome = false
         pendingURL = nil
+        pendingAsDownload = false
         prepare()
         guard let wv = webView else { return false }
         wv.stopLoading()
@@ -1170,7 +1190,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     }
 
     /// Starts navigating to `url` on `route`. A live WebView must already be on that route.
-    private func openResolved(_ url: URL, route: BrowsingRoute, build: Bool, userEntered: Bool = true) {
+    private func openResolved(_ url: URL, route: BrowsingRoute, build: Bool, userEntered: Bool = true, asDownload: Bool = false) {
         discardStaleHomeView()
         lastError = nil
         modeNotice = nil
@@ -1196,9 +1216,10 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         }
         allowSite(url, route: route)
         if let wv = webView {
-            loadWhenAllowed(url, in: wv)
+            loadWhenAllowed(url, in: wv, asDownload: asDownload)
         } else {
             pendingURL = url
+            pendingAsDownload = asDownload
             pendingRoute = route
             if build { prepare() }
         }
@@ -1222,7 +1243,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     /// Replaces only this tab's WebView so `url` opens on `route` (the other store / connection path). Other tabs,
     /// the shared stores and running downloads are untouched. History of the replaced view does not carry over.
     /// Callers have already checked that the navigation is a plain GET that can be replayed.
-    private func rebuildView(route: BrowsingRoute, url: URL, fallbackHost: String? = nil) {
+    private func rebuildView(route: BrowsingRoute, url: URL, fallbackHost: String? = nil, asDownload: Bool = false) {
         teardown()
         startNewLogicalAttempt()
         recoveryEnabled = true
@@ -1233,7 +1254,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             directFallbackURL = Self.withoutFragment(url)
         }
         // A rebuilt view (route switch for a link / redirect, or the fallback itself) is never a fresh user-entered address.
-        openResolved(url, route: route, build: true, userEntered: false)
+        openResolved(url, route: route, build: true, userEntered: false, asDownload: asDownload)
         modeNotice = "이 사이트는 \(route.label)(으)로 열도록 설정되어 있어 탭을 새 연결로 다시 열었습니다. 연결마다 로그인 저장소가 따로이고, 이전 이동 기록은 이어지지 않습니다."
     }
 
@@ -1317,6 +1338,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         wanted = true
         hasStartedUp = true
         pendingURL = nil
+        pendingAsDownload = false
         policyTicket += 1
         loadTicket += 1
         adWallTicket += 1
@@ -1377,6 +1399,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
                 app.assistConnection.allowSite(forURL: url.absoluteString)
             }
             pendingURL = url
+            pendingAsDownload = false
             pendingRoute = s.route == nil ? nil : resolved
             address = url.absoluteString
         }
@@ -1435,6 +1458,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         hasStartedUp = false
         isShowingHome = true
         pendingURL = nil
+        pendingAsDownload = false
         policyTicket += 1
         recoveryInProgress = false
         sessionToken += 1
@@ -1692,14 +1716,14 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
 
     /// A page the user deliberately opened from a link/pop-up on another site: with connection assist on, its site is
     /// allowed first (explicit user action, not a wildcard) and it is opened through the same proxy path.
-    private func openUserInitiated(_ url: URL, in wv: WKWebView) -> Bool {
+    private func openUserInitiated(_ url: URL, in wv: WKWebView, asDownload: Bool = false) -> Bool {
         guard let connection = routeConnection, connection.enabled, let host = url.host,
               !connection.covers(host: host) else { return false }
         if connection.autoAllowPublicConfirmed {
             return false
         }
         connection.allowSite(forURL: url.absoluteString)
-        loadWhenAllowed(url, in: wv)
+        loadWhenAllowed(url, in: wv, asDownload: asDownload)
         return true
     }
 
@@ -1787,15 +1811,29 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             lastError = "이 사이트는 \(route.label)(으)로 열도록 설정되어 있지만, 현재 연결에서 보낸 \(method) 요청은 다른 연결로 안전하게 다시 보낼 수 없어 열지 않았습니다. 주소를 직접 열어 주세요."
             return .cancel
         }
+        // A link with the HTML `download` attribute keeps its save intent on the replacement view (http(s) only, as
+        // startLoad enforces); the route's store / proxy / credentials come from the rebuilt view, unchanged.
+        let asDownload = action.shouldPerformDownload
         let token = sessionToken
         Task { @MainActor [weak self, weak wv] in
             guard let self, let wv, self.webView === wv, self.sessionToken == token else { return }
-            self.rebuildView(route: route, url: url)
+            self.rebuildView(route: route, url: url, asDownload: asDownload)
         }
         return .cancel
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        let policy = await decideNavigationAction(webView, navigationAction)
+        // Link with the HTML `download` attribute (pdf, image, ...): WebKit would otherwise just display it. Every check
+        // above has already allowed this request; only http(s) is turned into a save.
+        if policy == .allow, navigationAction.shouldPerformDownload,
+           let scheme = navigationAction.request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            return .download
+        }
+        return policy
+    }
+
+    private func decideNavigationAction(_ webView: WKWebView, _ navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
         guard webView === self.webView else { return .cancel }
         guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else { return .cancel }
         if url.scheme?.lowercased() == "file" {
@@ -1940,7 +1978,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
                     return .allow
                 }
                 if navigationAction.navigationType == .linkActivated,
-                   (navigationAction.request.httpMethod ?? "GET") == "GET", openUserInitiated(url, in: webView) {
+                   (navigationAction.request.httpMethod ?? "GET") == "GET", openUserInitiated(url, in: webView, asDownload: navigationAction.shouldPerformDownload) {
                     return .cancel
                 }
             }
@@ -1970,11 +2008,23 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
                 return .cancel
             }
         }
-        if navigationResponse.isForMainFrame && !navigationResponse.canShowMIMEType {
-            lastError = "이 브라우저는 파일을 바로 내려받지 않습니다. 오른쪽 목록의 'MP4로 저장'이나 '현재 페이지 분석'을 사용해 주세요."
-            return .cancel
+        let isAttachment = (navigationResponse.response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Disposition")?.lowercased()
+            .trimmingCharacters(in: .whitespaces).hasPrefix("attachment") == true
+        if navigationResponse.isForMainFrame && (!navigationResponse.canShowMIMEType || isAttachment) {
+            // Ordinary file (zip, dmg, pdf attachment, ...): WebKit saves it itself via a WKDownload (see below).
+            return .download
         }
         return .allow
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        // The app model owns the transfer and lists it with the other downloads (see FileDownloadCoordinator).
+        if let app = appModel { app.fileDownloads.adopt(download) } else { download.cancel { _ in } }
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        if let app = appModel { app.fileDownloads.adopt(download) } else { download.cancel { _ in } }
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

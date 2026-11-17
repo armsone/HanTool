@@ -1897,11 +1897,21 @@ struct JobCardView: View {
                 }
             } else if job.state.isActive || job.state == .downloading || job.state == .processing || job.state == .verifying {
                 VStack(spacing: 4) {
-                    ProgressView(value: job.progressPercent, total: 100.0)
-                        .progressViewStyle(.linear)
+                    if appModel.isFileDownload(job) && job.totalBytes <= 0 {
+                        // The server gave no size: indeterminate bar, bytes so far only.
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView(value: job.progressPercent, total: 100.0)
+                            .progressViewStyle(.linear)
+                    }
                     HStack {
                         if job.totalBytes > 0 {
                             Text(String(format: "%.1f / %.1f MB", Double(job.downloadedBytes) / 1048576.0, Double(job.totalBytes) / 1048576.0))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else if appModel.isFileDownload(job) {
+                            Text(String(format: "%.1f MB 받음 (전체 크기 알 수 없음)", Double(job.downloadedBytes) / 1048576.0))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -1951,7 +1961,7 @@ struct JobCardView: View {
                     .help("녹화를 멈추고 아무것도 저장하지 않습니다.")
                     .accessibilityLabel("녹화 취소, 저장하지 않음")
                 case .extracting, .downloading, .processing, .verifying:
-                    if !(job.isLive && job.pendingDownload) {
+                    if !(job.isLive && job.pendingDownload) && !appModel.isFileDownload(job) {
                         Button("일시 정지") {
                             appModel.pauseJob(jobId: job.id)
                         }
@@ -1988,10 +1998,12 @@ struct JobCardView: View {
                     }
                     .buttonStyle(.bordered)
                 case .cancelled, .failed, .interrupted, .selectionChanged, .verificationIncomplete:
-                    Button(job.pendingPublish ? "저장 다시 시도" : "다시 시도") {
-                        appModel.retryJob(jobId: job.id)
+                    if !appModel.isFileDownload(job) {
+                        Button(job.pendingPublish ? "저장 다시 시도" : "다시 시도") {
+                            appModel.retryJob(jobId: job.id)
+                        }
+                        .buttonStyle(.bkProminent)
                     }
-                    .buttonStyle(.bkProminent)
 
                     Button("삭제") {
                         appModel.deleteJob(jobId: job.id, removeFile: false)
