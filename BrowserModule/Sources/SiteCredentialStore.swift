@@ -10,6 +10,13 @@ import Security
 /// - Secrets stored in macOS Keychain with kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
 /// - Keychain service: "com.hanstree.HttpsDown.site-autofill".
 /// - Account key: canonical exact HTTP or HTTPS origin + "\0" + username.
+/// - One narrow exception, fill-only: accounts saved for "https://example.com" are also offered on exactly
+///   "https://www.example.com" (same https scheme, default port, host == "www." + saved host) and ONLY when the saved
+///   host is a registrable domain in the Public Suffix List (PublicSuffixList: ICANN and PRIVATE sections), so
+///   co.kr, github.io, surge.sh and every other public or shared suffix, an unknown TLD, a missing or altered list all
+///   fail closed. No other subdomain, port or scheme, and not the reverse direction. Nothing is copied, merged or
+///   re-keyed: the Keychain item stays under its own origin, and anything saved on the www page is stored under the
+///   www origin.
 /// - Non-secret account list mirrored in UserDefaults for UI and pre-fill probe, avoiding premature Keychain prompts.
 /// - Deliberate user action ("지금 채우기") fills visible empty username and password fields in the main frame.
 /// - Passwords stored solely in Keychain (never in UserDefaults or logs).
@@ -53,6 +60,28 @@ public enum SiteCredentialStore {
         }
     }
 
+    /// The same origin as page JavaScript reports it (`location.origin`, `URL.origin`): internationalized hosts in ASCII
+    /// punycode (https://www.xn--bcher-kva.xn--3e0b707e), IPv6 in brackets, default port omitted. Only for comparing with
+    /// values that come from the page. `canonicalOrigin` (Unicode host, as `URLComponents.host` shows it) stays the
+    /// Keychain account key and index key, so items saved before this existed are still found, and none is renamed or moved.
+    public static func asciiOrigin(for url: URL?) -> String? {
+        guard let url, canonicalOrigin(for: url) != nil,
+              let scheme = URLComponents(url: url, resolvingAgainstBaseURL: false)?.scheme?.lowercased(),
+              var host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        if host.contains(":") && !host.hasPrefix("[") { host = "[\(host)]" }
+        guard host.unicodeScalars.allSatisfy({ $0.value < 0x80 }) else { return nil }
+        let defaultPort = scheme == "https" ? 443 : 80
+        let port = URLComponents(url: url, resolvingAgainstBaseURL: false)?.port
+        if let port, port != defaultPort { return "\(scheme)://\(host):\(port)" }
+        return "\(scheme)://\(host)"
+    }
+
+    /// `asciiOrigin(for:)` of a stored/canonical origin string such as "https://www.bücher.한국".
+    public static func asciiOrigin(forCanonicalOrigin origin: String?) -> String? {
+        guard let origin, let url = URL(string: origin), canonicalOrigin(for: url) == origin else { return nil }
+        return asciiOrigin(for: url)
+    }
+
     private static var index: [String: [String]] {
         get { HTDBrowserDefaults.standard.dictionary(forKey: accountsIndexKey) as? [String: [String]] ?? [:] }
         set { HTDBrowserDefaults.standard.set(newValue, forKey: accountsIndexKey) }
@@ -69,6 +98,61 @@ public enum SiteCredentialStore {
 
     public static func hasSavedCredential(forOrigin origin: String) -> Bool {
         !accounts(forOrigin: origin).isEmpty
+    }
+
+    /// A saved account that may be offered on a page, with the origin its Keychain item is stored under.
+    public struct OfferedAccount: Equatable {
+        public let storageOrigin: String
+        public let username: String
+    }
+
+    /// True only when `host` (already-lowercased host, Unicode or punycode, no trailing dot, no port) is exactly a registrable domain of
+    /// the Public Suffix List: one operator's name directly under a public or shared suffix. False for suffixes themselves
+    /// (co.kr, github.io, surge.sh), unknown TLDs, IP literals, and whenever the list is unavailable or fails its check.
+    public static func isRegistrableApex(_ host: String, using list: PublicSuffixList? = PublicSuffixList.bundled) -> Bool {
+        // `URLComponents.host` (hence canonicalOrigin) shows internationalized hosts decoded (www.bücher.한국); the list
+        // is matched on the ASCII (punycode) form the browser actually connects to.
+        guard let list, let ascii = PublicSuffixList.asciiHost(host),
+              let registrable = list.registrableDomain(ofHost: ascii) else { return false }
+        return registrable == ascii
+    }
+
+    /// Storage origin whose accounts are also offered on `pageOrigin`: only "https://www.<host>" -> "https://<host>"
+    /// (https, default port on both, `<host>` a registrable domain per `isRegistrableApex`). Nil for everything else.
+    public static func trustedStorageOrigin(forPageOrigin pageOrigin: String,
+                                            using list: PublicSuffixList? = PublicSuffixList.bundled) -> String? {
+        guard let url = URL(string: pageOrigin), canonicalOrigin(for: url) == pageOrigin,
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              comps.scheme == "https", comps.port == nil,
+              let host = comps.host, host.hasPrefix("www.") else { return nil }
+        let apex = String(host.dropFirst(4))
+        guard isRegistrableApex(apex, using: list) else { return nil }
+        return "https://\(apex)"
+    }
+
+    /// Page origin on which accounts stored under `storageOrigin` are additionally offered (inverse of the above).
+    public static func trustedPageOrigin(forStorageOrigin storageOrigin: String,
+                                         using list: PublicSuffixList? = PublicSuffixList.bundled) -> String? {
+        guard let url = URL(string: storageOrigin), canonicalOrigin(for: url) == storageOrigin,
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              comps.scheme == "https", comps.port == nil, let host = comps.host,
+              isRegistrableApex(host, using: list) else { return nil }
+        return "https://www.\(host)"
+    }
+
+    /// Accounts to offer on a page: its own first, then the trusted sibling's (an own account wins on equal username).
+    public static func offeredAccounts(forPageOrigin pageOrigin: String) -> [OfferedAccount] {
+        var result = accounts(forOrigin: pageOrigin).map { OfferedAccount(storageOrigin: pageOrigin, username: $0) }
+        if let sibling = trustedStorageOrigin(forPageOrigin: pageOrigin) {
+            for username in accounts(forOrigin: sibling) where !result.contains(where: { $0.username == username }) {
+                result.append(OfferedAccount(storageOrigin: sibling, username: username))
+            }
+        }
+        return result
+    }
+
+    public static func hasOfferedCredential(forPageOrigin pageOrigin: String) -> Bool {
+        !offeredAccounts(forPageOrigin: pageOrigin).isEmpty
     }
 
     private static func keychainAccountKey(origin: String, username: String) -> String {
@@ -224,9 +308,10 @@ public final class SiteAutofill {
             return
         }
 
+        // `origin` is where the account is stored; the page may be that origin or its one trusted www counterpart.
         guard let currentURL = webView.url,
               let canonical = SiteCredentialStore.canonicalOrigin(for: currentURL),
-              canonical == origin else {
+              canonical == origin || canonical == SiteCredentialStore.trustedPageOrigin(forStorageOrigin: origin) else {
             onNotice("현재 페이지 주소와 저장된 사이트 주소가 달라 채우지 못했습니다.")
             return
         }
@@ -237,7 +322,7 @@ public final class SiteAutofill {
             return
         }
 
-        guard let rec = SiteCredentialStore.read(origin: canonical, username: username) else {
+        guard let rec = SiteCredentialStore.read(origin: origin, username: username) else {
             onNotice("저장된 로그인 정보를 키체인에서 읽지 못했습니다.")
             return
         }
@@ -255,6 +340,14 @@ public final class SiteAutofill {
             onNotice("키체인 확인 중 페이지가 바뀌어 입력을 취소했습니다.")
             return
         }
+
+        // The page reports origins in ASCII (location.origin, URL.origin); storage keys stay in canonicalOrigin form.
+        guard let asciiExpected = SiteCredentialStore.asciiOrigin(for: currentURL) else {
+            onNotice("현재 페이지 주소를 확인하지 못해 채우지 못했습니다.")
+            return
+        }
+        let asciiTrusted = SiteCredentialStore.trustedStorageOrigin(forPageOrigin: canonical)
+            .flatMap { SiteCredentialStore.asciiOrigin(forCanonicalOrigin: $0) }
 
         var secretPassword: String? = rec.password
         let fillUsername = rec.username
@@ -324,7 +417,8 @@ public final class SiteAutofill {
                     }
                     if (effectiveTarget !== '' && effectiveTarget !== '_self') return null;
 
-                    // Validate form action: must resolve to valid same-origin HTTP or HTTPS
+                    // Validate form action: must resolve to valid HTTP or HTTPS on an allowed origin (the page's own, or its
+                    // one trusted apex counterpart: see allowedActionOrigins)
                     // Account for document.baseURI and form.action
                     var rawAction = form.getAttribute('action');
                     var baseForAction = document.baseURI || window.location.href;
@@ -334,7 +428,7 @@ public final class SiteAutofill {
                     } catch(e) {
                         return null;
                     }
-                    if ((resolvedActionUrl.protocol !== 'https:' && resolvedActionUrl.protocol !== 'http:') || resolvedActionUrl.origin !== expectedOrigin) {
+                    if ((resolvedActionUrl.protocol !== 'https:' && resolvedActionUrl.protocol !== 'http:') || allowedActionOrigins.indexOf(resolvedActionUrl.origin) === -1) {
                         return null;
                     }
 
@@ -355,7 +449,7 @@ public final class SiteAutofill {
                             var bAction = btn.getAttribute('formaction');
                             try {
                                 var resolvedBtnAction = new URL(bAction !== null ? bAction : '', baseForAction);
-                                if ((resolvedBtnAction.protocol !== 'https:' && resolvedBtnAction.protocol !== 'http:') || resolvedBtnAction.origin !== expectedOrigin) {
+                                if ((resolvedBtnAction.protocol !== 'https:' && resolvedBtnAction.protocol !== 'http:') || allowedActionOrigins.indexOf(resolvedBtnAction.origin) === -1) {
                                     return null;
                                 }
                             } catch(e) {
@@ -555,7 +649,8 @@ public final class SiteAutofill {
         webView.callAsyncJavaScript(
             script,
             arguments: [
-                "expectedOrigin": canonical,
+                "expectedOrigin": asciiExpected,
+                "allowedActionOrigins": [asciiExpected] + (asciiTrusted.map { [$0] } ?? []),
                 "userVal": fillUsername,
                 "passVal": secretPassword ?? ""
             ],

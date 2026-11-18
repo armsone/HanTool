@@ -45,23 +45,38 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 return isVisible(el) || userEditedInputs.has(el);
             }
 
-            function isEligibleForm(form, submitter) {
-                if (!form) return false;
+            // A form may post to this page's origin or, on a www page, to its bare-domain counterpart (many sites serve
+            // the page on www and the login handler on the bare domain). This is only a structural pre-filter: exactly
+            // https://www.<host> -> https://<host>, default ports. Whether <host> is really one operator's registrable
+            // domain (not co.kr, github.io, surge.sh or another public/shared suffix) needs the Public Suffix List, so
+            // the destination origin travels with every message and the native side decides
+            // (SiteCredentialStore.trustedStorageOrigin, fail closed).
+            function isAllowedActionOrigin(origin) {
+                if (origin === location.origin) return true;
+                return location.protocol === 'https:' && location.port === '' &&
+                    location.hostname.indexOf('www.') === 0 && origin === 'https://' + location.hostname.slice(4);
+            }
+
+            // Returns the origin the form would post to, or null when the form is not eligible.
+            function eligibleActionOrigin(form, submitter) {
+                if (!form) return null;
 
                 const override = (attribute, fallback) =>
                     submitter && submitter.hasAttribute(attribute) ? submitter.getAttribute(attribute) : fallback;
                 const method = override('formmethod', form.method).toLowerCase();
-                if (method !== 'post') return false;
+                if (method !== 'post') return null;
                 const action = override('formaction', form.action);
+                let destinationOrigin;
                 try {
                     const destination = new URL(action || location.href, document.baseURI);
-                    if (destination.origin !== location.origin || (destination.protocol !== 'https:' && destination.protocol !== 'http:')) return false;
-                } catch (_) { return false; }
+                    if (!isAllowedActionOrigin(destination.origin) || (destination.protocol !== 'https:' && destination.protocol !== 'http:')) return null;
+                    destinationOrigin = destination.origin;
+                } catch (_) { return null; }
                 const base = document.querySelector('base[target]');
                 const target = (override('formtarget', form.getAttribute('target')) || base?.target || '_self').trim();
-                if (target.toLowerCase() !== '_self') return false;
+                if (target.toLowerCase() !== '_self') return null;
 
-                return true;
+                return destinationOrigin;
             }
 
             function isSignupForm(form) {
@@ -141,7 +156,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 if (window.location.protocol !== 'https:' && window.location.protocol !== 'http:') return;
 
                 var submitter = e.submitter || null;
-                if (!isEligibleForm(form, submitter)) return;
+                var actionOrigin = eligibleActionOrigin(form, submitter);
+                if (!actionOrigin) return;
 
                 var creds = extractCredentials(form);
                 if (!creds) return;
@@ -150,7 +166,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                     type: 'submit',
                     username: creds.username,
                     password: creds.password,
-                    href: window.location.href
+                    href: window.location.href,
+                    actionOrigin: actionOrigin
                 });
             }, true);
 
@@ -165,7 +182,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
 
                 var form = target.form;
                 if (window.location.protocol !== 'https:' && window.location.protocol !== 'http:') return;
-                if (!isEligibleForm(form, null)) return;
+                var actionOrigin = eligibleActionOrigin(form, null);
+                if (!actionOrigin) return;
                 if (isSignupForm(form)) return;
 
                 // Form must have exactly one visible eligible current password field
@@ -225,7 +243,8 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
                 pickerOfferedForDocument = true;
                 window.webkit.messageHandlers.siteCredentialCapture.postMessage({
                     type: 'focus',
-                    href: window.location.href
+                    href: window.location.href,
+                    actionOrigin: actionOrigin
                 });
             }
             document.addEventListener('focusin', offerFill, true);
@@ -269,6 +288,18 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
 
         guard Self.isCommittedDocument(currentURL, committedURL: popupURL) else { return }
 
+        // Where the form would send the credentials: this page's own origin, or its one registrable-domain counterpart
+        // when the page is on www (Public Suffix List checked). The page script only pre-filters; this is the
+        // authoritative check.
+        // `actionOrigin` comes from page JavaScript, so it is ASCII (punycode) like location.origin; compare it with the
+        // ASCII form of the page origin and of the trusted counterpart, not with the Unicode storage-key form.
+        guard let actionOrigin = body["actionOrigin"] as? String,
+              let asciiCurrent = SiteCredentialStore.asciiOrigin(for: currentURL),
+              actionOrigin == asciiCurrent ||
+                actionOrigin == SiteCredentialStore.asciiOrigin(
+                    forCanonicalOrigin: SiteCredentialStore.trustedStorageOrigin(forPageOrigin: currentOrigin))
+        else { return }
+
         let securityOrigin = message.frameInfo.securityOrigin
         let normalizedSecurityPort = securityOrigin.port == 0 ? (securityOrigin.protocol.lowercased() == "https" ? 443 : (securityOrigin.protocol.lowercased() == "http" ? 80 : 0)) : securityOrigin.port
         let currentPort = currentURL.port ?? (currentURL.scheme?.lowercased() == "https" ? 443 : (currentURL.scheme?.lowercased() == "http" ? 80 : 0))
@@ -295,6 +326,15 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
 
         let accounts = SiteCredentialStore.accounts(forOrigin: origin)
         let isUpdate = accounts.contains(username)
+
+        // Logged in with an account the trusted sibling origin (apex -> www) already holds, unchanged: nothing to save.
+        // A different password is still offered as a save for this origin only; the sibling's item is never touched.
+        if !isUpdate, let sibling = SiteCredentialStore.trustedStorageOrigin(forPageOrigin: origin),
+           SiteCredentialStore.accounts(forOrigin: sibling).contains(username),
+           let siblingRecord = SiteCredentialStore.read(origin: sibling, username: username),
+           siblingRecord.password == password {
+            return
+        }
 
         if isUpdate {
             guard let existingRecord = SiteCredentialStore.read(origin: origin, username: username) else {
@@ -370,8 +410,9 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
               let model = model,
               model.webView === webView else { return }
 
-        let accounts = SiteCredentialStore.accounts(forOrigin: origin)
-        guard !accounts.isEmpty else { return }
+        let offered = SiteCredentialStore.offeredAccounts(forPageOrigin: origin)
+        guard !offered.isEmpty else { return }
+        let accounts = offered.map(\.username)
 
         let committedURL = model.popupCommittedURL
 
@@ -379,9 +420,11 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
             guard let currentWebView = webView,
                   let currentModel = model else { return }
 
+            // The account's own storage origin: this page's origin, or its one trusted apex counterpart.
+            guard let storageOrigin = offered.first(where: { $0.username == username })?.storageOrigin else { return }
             SiteAutofill.fill(
                 in: currentWebView,
-                origin: origin,
+                origin: storageOrigin,
                 username: username,
                 isCurrent: { [weak currentModel, weak currentWebView] in
                     guard let model = currentModel,
@@ -507,8 +550,7 @@ final class SiteCredentialCapture: NSObject, WKScriptMessageHandler {
               isCommittedDocument(currentURL, committedURL: model.popupCommittedURL),
               let origin = SiteCredentialStore.canonicalOrigin(for: currentURL) else { return }
 
-        let accounts = SiteCredentialStore.accounts(forOrigin: origin)
-        guard !accounts.isEmpty else { return }
+        guard SiteCredentialStore.hasOfferedCredential(forPageOrigin: origin) else { return }
 
         let capture = SiteCredentialCapture(model: model)
         capture.handleFocusAutofill(origin: origin, generation: model.generation, webView: webView, forcePicker: true)

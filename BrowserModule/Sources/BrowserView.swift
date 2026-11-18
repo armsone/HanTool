@@ -797,7 +797,11 @@ struct BrowserPane: View {
         .help(host == nil ? "열린 페이지가 없습니다."
               : !routable ? "IP 주소, localhost, 내부망 주소에는 사이트별 연결 설정을 쓸 수 없습니다."
               : "이 사이트(\(host ?? ""))만 HTTPS 연결 도움을 \(effective == .assist ? "끄려면" : "켜려면") 누르세요. 현재: \(effective == .assist ? "켜짐" : "꺼짐")")
-        .accessibilityLabel("이 사이트의 HTTPS 연결 도움: \(effective == .assist ? "켜짐" : "꺼짐")")
+        .accessibilityLabel("이 사이트\(host.map { "(\($0))" } ?? "")의 HTTPS 연결 도움: \(effective == .assist ? "켜짐" : "꺼짐")")
+        // The menu rows are native NSMenu items that keep the text they were first built with while the label and the
+        // tooltip (same `host` above) are redrawn, so a page on a new site still listed the previous site. Tie the
+        // control's identity to everything the rows show so a change rebuilds the menu.
+        .id("\(host ?? "-")|\(choice?.rawValue ?? "-")|\(pageRoute.rawValue)|\(appModel.defaultRoute.rawValue)|\(connection.enabled)|\(browsingConnection.isFailed)")
     }
 
     private var primaryActionGroup: some View {

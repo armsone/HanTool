@@ -8,6 +8,16 @@
 - 앱 번들에는 `Contents/Frameworks/Sparkle.framework`로 심볼릭 링크를 보존(ditto)해 포함되고,
   내부 XPC/Autoupdate/Updater.app → 프레임워크 → 앱 순서로 같은 Developer ID로 재서명됩니다.
 
+## 번들 데이터
+
+| 이름 | 버전 | 용도 | 출처 | SHA256 | 라이선스 |
+|---|---|---|---|---|---|
+| Public Suffix List | 2026-11-17_16-14-34_UTC (commit 09c1b150f33c6145a73afcf7db0fb872fc54b4d1) | 저장된 로그인을 `www.` 사이트에 제안할 때 같은 운영자 경계(co.kr·github.io·surge.sh 등 공용 접미사 제외) 판정 | https://publicsuffix.org/list/public_suffix_list.dat | 809adae1a2cb1621b70165c11e0d14412d3f104f40a4ebed9a99e23c54f78d71 | MPL-2.0 |
+
+- 원본 그대로 `BrowserModule/Resources/public_suffix_list.dat`에 두고, 빌드가 앱 `Contents/Resources/`로 복사합니다.
+- `PublicSuffixList.bundledSHA256`과 해시가 다르거나 파일이 없거나 파싱에 실패하면 목록을 쓰지 않고 `www` 제안을 모두 차단합니다(fail closed).
+- 갱신: 위 URL에서 새로 받아 파일을 교체하고 `shasum -a 256` 값을 `PublicSuffixList.bundledSHA256`, 이 표, THIRD-PARTY-NOTICES.txt에 함께 반영합니다.
+
 ## 내부 구성 요소(외부 의존성 아님)
 
 | 이름 | 버전 | 용도 | 출처 |

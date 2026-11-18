@@ -21,6 +21,12 @@ FFmpeg               https://ffmpeg.org/download.html                LGPL-2.1+ o
 Deno                 https://github.com/denoland/deno                MIT
 PyCryptodome(x)      https://github.com/Legrandin/pycryptodome       BSD-2-Clause (some parts public domain)
 
+Public Suffix List    https://publicsuffix.org/list/public_suffix_list.dat   MPL-2.0 (https://mozilla.org/MPL/2.0/)
+                     Bundled unmodified as public_suffix_list.dat (VERSION 2026-11-17_16-14-34_UTC, SHA-256
+                     809adae1a2cb1621b70165c11e0d14412d3f104f40a4ebed9a99e23c54f78d71). The app uses it to decide whether
+                     a saved login for example.com may also be offered on www.example.com (never across co.kr, github.io,
+                     surge.sh or any other public/shared suffix); if the file is missing or altered, nothing is offered.
+
 Other Python packages pulled in by yt-dlp[default] (for example brotli, certifi, mutagen, requests, urllib3,
 websockets) are listed with their own licenses in EngineRuntime/licenses/ when the installed package shipped one.
 Some of them may be copyleft (for example mutagen); check the copied license files.

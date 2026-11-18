@@ -2137,6 +2137,58 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
 
     // MARK: WKUIDelegate
 
+    /// JavaScript alert / confirm / prompt. Without these a site's own message (e.g. a failed login's "wrong password"
+    /// notice, served as `alert(...); history.back()`) was never shown and the page sat blank. The message is shown as a
+    /// sheet on this tab's window, labelled with the page's host so it cannot pass for an app message. A tab that is
+    /// not the one on screen answers with the dismissed default instead of blocking the page.
+    private func presentScriptDialog(_ webView: WKWebView, frame: WKFrameInfo, message: String, defaultText: String?,
+                                     cancellable: Bool, completion: @escaping (_ confirmed: Bool, _ text: String?) -> Void) {
+        guard webView === self.webView, let app = appModel, app.browser === self, app.selectedTab == .browser,
+              let window = webView.window, window.isVisible else {
+            completion(false, nil)
+            return
+        }
+        let host = frame.request.url?.host ?? webView.url?.host ?? ""
+        let alert = NSAlert()
+        alert.messageText = host.isEmpty ? "웹 페이지의 메시지" : "\(host) 페이지의 메시지"
+        alert.informativeText = message.count > 2000 ? String(message.prefix(2000)) + "…" : message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "확인")
+        if cancellable { alert.addButton(withTitle: "취소") }
+        var field: NSTextField?
+        if let defaultText {
+            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+            input.stringValue = defaultText
+            alert.accessoryView = input
+            field = input
+        }
+        alert.beginSheetModal(for: window) { response in
+            let confirmed = response == .alertFirstButtonReturn
+            completion(confirmed, confirmed ? field?.stringValue : nil)
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        presentScriptDialog(webView, frame: frame, message: message, defaultText: nil, cancellable: false) { _, _ in
+            completionHandler()
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        presentScriptDialog(webView, frame: frame, message: message, defaultText: nil, cancellable: true) { confirmed, _ in
+            completionHandler(confirmed)
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+        presentScriptDialog(webView, frame: frame, message: prompt, defaultText: defaultText ?? "", cancellable: true) { _, text in
+            completionHandler(text)
+        }
+    }
+
     /// Pop-up / target=_blank requests open in a NEW tab of this browser (http/https or an about:blank placeholder
     /// only). This page and its view are never navigated by the request: WebKit performs the one original request
     /// (method and body included) in the returned view. `javaScriptCanOpenWindowsAutomatically` is false by default,
@@ -2768,7 +2820,7 @@ final class LinkMenuWebView: WKWebView {
            app.browser === model, model.webView === self,
            SiteCredentialCapture.isCommittedDocument(url, committedURL: model.popupCommittedURL),
            let origin = SiteCredentialStore.canonicalOrigin(for: url),
-           SiteCredentialStore.hasSavedCredential(forOrigin: origin) {
+           SiteCredentialStore.hasOfferedCredential(forPageOrigin: origin) {
             let fillItem = NSMenuItem(title: "저장된 계정 채우기",
                                       action: #selector(fillSavedAccount), keyEquivalent: "")
             fillItem.identifier = credentialItemID
