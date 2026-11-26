@@ -10,6 +10,7 @@ final class AppInputLanguageController {
     private var workspaceObserver: NSObjectProtocol?
     private var inputSourceObserver: NSObjectProtocol?
     private var pendingSwitchTask: Task<Void, Never>?
+    private var pendingInitialInputSourceID: String?
     private let logger = Logger(subsystem: "com.local.screentranslator", category: "AppInputLanguage")
 
     /// Settling delay allowing window manager focus transition and Electron/Chromium text-input client readiness.
@@ -80,6 +81,13 @@ final class AppInputLanguageController {
             ) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
+                    // Only treat as manual switch if input source actually changed away from initial activation source
+                    guard self.pendingSwitchTask != nil else { return }
+                    if let currentID = Self.currentInputSourceID(),
+                       let initialID = self.pendingInitialInputSourceID,
+                       currentID == initialID {
+                        return
+                    }
                     // Manual user switch detected during pending transition; cancel delayed switch to prevent override
                     self.cancelPendingSwitch()
                 }
@@ -119,6 +127,7 @@ final class AppInputLanguageController {
     func cancelPendingSwitch() {
         pendingSwitchTask?.cancel()
         pendingSwitchTask = nil
+        pendingInitialInputSourceID = nil
     }
 
     private func applyToCurrentFrontmostApp() {
@@ -138,11 +147,14 @@ final class AppInputLanguageController {
         let targetBundleID = bundleID
         let expectedSourceID = rule.inputSourceID
         let scheduledAt = ProcessInfo.processInfo.systemUptime
+        let initialSourceID = Self.currentInputSourceID()
 
         // Fast-path: if the target source is already active, do not schedule a switch or introduce unnecessary work.
-        if let activeID = Self.currentInputSourceID(), activeID == expectedSourceID {
+        if let activeID = initialSourceID, activeID == expectedSourceID {
             return
         }
+
+        pendingInitialInputSourceID = initialSourceID
 
         pendingSwitchTask = Task { @MainActor [weak self] in
             // Bounded delay allowing Electron / multi-process window keying and text-input client readiness
@@ -188,23 +200,23 @@ final class AppInputLanguageController {
                 // Never change the input source while secure event input is active (password fields).
                 guard !IsSecureEventInputEnabled() else { return }
 
-                // Hypothesis (not verified): selecting before the target app has a focused text client may leave the app's
-                // input client without the change (menu-bar indicator updated, no cursor bubble). With Accessibility
-                // already granted, wait (bounded) for a focused editable text element, then repeat every guard above once
-                // more before selecting; at the deadline the switch is skipped rather than forced.
+                // With Accessibility granted, if an editable text element is focused we verify readiness immediately.
+                // However, many non-editor windows, browsers without active text fields, or apps with custom controls
+                // never expose AXTextField/AXTextArea. At the deadline, rather than dropping the user's explicit rule,
+                // proceed with the switch so the app's default input source is set as intended.
                 if readinessVerified { break }
-                // No permission prompt or change: without it the old bounded 120ms fallback applies (readiness undetectable).
                 if !AXIsProcessTrusted() { break }
                 if Self.hasFocusedEditableTextElement(pid: targetPID) {
                     readinessVerified = true
                     continue
                 }
                 if ProcessInfo.processInfo.systemUptime >= deadline {
-                    self.logger.info("Skipped automatic input source switch for \(targetBundleID, privacy: .public): no focused text element before deadline")
-                    return
+                    break
                 }
             }
             guard let self else { return }
+
+            self.pendingInitialInputSourceID = nil
 
             // Attempt to select target input source; never fallback silently
             let success = Self.select(inputSourceID: expectedSourceID)

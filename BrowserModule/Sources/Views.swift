@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import AppKit
 import Combine
 
@@ -486,7 +487,7 @@ public struct MainView: View {
                         Spacer()
                     }
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .frame(height: BrowserView.headerHeight)
                     .background(palette.cardColor)
                     Divider()
                 } else if navModel.destination == .translation {
@@ -608,7 +609,7 @@ public struct MainView: View {
 
                     let currentSettingsOwner = navModel.settingsOwner ?? .browser
                     let isWebSettingsActive = navModel.destination == .settings && (currentSettingsOwner == .browser || navModel.settingsTab == .webSettings) && hostedToolID == nil
-                    SettingsView(appModel: appModel, owner: .browser)
+                    SettingsView(appModel: appModel, owner: .browser, browserPane: navModel.browserSettingsPane)
                         .frame(width: max(proxy.size.width, 1), alignment: .topLeading)
                         .opacity(isWebSettingsActive ? 1 : 0)
                         .allowsHitTesting(isWebSettingsActive)
@@ -2198,7 +2199,7 @@ struct SelectionPanel: View {
             if !appModel.hasUsableSourceForStart(job) {
                 Text("원본 주소 재입력 필요: 보안을 위해 주소가 저장되지 않아 시작할 수 없습니다. 주소를 다시 입력해 분석해 주세요.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -2442,6 +2443,7 @@ struct HistoryCardView: View {
 struct SettingsView: View {
     @ObservedObject var appModel: AppModel
     var owner: SettingsOwner = .browser
+    var browserPane: BrowserSettingsPane = .general
     @Environment(\.bkPalette) var palette
     @State private var showingPlannerToolSettings: Bool = false
 
@@ -2450,18 +2452,10 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 switch owner {
                 case .browser:
-                    // Section: Address search & shortcuts
-                    GroupBox("주소창·검색") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("브라우저 주소창에서 사이트 이름·단축어·검색어를 통한 빠른 탐색 및 길찾기 설정을 관리합니다.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            AddressSearchSettingsView(store: appModel.preferences.addressSearch)
-                                .frame(minHeight: 280, maxHeight: 420)
-                        }
-                        .padding(8)
-                    }
-
+                    switch browserPane {
+                    case .address:
+                        AddressSearchSettingsView(store: appModel.preferences.addressSearch)
+                    case .general:
                     // Section 2: Connection assist
                     ConnectionSettingsSection(appModel: appModel, connection: appModel.connection)
 
@@ -2474,31 +2468,12 @@ struct SettingsView: View {
                     // Section 3b: Popups & Redirection
                     PopupSitePermissionsSection()
 
-                    GroupBox("명령줄로 사이트 열기") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("터미널에서 아래 명령으로 사이트를 바로 엽니다.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            HStack {
-                                Text(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                                Spacer()
-                                Button("복사") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#, forType: .string)
-                                }
-                                .buttonStyle(.bordered)
-                            }
-                        }
-                        .padding(8)
-                    }
-
                     #if HTT_HOST
                     if let hostedSettings = HTDHostExport.shared.hostedFeatureSettings?("browser") {
                         hostedSettings
                     }
                     #endif
+                    }
 
                 case .downloads:
                     // Section 1b: Video queue concurrency & fragment concurrency
@@ -2537,7 +2512,7 @@ struct SettingsView: View {
                                         .foregroundStyle(.secondary)
                                 } else if appModel.engineHealth.healthy {
                                     Label("정상 작동 가능", systemImage: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
+                                        .foregroundStyle(.httSuccess)
                                 } else {
                                     Label(appModel.engineHealth.failureReason ?? "점검 필요", systemImage: "exclamationmark.triangle.fill")
                                         .foregroundColor(palette.warnColor)
@@ -2688,7 +2663,7 @@ struct ConnectionSettingsSection: View {
                     case .starting:
                         Label(connection.statusText, systemImage: "hourglass").foregroundStyle(.secondary)
                     case .ready:
-                        Label(connection.statusText, systemImage: "checkmark.shield.fill").foregroundColor(.green)
+                        Label(connection.statusText, systemImage: "checkmark.shield.fill").foregroundStyle(.httSuccess)
                     case .failed:
                         Label(connection.statusText, systemImage: "exclamationmark.triangle.fill").foregroundColor(palette.warnColor)
                     }

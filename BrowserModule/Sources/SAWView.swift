@@ -1,4 +1,5 @@
 import Foundation
+import HTTThemeCore
 import SwiftUI
 import AppKit
 import WebKit
@@ -257,7 +258,7 @@ struct SAWTelescopeIcon: View {
                 .offset(x: -2, y: 1)
             Image(systemName: "sparkles")
                 .font(.system(size: 8, weight: .bold))
-                .foregroundColor(Color.accentColor)
+                .foregroundStyle(.tint)
                 .offset(x: 6, y: -5)
         }
         .aspectRatio(1, contentMode: .fit)
@@ -307,7 +308,7 @@ final class PlannerNativeResizeHandle: NSView {
         // native backing surface explicitly when SwiftUI recomposites it.
         NSColor.clear.setFill()
         dirtyRect.fill(using: .copy)
-        NSColor.separatorColor.setFill()
+        NSColor.htt(HTTThemeSnapshot.app.line2).setFill()
         let separatorWidth: CGFloat = 1.0
         let separatorRect = NSRect(
             x: bounds.midX - (separatorWidth / 2.0),

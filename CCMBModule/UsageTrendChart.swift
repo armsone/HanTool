@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 
 /// Provider tabs of the trend card. Each one owns one chart; Gemini draws its
 /// three accounts as three lines in the same chart.
@@ -474,6 +475,9 @@ final class UsageTrendPlotView: NSView {
 
     private func drawRun(_ points: [TrendPoint], color: NSColor, baseline: CGFloat, top: CGFloat, context: CGContext) {
         guard let first = points.first else { return }
+        // 같은 계열색을 쓰는 Claude 주간과 Fable은 선 굵기로도 구분한다.
+        let lineWidth: CGFloat = color == UsageBrandColors.claudeFable ? 0.9 : 1.6
+        let color = CCMBColors.series(color)
         if points.count == 1 {
             drawMarker(first, color: color)
             return
@@ -505,7 +509,7 @@ final class UsageTrendPlotView: NSView {
         color.setStroke()
         for (newer, older) in zip(points, points.dropFirst()) {
             let link = NSBezierPath()
-            link.lineWidth = 1.4
+            link.lineWidth = lineWidth
             link.lineJoinStyle = .miter
             link.lineCapStyle = .butt
             link.move(to: newer.location)
@@ -536,8 +540,7 @@ final class UsageTrendPlotView: NSView {
     }
 
     private func drawGrid(in rect: NSRect, yMax: Double, attributes: [NSAttributedString.Key: Any]) {
-        let isBK = UsagePanelThemeStore.current.isDark
-        let gridColor = (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.10 : 0.12)
+        let gridColor = CCMBColors.ink.withAlphaComponent(UsagePanelThemeStore.current.isDark ? 0.14 : 0.16)
         let font = NSFont.systemFont(ofSize: showsAxisLabels ? 10 : 8.5, weight: .medium)
         var tickAttributes = attributes
         tickAttributes[.font] = font
@@ -600,12 +603,11 @@ final class UsageTrendPlotView: NSView {
 
     private func drawHatch(in rect: NSRect, context: CGContext) {
         guard rect.width > 1, rect.height > 1 else { return }
-        let isBK = UsagePanelThemeStore.current.isDark
         context.saveGState()
         context.clip(to: rect)
-        (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.045 : 0.05).setFill()
+        CCMBColors.ink.withAlphaComponent(0.05).setFill()
         context.fill(rect)
-        (isBK ? NSColor.white : NSColor.labelColor).withAlphaComponent(isBK ? 0.08 : 0.09).setStroke()
+        CCMBColors.ink.withAlphaComponent(0.09).setStroke()
         let path = NSBezierPath()
         path.lineWidth = 0.5
         var offset = -rect.height
@@ -657,13 +659,13 @@ final class UsageTrendPlotView: NSView {
             inProgress = inProgress || bucket.isInProgress
             let partial = !bucket.isInProgress && (bucket.isClipped || bucket.hasGap)
             anyPartial = anyPartial || partial
-            entry.color.setFill()
+            CCMBColors.series(entry.color).setFill()
             NSBezierPath(ovalIn: NSRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)).fill()
             let amount = UsageConsumptionCore.amountTitle(bucket.amount, unit: strip.unitSuffix)
             parts.append("\(prefix)\(amount)\(partial ? "*" : "")")
         }
         guard let hoverX, let range else { return }
-        NSColor.labelColor.withAlphaComponent(0.3).setFill()
+        CCMBColors.ink.withAlphaComponent(0.3).setFill()
         NSBezierPath(rect: NSRect(x: hoverX - 0.5, y: rect.minY, width: 1, height: rect.height)).fill()
 
         let span = "\(Self.hoverTimeFormatter.string(from: range.from))–\(Self.hoverTimeFormatter.string(from: range.to))"
@@ -672,7 +674,7 @@ final class UsageTrendPlotView: NSView {
         var tail = ""
         if anyPartial { tail = " · * 일부만 수집" }
         let text = "\(head) · \(parts.joined(separator: " · "))\(tail)" as NSString
-        let attributes: [NSAttributedString.Key: Any] = [.font: Self.bubbleFont, .foregroundColor: NSColor.white]
+        let attributes: [NSAttributedString.Key: Any] = [.font: Self.bubbleFont, .foregroundColor: NSColor.htt(CCMBColors.tokens.paper)]
         let size = text.size(withAttributes: attributes)
         let bubble = NSRect(
             x: min(max(hoverX - size.width / 2 - 6, rect.minX), max(rect.minX, rect.maxX - size.width - 12)),
@@ -680,7 +682,7 @@ final class UsageTrendPlotView: NSView {
             width: size.width + 12,
             height: size.height + 4
         )
-        NSColor(white: 0.08, alpha: 0.92).setFill()
+        CCMBColors.ink.withAlphaComponent(0.94).setFill()
         NSBezierPath(roundedRect: bubble, xRadius: 5, yRadius: 5).fill()
         text.draw(at: NSPoint(x: bubble.minX + 6, y: bubble.minY + 2), withAttributes: attributes)
     }
@@ -847,13 +849,13 @@ final class UsageHistoryChartView: NSView {
             let hasData = strips[provider] != nil
             let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
             if isSelected {
-                provider.color.withAlphaComponent(0.22).setFill()
+                CCMBColors.series(provider.color).withAlphaComponent(0.22).setFill()
                 path.fill()
-                provider.color.withAlphaComponent(0.85).setStroke()
+                CCMBColors.series(provider.color).withAlphaComponent(0.85).setStroke()
                 path.lineWidth = 1
                 path.stroke()
             } else {
-                (NSColor.labelColor).withAlphaComponent(0.06).setFill()
+                CCMBColors.ink.withAlphaComponent(0.06).setFill()
                 path.fill()
             }
             let color = isSelected ? primary : (hasData ? secondary : secondary.withAlphaComponent(0.5))
@@ -874,7 +876,7 @@ final class UsageHistoryChartView: NSView {
         guard let strip = strips[selected] else { return }
         var currentX = x
         for entry in strip.series {
-            entry.color.setFill()
+            CCMBColors.series(entry.color).setFill()
             NSBezierPath(ovalIn: NSRect(
                 x: currentX,
                 y: y + (Self.legendRowHeight - Self.dotDiameter) / 2,
@@ -884,7 +886,7 @@ final class UsageHistoryChartView: NSView {
             currentX += Self.dotDiameter + 4
             let label = entry.label
             if !label.isEmpty {
-                let attributes: [NSAttributedString.Key: Any] = [.font: Self.legendFont, .foregroundColor: entry.color]
+                let attributes: [NSAttributedString.Key: Any] = [.font: Self.legendFont, .foregroundColor: CCMBColors.series(entry.color)]
                 let size = (label as NSString).size(withAttributes: attributes)
                 (label as NSString).draw(
                     at: NSPoint(x: currentX, y: y + (Self.legendRowHeight - size.height) / 2),

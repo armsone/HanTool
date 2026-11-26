@@ -49,6 +49,14 @@ public enum SettingsHubTab: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
+/// Child screens under the sidebar "브라우저" item. `general` is the remaining browser settings (브라우저 설정).
+public enum BrowserSettingsPane: String, CaseIterable, Identifiable {
+    case general
+    case address
+
+    public var id: String { rawValue }
+}
+
 public enum SettingsOwner: String, CaseIterable, Identifiable {
     case browser = "브라우저"
     case downloads = "다운로드"
@@ -315,6 +323,7 @@ public final class UnifiedNavigationModel: ObservableObject {
     @Published public var activeTranslationChild: String = "mail"
     @Published public var activeInputChild: String = "input.appLanguage"
     @Published public var activeMacManagementChild: String = "macManagement"
+    @Published public var browserSettingsPane: BrowserSettingsPane = .general
     @Published public var isSpeedTestPresented: Bool = false
 
     // Compatibility shims for legacy calls
@@ -570,6 +579,7 @@ public final class UnifiedNavigationModel: ObservableObject {
         switch tab {
         case .webSettings:
             self.settingsOwner = .browser
+            self.browserSettingsPane = .general
             self.activeSettingsLeaf = .browserSettings
         case .downloadSettings:
             self.settingsOwner = .downloads
@@ -613,6 +623,7 @@ public final class UnifiedNavigationModel: ObservableObject {
             self.returnToolID = currentToolID
         }
         self.settingsOwner = owner
+        if owner == .browser { self.browserSettingsPane = .general }
         let targetTab = owner.defaultSettingsTab
         self.settingsTab = targetTab
         switch targetTab {
@@ -628,6 +639,19 @@ public final class UnifiedNavigationModel: ObservableObject {
         }
         self.destination = .settings
         applySettingsTab(targetTab, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
+    }
+
+    /// Opens one child screen under the sidebar "브라우저" item, using the same return context as `openFeatureSettings`.
+    public func openBrowserSettingsPane(
+        _ pane: BrowserSettingsPane,
+        appModel: AppModel,
+        currentToolID: String? = nil,
+        selectTool: (String) -> Void,
+        clearTool: () -> Void
+    ) {
+        openFeatureSettings(for: .browser, appModel: appModel, currentToolID: currentToolID,
+                            selectTool: selectTool, clearTool: clearTool)
+        self.browserSettingsPane = pane
     }
 
     public func openAISettings(
@@ -826,7 +850,7 @@ public final class UnifiedNavigationModel: ObservableObject {
             appModel.selectedTab = .browser
             appModel.isMediaCandidatePresented = true
         } else if item.id == "addressSearch" {
-            selectSettingsTab(.webSettings, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
+            openBrowserSettingsPane(.address, appModel: appModel, selectTool: selectTool, clearTool: clearTool)
         } else if let toolID = item.hostedToolID {
             selectTool(toolID)
         }
@@ -1459,7 +1483,7 @@ public struct DownloadsHubHeaderView: View {
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
                                     .background(
-                                        Capsule().fill(isSelected ? Color.white.opacity(0.3) : palette.accentSoftColor)
+                                        Capsule().fill(isSelected ? palette.onAccentColor.opacity(0.18) : palette.accentSoftColor)
                                     )
                             }
                         }

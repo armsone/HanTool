@@ -1,6 +1,7 @@
 import AppKit
 import HTTCCMB
 import SwiftUI
+import HTTThemeCore
 
 public struct CCMBStatusView: View {
     @ObservedObject private var integration = CCMBIntegration.shared
@@ -17,6 +18,7 @@ public struct CCMBStatusView: View {
             contentView
         }
         .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+        .background(.httPaper)
     }
 
     @ViewBuilder
@@ -31,33 +33,33 @@ public struct CCMBStatusView: View {
             if !integration.isEnabled {
                 Text("꺼짐")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.secondary.opacity(0.12))
+                    .background(.httSurface2)
                     .cornerRadius(4)
             } else if isNASUnconfigured {
                 Text("놀이터(NAS) · 주소 미설정")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.secondary.opacity(0.12))
+                    .background(.httSurface2)
                     .cornerRadius(4)
             } else {
                 HStack(spacing: 4) {
                     Text(sourceTitle)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.httMuted)
                     if let statusText = connectionStatusText {
                         Text("· \(statusText)")
                             .font(.system(size: 11, weight: .regular))
-                            .foregroundColor(connectionStatusColor)
+                            .foregroundStyle(connectionStatusColor)
                     }
                 }
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.10))
+                .background(.httSurface2)
                 .cornerRadius(4)
             }
         }
@@ -93,14 +95,14 @@ public struct CCMBStatusView: View {
         }
     }
 
-    private var connectionStatusColor: Color {
+    private var connectionStatusColor: HTTStyle {
         switch integration.connectionState {
         case .idle, .checking:
-            return .secondary
+            return HTTStyle(.muted)
         case .connected(let authenticated, _):
-            return authenticated ? .green : .orange
+            return authenticated ? HTTStyle(.success) : HTTStyle(.warn)
         case .failed:
-            return .red
+            return HTTStyle(.danger)
         }
     }
 
@@ -111,10 +113,10 @@ public struct CCMBStatusView: View {
                 Spacer()
                 Image(systemName: "server.rack")
                     .font(.system(size: 32))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                 Text("서버 현황 모니터링이 꺼져 있습니다.")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                 Button("서버 현황 설정") {
                     onOpenSettings()
                 }
@@ -128,10 +130,10 @@ public struct CCMBStatusView: View {
                 Spacer()
                 Image(systemName: "network.slash")
                     .font(.system(size: 32))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                 Text("놀이터(NAS) 대상 서버 주소가 설정되지 않았습니다.")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.httMuted)
                 Button("서버 현황 설정") {
                     onOpenSettings()
                 }
@@ -160,7 +162,7 @@ private struct InlineStatusRepresentable: NSViewRepresentable {
         let fallback = NSTextField(labelWithString: "아직 확인되지 않음/갱신 중")
         fallback.font = .systemFont(ofSize: 13, weight: .medium)
         fallback.alignment = .center
-        fallback.textColor = .secondaryLabelColor
+        fallback.textColor = .htt(HTTThemeSnapshot.ccmb.muted)
         return fallback
     }
 

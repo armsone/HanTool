@@ -313,7 +313,12 @@ struct HierarchicalSidebarView: View {
         VStack(spacing: 2) {
             switch dest {
             case .browser:
-                compactSettingsLeaf(for: .browser, label: "브라우저 설정")
+                compactLeaf(icon: "link", label: "주소창 명령", selected: isBrowserPaneSelected(.address)) {
+                    openBrowserPane(.address)
+                }
+                compactLeaf(icon: "gearshape", label: "브라우저 설정", selected: isBrowserPaneSelected(.general)) {
+                    openBrowserPane(.general)
+                }
             case .downloads:
                 compactLeaf(icon: "arrow.down.circle",
                             label: activeQueueCount > 0 ? "진행 중, \(activeQueueCount)개" : "진행 중",
@@ -581,8 +586,54 @@ struct HierarchicalSidebarView: View {
     @ViewBuilder
     private var browserChildren: some View {
         VStack(spacing: 2) {
-            featureSettingsLeaf(for: .browser, label: "브라우저 설정")
+            browserPaneLeaf(.address, label: "주소창 명령", icon: "link")
+            browserPaneLeaf(.general, label: "브라우저 설정", icon: "gearshape")
         }
+    }
+
+    private func isBrowserPaneSelected(_ pane: BrowserSettingsPane) -> Bool {
+        navModel.destination == .settings && navModel.settingsOwner == .browser && navModel.browserSettingsPane == pane
+    }
+
+    private func openBrowserPane(_ pane: BrowserSettingsPane) {
+        navModel.openBrowserSettingsPane(
+            pane,
+            appModel: appModel,
+            currentToolID: hostedToolID,
+            selectTool: selectTool,
+            clearTool: clearHostedTool
+        )
+    }
+
+    /// One child screen under 브라우저 (주소창 · 검색 · 실행 · 브라우저 설정), same row style as the other child leaves.
+    private func browserPaneLeaf(_ pane: BrowserSettingsPane, label: String, icon: String) -> some View {
+        let isSelected = isBrowserPaneSelected(pane)
+        return Button {
+            openBrowserPane(pane)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundColor(isSelected ? palette.accentColor : palette.mutedColor)
+                Text(label)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isSelected ? palette.accentColor : palette.textColor)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.leading, 26)
+            .padding(.trailing, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? palette.accentSoftColor : Color.clear)
+        )
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
     }
 
     @ViewBuilder

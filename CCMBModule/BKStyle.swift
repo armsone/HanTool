@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 
 /// Selectable visual theme for the usage panel based on Byungki-style themes.
 /// Requested themes and order: light, friday, jarvis, ultron.
@@ -24,6 +25,10 @@ enum UsagePanelTheme: String, CaseIterable {
         }
     }
 
+    var paletteID: HTTPaletteID { HTTPaletteID(rawValue: rawValue) ?? .light }
+
+    init(_ id: HTTPaletteID) { self = UsagePanelTheme(rawValue: id.rawValue) ?? .light }
+
     var nextTheme: UsagePanelTheme {
         switch self {
         case .light: return .friday
@@ -33,14 +38,7 @@ enum UsagePanelTheme: String, CaseIterable {
         }
     }
 
-    var palette: BKThemePalette {
-        switch self {
-        case .light: return .light
-        case .friday: return .friday
-        case .jarvis: return .jarvis
-        case .ultron: return .ultron
-        }
-    }
+    var palette: BKThemePalette { BKThemePalette(paletteID.tokens) }
 }
 
 /// Official Byungki-style palette token set
@@ -64,97 +62,16 @@ struct BKThemePalette {
     let danger: NSColor
     let dangerSoft: NSColor
 
-    private static func color(_ hex: UInt32) -> NSColor {
-        let r = CGFloat((hex >> 16) & 0xff) / 255.0
-        let g = CGFloat((hex >> 8) & 0xff) / 255.0
-        let b = CGFloat(hex & 0xff) / 255.0
-        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+    /// 색 값은 HTTThemeCore의 공용 팔레트 하나에서만 온다.
+    init(_ t: HTTPaletteTokens) {
+        bg = .htt(t.paper); card = .htt(t.card); surface = .htt(t.surface); surface2 = .htt(t.surface2)
+        text = .htt(t.ink); text2 = .htt(t.ink2); muted = .htt(t.muted); border = .htt(t.line); border2 = .htt(t.line2)
+        accent = .htt(t.olive); accentStrong = .htt(t.oliveDeep); accentSoft = .htt(t.oliveSoft); onAccent = .htt(t.onAccent)
+        warn = .htt(t.orange); warnSoft = .htt(t.orangeSoft); warnInk = .htt(t.warnInk)
+        danger = .htt(t.red); dangerSoft = .htt(t.redSoft)
     }
-
-    static let light = BKThemePalette(
-        bg: color(0xf5f4f0),
-        card: color(0xfbfaf7),
-        surface: color(0xffffff),
-        surface2: color(0xecebe4),
-        text: color(0x1f211c),
-        text2: color(0x4a4c44),
-        muted: color(0x666860),
-        border: color(0xe2dfd5),
-        border2: color(0xd0cdc0),
-        accent: color(0x5c6b3c),
-        accentStrong: color(0x46532c),
-        accentSoft: color(0xe8ebdb),
-        onAccent: color(0xffffff),
-        warn: color(0x9c5415),
-        warnSoft: color(0xf7e9d8),
-        warnInk: color(0x6d3c10),
-        danger: color(0x9c3b2a),
-        dangerSoft: color(0xf6e3de)
-    )
-
-    static let friday = BKThemePalette(
-        bg: color(0xc8ccd0),
-        card: color(0xd4d8dc),
-        surface: color(0xe0e4e8),
-        surface2: color(0xb8bec4),
-        text: color(0x16191d),
-        text2: color(0x383d44),
-        muted: color(0x4c535c),
-        border: color(0xa8afb7),
-        border2: color(0x8e96a0),
-        accent: color(0x743c16),
-        accentStrong: color(0x6f350c),
-        accentSoft: color(0xb4c0cc),
-        onAccent: color(0xffffff),
-        warn: color(0x855200),
-        warnSoft: color(0xdfd2b5),
-        warnInk: color(0x663a0a),
-        danger: color(0x9e2638),
-        dangerSoft: color(0xdfc2c8)
-    )
-
-    static let jarvis = BKThemePalette(
-        bg: color(0x071a33),
-        card: color(0x0c2748),
-        surface: color(0x11335d),
-        surface2: color(0x173f70),
-        text: color(0xe3edf7),
-        text2: color(0xb9cde3),
-        muted: color(0x93abc6),
-        border: color(0x1d4d7a),
-        border2: color(0x2b87b0),
-        accent: color(0x35c8f0),
-        accentStrong: color(0x8fe3fa),
-        accentSoft: color(0x0e3a5c),
-        onAccent: color(0x04202b),
-        warn: color(0xf0b45c),
-        warnSoft: color(0x3a2d16),
-        warnInk: color(0xf4cf94),
-        danger: color(0xf28b82),
-        dangerSoft: color(0x3d2126)
-    )
-
-    static let ultron = BKThemePalette(
-        bg: color(0x08090c),
-        card: color(0x121418),
-        surface: color(0x1a1d22),
-        surface2: color(0x24282e),
-        text: color(0xf2f3f5),
-        text2: color(0xc7cbd1),
-        muted: color(0xa0a6af),
-        border: color(0x30343b),
-        border2: color(0x515964),
-        accent: color(0xff4d63),
-        accentStrong: color(0xff8795),
-        accentSoft: color(0x35171e),
-        onAccent: color(0x21050a),
-        warn: color(0xe8a24f),
-        warnSoft: color(0x36291a),
-        warnInk: color(0xf2c27f),
-        danger: color(0xff9a9a),
-        dangerSoft: color(0x3e1f22)
-    )
 }
+
 enum UsagePanelThemeStore {
     static let defaultsKey = "usagePanelThemeV1"
 
@@ -191,24 +108,18 @@ enum UsagePanelThemeStore {
         }
     }
 
-    private static var _current: UsagePanelTheme = {
-        let stored = CCMBPreferences.shared.defaults.string(forKey: defaultsKey)
-        let theme = migrate(raw: stored)
-        // Persist immediately before first frame if migrated or missing
-        if stored != theme.rawValue {
-            CCMBPreferences.shared.defaults.set(theme.rawValue, forKey: defaultsKey)
-        }
-        return theme
-    }()
+    /// 업데이트 전에 서버 현황에서만 고른 값. 계정 테마를 읽거나 새로 고르기 전까지 그대로 보인다(지우거나 덮어쓰지 않는다).
+    static var legacyChoice: UsagePanelTheme? {
+        CCMBPreferences.shared.defaults.string(forKey: defaultsKey).map { migrate(raw: $0) }
+    }
 
-    static var current: UsagePanelTheme {
-        get {
-            return _current
-        }
-        set {
-            _current = newValue
-            CCMBPreferences.shared.defaults.set(newValue.rawValue, forKey: defaultsKey)
-        }
+    /// 지금 서버 현황에 적용할 테마(공용 원본).
+    static var current: UsagePanelTheme { UsagePanelTheme(HTTThemeSnapshot.ccmb.id) }
+
+    /// 사용자의 직접 선택. 로그인 상태면 계정에 저장한다.
+    @MainActor
+    static func select(_ theme: UsagePanelTheme) {
+        HTTThemeCenter.shared.select(HTTThemeSelection(theme.paletteID))
     }
 }
 
@@ -219,8 +130,7 @@ enum BKStyleTokens {
     /// Structural accent / signal color from theme palette
     static var signalRed: NSColor { currentPalette.accent }
 
-    static var enamelSurfaceTop: NSColor { currentPalette.card }
-    static var enamelSurfaceBottom: NSColor { currentPalette.surface }
+    static var cardFill: NSColor { currentPalette.card }
     static var panelBackground: NSColor { currentPalette.bg }
     static var wellFill: NSColor { currentPalette.surface2 }
 
@@ -229,11 +139,9 @@ enum BKStyleTokens {
     static var secondaryInk: NSColor { currentPalette.text2 }
     static var mutedInk: NSColor { currentPalette.muted }
 
-    /// Restrained bar colors: green / coral / blue.
-    static let barGreen = NSColor(srgbRed: 0x30 / 255.0, green: 0xA4 / 255.0, blue: 0x6C / 255.0, alpha: 1)
-    static let barCoral = NSColor(srgbRed: 0xEB / 255.0, green: 0x63 / 255.0, blue: 0x4B / 255.0, alpha: 1)
-    static let barBlue = NSColor(srgbRed: 0x4A / 255.0, green: 0x94 / 255.0, blue: 0xE8 / 255.0, alpha: 1)
-    static let barLow = NSColor(srgbRed: 0xF2 / 255.0, green: 0xB6 / 255.0, blue: 0x3C / 255.0, alpha: 1)
+    /// Default bar colors.
+    static var barGreen: NSColor { CCMBColors.success }
+    static var barLow: NSColor { CCMBColors.warn }
     static var barTrack: NSColor { currentPalette.surface2 }
 
     static var chromeLine: NSColor { currentPalette.border }
@@ -246,14 +154,6 @@ enum BKStyleTokens {
     static var cardRim: NSColor { isAccentTheme ? currentPalette.border2 : currentPalette.border }
     static var structureHairline: NSColor {
         isAccentTheme ? currentPalette.accent.withAlphaComponent(0.55) : currentPalette.border2
-    }
-    /// Large canvas wash: blue under Jarvis, neutral graphite canvas under Ultron, coherent wash under Light/Friday.
-    static var canvasWash: NSColor {
-        switch UsagePanelThemeStore.current {
-        case .jarvis: return NSColor(srgbRed: 0x0f / 255.0, green: 0x3a / 255.0, blue: 0x68 / 255.0, alpha: 1)
-        case .ultron: return currentPalette.surface2
-        case .light, .friday: return currentPalette.surface2
-        }
     }
     static var contactShadow: NSColor {
         UsagePanelThemeStore.current.isDark ? NSColor(white: 0, alpha: 0.42) : NSColor(white: 0, alpha: 0.10)
@@ -271,12 +171,8 @@ enum BKStyleTokens {
             yRadius: radius
         ).fill()
 
-        if let gradient = NSGradient(starting: enamelSurfaceTop, ending: enamelSurfaceBottom) {
-            gradient.draw(in: path, angle: -90)
-        } else {
-            enamelSurfaceTop.setFill()
-            path.fill()
-        }
+        cardFill.setFill()
+        path.fill()
 
         // Top highlight kept inside the rim.
         NSGraphicsContext.saveGraphicsState()
@@ -409,5 +305,60 @@ final class BKIconWellView: NSView {
 
         ink.setStroke()
         path.stroke()
+    }
+}
+
+/// 상태·계열 색. 모두 공용 팔레트와 공급자 정체성 색에서 나온다.
+enum CCMBColors {
+    static var tokens: HTTPaletteTokens { HTTThemeSnapshot.ccmb }
+    static var ink: NSColor { .htt(tokens.ink) }
+    static var secondary: NSColor { .htt(tokens.ink2) }
+    static var muted: NSColor { .htt(tokens.muted) }
+    static var line: NSColor { .htt(tokens.line) }
+    static var accent: NSColor { .htt(tokens.olive) }
+    static var success: NSColor { .htt(tokens.success) }
+    static var warn: NSColor { .htt(tokens.orange) }
+    static var danger: NSColor { .htt(tokens.red) }
+    static var info: NSColor { series(UsageBrandColors.geminiMainAccount) }
+
+    /// 밝은 바탕에서는 공급자 색을 먹색 쪽으로 눌러 글자·선이 읽히게 하되 색상 차이는 유지한다.
+    static func series(_ color: NSColor) -> NSColor {
+        guard !tokens.isDark else { return color }
+        return color.blended(withFraction: tokens.id == .friday ? 0.45 : 0.28, of: ink) ?? color
+    }
+
+    /// 밝은 테마의 막대 가장자리(--bar-edge).
+    static func strokeBarEdge(_ path: NSBezierPath) {
+        guard tokens.barEdgeAlpha > 0 else { return }
+        NSColor.htt(tokens.ink, alpha: CGFloat(tokens.barEdgeAlpha)).setStroke()
+        path.lineWidth = 0.5
+        path.stroke()
+    }
+}
+
+/// 처음 만들 때 색을 정하는 화면이 테마 변경 때 다시 칠하는 약속.
+@MainActor
+protocol CCMBThemeRefreshing: AnyObject {
+    func refreshTheme()
+}
+
+@MainActor
+enum CCMBTheme {
+    static var appearance: NSAppearance? {
+        NSAppearance(named: CCMBColors.tokens.isDark ? .darkAqua : .aqua)
+    }
+
+    /// 열려 있는 화면 트리 전체에 현재 팔레트를 바로 적용한다.
+    static func refresh(_ view: NSView) {
+        (view as? CCMBThemeRefreshing)?.refreshTheme()
+        view.needsDisplay = true
+        view.subviews.forEach(refresh)
+    }
+
+    /// 메뉴 안에 놓인 화면은 시스템 메뉴 바탕 대신 팔레트 바탕을 쓴다(패널에서는 패널 배경과 투명도를 유지한다).
+    static func fillMenuBackground(of view: NSView) {
+        guard view.enclosingMenuItem != nil else { return }
+        NSColor.htt(CCMBColors.tokens.paper).setFill()
+        view.bounds.fill()
     }
 }

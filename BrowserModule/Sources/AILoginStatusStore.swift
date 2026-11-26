@@ -1,4 +1,5 @@
 import Foundation
+import HTTThemeCore
 import SwiftUI
 import AppKit
 import WebKit
@@ -180,7 +181,7 @@ public struct AILoginProbeSurfaceView: NSViewRepresentable {
 
         let cover = NSView(frame: container.bounds)
         cover.wantsLayer = true
-        cover.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        cover.layer?.backgroundColor = NSColor.htt(HTTThemeSnapshot.app.paper).cgColor
         cover.autoresizingMask = [.width, .height]
         container.addSubview(cover)
 

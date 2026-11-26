@@ -120,8 +120,8 @@ struct BrowserSetupView: View {
     private func installStep(_ number: Int, _ symbol: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             ZStack {
-                Circle().fill(Color.accentColor.opacity(0.15))
-                Text("\(number)").font(.caption.bold()).foregroundStyle(Color.accentColor)
+                Circle().fill(.tint.opacity(0.15))
+                Text("\(number)").font(.caption.bold()).foregroundStyle(.tint)
             }
             .frame(width: 22, height: 22)
             Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 18)

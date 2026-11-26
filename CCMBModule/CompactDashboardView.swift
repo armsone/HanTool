@@ -1,31 +1,25 @@
 import AppKit
+import HTTThemeCore
 
 /// Color palette and style tokens for the iPhone-style light dashboard.
 enum CCMBDashPalette {
     static var canvasTop: NSColor { UsagePanelThemeStore.current.palette.bg }
-    static var canvasBottom: NSColor { BKStyleTokens.canvasWash }
+    static var canvasBottom: NSColor { canvasTop }
     static var cardBackground: NSColor { UsagePanelThemeStore.current.palette.card }
     static var ink: NSColor { UsagePanelThemeStore.current.palette.text }
     static var muted: NSColor { UsagePanelThemeStore.current.palette.muted }
     static var track: NSColor { UsagePanelThemeStore.current.palette.surface2 }
     static var divider: NSColor { UsagePanelThemeStore.current.palette.border }
     static var codexIconBg: NSColor {
-        switch UsagePanelThemeStore.current {
-        case .ultron:
-            return UsagePanelThemeStore.current.palette.surface2
-        case .jarvis:
-            return NSColor(srgbRed: 0x16 / 255.0, green: 0x23 / 255.0, blue: 0x37 / 255.0, alpha: 1.0)
-        case .light, .friday:
-            return NSColor(srgbRed: 2 / 255.0, green: 23 / 255.0, blue: 44 / 255.0, alpha: 1.0)
-        }
+        UsagePanelThemeStore.current.isDark ? UsagePanelThemeStore.current.palette.surface2 : UsagePanelThemeStore.current.palette.text
     }
 
-    static let codex = NSColor(srgbRed: 16 / 255.0, green: 163 / 255.0, blue: 127 / 255.0, alpha: 1.0)
-    static let claude = NSColor(srgbRed: 250 / 255.0, green: 96 / 255.0, blue: 50 / 255.0, alpha: 1.0)
-    static let fable = NSColor(srgbRed: 80 / 255.0, green: 101 / 255.0, blue: 158 / 255.0, alpha: 1.0)
-    static let geminiMain = NSColor(srgbRed: 66 / 255.0, green: 133 / 255.0, blue: 244 / 255.0, alpha: 1.0)
-    static let geminiSecond = NSColor(srgbRed: 234 / 255.0, green: 67 / 255.0, blue: 53 / 255.0, alpha: 1.0)
-    static let geminiThird = NSColor(srgbRed: 251 / 255.0, green: 188 / 255.0, blue: 5 / 255.0, alpha: 1.0)
+    static let codex = UsageBrandColors.codex
+    static let claude = UsageBrandColors.claude
+    static let fable = UsageBrandColors.claudeFable
+    static let geminiMain = UsageBrandColors.geminiMainAccount
+    static let geminiSecond = UsageBrandColors.geminiSecondAccount
+    static let geminiThird = UsageBrandColors.geminiThirdAccount
     static let cardRadius: CGFloat = 16.0
 }
 /// Thin horizontal remaining fill bar (height 7pt, rounded capsule).
@@ -56,6 +50,7 @@ final class CompactQuotaFillBar: NSView {
         let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
         tint.setFill()
         fillPath.fill()
+        CCMBColors.strokeBarEdge(fillPath)
     }
 }
 
@@ -87,7 +82,7 @@ final class CompactServiceIconView: NSView {
 
             let w = bounds.width
             let h = bounds.height
-            let teal = NSColor(srgbRed: 0.12, green: 0.82, blue: 0.62, alpha: 1.0)
+            let teal = NSColor.htt(HTTProviderColors.codexSpark)
             teal.setStroke()
 
             let chevron = NSBezierPath()
@@ -127,7 +122,7 @@ final class CompactServiceIconView: NSView {
             }
 
         case .gemini(let color):
-            NSColor.white.setFill()
+            UsagePanelThemeStore.current.palette.surface.setFill()
             bgPath.fill()
 
             if let image = CompactServiceIconView.geminiSparkleLogo {
@@ -237,7 +232,7 @@ final class CompactQuotaMetricColumnView: NSView {
     func apply(label: String, value: String, color: NSColor, reset: String) {
         labelField.stringValue = label
         valueField.stringValue = value
-        valueField.textColor = color
+        valueField.textColor = CCMBColors.series(color)
         resetField.stringValue = Self.formatResetDisplay(reset)
     }
 
@@ -308,9 +303,6 @@ class CompactAccountCardBaseView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         titleLabel.textColor = CCMBDashPalette.ink
         accountLabel.textColor = CCMBDashPalette.muted
-        if noticeLabel.textColor != .systemRed && noticeLabel.textColor != .systemOrange {
-            noticeLabel.textColor = CCMBDashPalette.muted
-        }
         super.draw(dirtyRect)
         let cardPath = NSBezierPath(roundedRect: bounds, xRadius: Self.cardRadius, yRadius: Self.cardRadius)
         CCMBDashPalette.cardBackground.setFill()
@@ -369,7 +361,7 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
     private let voucherValue: NSTextField = {
         let field = NSTextField(labelWithString: "—")
         field.font = .monospacedDigitSystemFont(ofSize: 20, weight: .bold)
-        field.textColor = CCMBDashPalette.codex
+        field.textColor = CCMBColors.series(CCMBDashPalette.codex)
         field.alignment = .center
         field.maximumNumberOfLines = 1
         field.lineBreakMode = .byClipping
@@ -420,6 +412,7 @@ final class CompactCodexCardView: CompactAccountCardBaseView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        voucherValue.textColor = CCMBColors.series(CCMBDashPalette.codex)
         tokenLabel.textColor = CCMBDashPalette.muted
         tokenValue.textColor = CCMBDashPalette.ink
         voucherLabel.textColor = CCMBDashPalette.muted
@@ -666,6 +659,11 @@ final class CompactGeminiCardView: CompactAccountCardBaseView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        divider.layer?.backgroundColor = CCMBDashPalette.divider.cgColor
+        super.draw(dirtyRect)
     }
 
     func apply(

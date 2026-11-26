@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 import Darwin
 import Foundation
 import Network
@@ -1237,6 +1238,8 @@ private extension FileHandle {
 
 @MainActor
 final class AppDelegate: NSObject, NSMenuDelegate {
+    private var themeObserver: NSObjectProtocol?
+    private var appliedPaletteID: HTTPaletteID?
     var callbacks = HTTCCMBRuntime.HostCallbacks()
     var isMenuBarVisible: Bool = true
     fileprivate(set) var isStopped = false
@@ -1627,6 +1630,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             name: NSWorkspace.screensDidWakeNotification,
             object: nil
         )
+        HTTThemeCenter.shared.registerCCMBLegacy(UsagePanelThemeStore.legacyChoice?.paletteID)
         loadConsumptionTrackers()
         loadNASCaches()
         lastGeminiOnlineSnapshot = GeminiOnlineUsageCore.loadPersistedSnapshot(defaults: CCMBPreferences.shared.defaults)
@@ -1644,11 +1648,35 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         refreshClaudeUsage()
         refreshGeminiUsage()
         refreshGrokUsage()
+        themeObserver = NotificationCenter.default.addObserver(
+            forName: HTTThemeCenter.didChangeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.applyThemeIfChanged() }
+        }
+        applyThemeIfChanged()
+    }
+
+    /// 팔레트가 바뀌면 열려 있는 메뉴·패널·작업 창 화면을 바로 다시 칠한다.
+    private func applyThemeIfChanged() {
+        let id = HTTThemeSnapshot.ccmb.id
+        guard !isStopped, id != appliedPaletteID else { return }
+        appliedPaletteID = id
+        diagnosticLog.log("panel_theme_changed", ["theme": .string(id.rawValue)])
+        statusMenu?.appearance = CCMBTheme.appearance
+        updateSplitPanel()
+        updatePanelHeaders()
+        [menuHeaderView, splitPanelView, menuRefreshControlsView, historyChartView,
+         usagePageLinksView, updateVersionView, lifecycleActionsView].forEach { CCMBTheme.refresh($0) }
+        statusDropdownController.refreshTheme()
+        pinnedUsageWindowController?.refreshTheme()
+        inlineStatusViews.compactMap(\.value).forEach { CCMBTheme.refresh($0) }
     }
 
     func stop() {
         guard !isStopped else { return }
         isStopped = true
+        if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) }
+        themeObserver = nil
         for observer in inlineStatusViews {
             observer.value?.apply(nil)
         }
@@ -1752,6 +1780,8 @@ final class AppDelegate: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         diagnosticLog.log("menu_open")
+        // 서버 현황 메뉴를 여는 것도 "다시 읽기" 계기다. 하나 패널이 닫혀 있어도 기존 로그인 세션으로 계정 테마만 읽는다(쓰기 없음).
+        HTTThemeCenter.shared.requestAccountRefresh()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -2263,6 +2293,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         statusItem.button?.setAccessibilityValue("사용량 확인 중")
 
         let menu = NSMenu()
+        menu.appearance = CCMBTheme.appearance
         menu.autoenablesItems = false
         // Status-item menus anchor their trailing edge beneath the status
         // button. Matching the dashboard width keeps the rightmost Gemini
@@ -3720,8 +3751,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     /// Applies a theme choice from any panel header, then re-renders every
     /// panel instance from the same stored value so they never disagree.
     private func applyPanelTheme(_ theme: UsagePanelTheme) {
-        UsagePanelThemeStore.current = theme
-        diagnosticLog.log("panel_theme_changed", ["theme": .string(theme.rawValue)])
+        // 저장과 다시 그리기는 공용 원본의 변경 알림이 처리한다.
         updateSplitPanel()
     }
 
@@ -3748,10 +3778,10 @@ final class AppDelegate: NSObject, NSMenuDelegate {
     /// any) and whether the values shown are older than the latest read.
     private static func nasStatus(issue: String?, isStale: Bool) -> (lines: [String], color: NSColor) {
         switch (issue, isStale) {
-        case (let issue?, true): return (["오래된 정보 · \(issue)"], .systemOrange)
-        case (let issue?, false): return (["갱신 실패: \(issue)"], .systemRed)
-        case (nil, true): return (["오래된 정보"], .systemOrange)
-        case (nil, false): return ([], .secondaryLabelColor)
+        case (let issue?, true): return (["오래된 정보 · \(issue)"], CCMBColors.warn)
+        case (let issue?, false): return (["갱신 실패: \(issue)"], CCMBColors.danger)
+        case (nil, true): return (["오래된 정보"], CCMBColors.warn)
+        case (nil, false): return ([], CCMBColors.secondary)
         }
     }
 
@@ -3764,7 +3794,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         detail: String? = nil,
         accountLine: String = "계정 정보 없음",
         extraAccountLines: [String] = [],
-        statusColor: NSColor = .secondaryLabelColor
+        statusColor: NSColor = CCMBColors.secondary
     ) -> UsagePanelColumn {
         UsagePanelColumn(
             title: title,
@@ -3789,7 +3819,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 accentColor: UsageBrandColors.codex,
                 reason: slot.issue.map { "갱신 실패: \($0)" } ?? "놀이터 값을 기다리는 중",
                 accountLine: Self.nasAccountLine,
-                statusColor: slot.issue == nil ? .secondaryLabelColor : .systemRed
+                statusColor: slot.issue == nil ? CCMBColors.secondary : CCMBColors.danger
             )
         }
         return Self.codexColumn(from: snapshot, nasSlot: slot)
@@ -3803,7 +3833,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 accentColor: UsageBrandColors.claude,
                 reason: slot.issue.map { "갱신 실패: \($0)" } ?? "놀이터 값을 기다리는 중",
                 accountLine: Self.nasAccountLine,
-                statusColor: slot.issue == nil ? .secondaryLabelColor : .systemRed
+                statusColor: slot.issue == nil ? CCMBColors.secondary : CCMBColors.danger
             )
         }
         return Self.claudeColumn(
@@ -3872,7 +3902,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             refreshLine: accounts.map { label, snapshot in
                 snapshot?.publishedAt.map { "\(label) \(Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()))" } ?? "\(label) 미수집"
             }.joined(separator: " · "),
-            statusLines: statuses, statusColor: statuses.isEmpty ? .secondaryLabelColor : .systemOrange,
+            statusLines: statuses, statusColor: statuses.isEmpty ? CCMBColors.secondary : CCMBColors.warn,
             supplementalQuotas: supplementalQuotas
         )
     }
@@ -3970,7 +4000,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         } else {
             status = (
                 fetchFailureLabel.map { ["갱신 실패: \($0)"] } ?? [],
-                fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+                fetchFailureLabel == nil ? CCMBColors.secondary : CCMBColors.danger
             )
         }
         return UsagePanelColumn(
@@ -4016,7 +4046,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 accountLines: ["계정 정보 없음"],
                 refreshLine: nil,
                 statusLines: statusLines,
-                statusColor: rateLimitLabel != nil ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+                statusColor: rateLimitLabel != nil ? CCMBColors.warn : (failureLabel == nil ? CCMBColors.secondary : CCMBColors.danger)
             )
         }
 
@@ -4141,7 +4171,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 status.lines.append("\(Self.resetDateTimeTitle(retryAt)) 이후 다시 조회")
             }
             if status.lines.isEmpty, let unavailable = claudeUnavailableState(from: snapshot, now: Date()) {
-                status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))"], .systemOrange)
+                status = (["\(unavailable.reason) · \(Self.resetDateTimeTitle(unavailable.until))"], CCMBColors.warn)
             }
             return UsagePanelColumn(
                 title: "Claude",
@@ -4177,7 +4207,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
             accountLines: accountLines,
             refreshLine: refreshLine,
             statusLines: statusLines,
-            statusColor: rateLimitLabel != nil || !isCurrent ? .systemOrange : (failureLabel == nil ? .secondaryLabelColor : .systemRed)
+            statusColor: rateLimitLabel != nil || !isCurrent ? CCMBColors.warn : (failureLabel == nil ? CCMBColors.secondary : CCMBColors.danger)
         )
     }
 
@@ -4330,21 +4360,21 @@ final class AppDelegate: NSObject, NSMenuDelegate {
         rowGroups.append(UsagePanelRowGroup(rows: rows))
 
         var statusLines: [String] = []
-        var statusColor = NSColor.secondaryLabelColor
+        var statusColor = CCMBColors.secondary
         if isNAS {
             let status = Self.nasStatus(issue: fetchFailureLabel, isStale: isStale)
             statusLines = status.lines
             statusColor = status.color
         } else if let fetchFailureLabel {
             statusLines.append("CLI 갱신 실패: \(fetchFailureLabel)")
-            statusColor = .systemRed
+            statusColor = CCMBColors.danger
         }
         if !isNAS && geminiOnlineParseFailed {
             statusLines.append("온라인 확인 불가")
-            statusColor = .systemOrange
+            statusColor = CCMBColors.warn
         } else if let online, !GeminiOnlineUsageCore.isFresh(fetchedAt: online.fetchedAt, now: now) {
             statusLines.append("온라인 마지막 값")
-            statusColor = .systemOrange
+            statusColor = CCMBColors.warn
         }
 
         return UsagePanelColumn(
@@ -4407,7 +4437,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 accountLines: ["계정 정보 없음"],
                 refreshLine: nil,
                 statusLines: statusLines,
-                statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+                statusColor: fetchFailureLabel == nil ? CCMBColors.secondary : CCMBColors.danger
             )
         }
 
@@ -4497,7 +4527,7 @@ final class AppDelegate: NSObject, NSMenuDelegate {
                 "업데이트 \(relativeFormatter.localizedString(for: $0, relativeTo: Date()))"
             },
             statusLines: statusLines,
-            statusColor: fetchFailureLabel == nil ? .secondaryLabelColor : .systemRed
+            statusColor: fetchFailureLabel == nil ? CCMBColors.secondary : CCMBColors.danger
         )
     }
 
@@ -5641,18 +5671,29 @@ final class AppDelegate: NSObject, NSMenuDelegate {
 }
 
 @MainActor
-final class CCMBInlineStatusContainerView: NSView {
+final class CCMBInlineStatusContainerView: NSView, CCMBThemeRefreshing {
     private let splitPanelView = SplitUsagePanelView()
     private let unavailableLabel: NSTextField = {
         let field = NSTextField(labelWithString: "아직 확인되지 않음/갱신 중")
         field.font = .systemFont(ofSize: 13, weight: .medium)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.alignment = .center
         field.lineBreakMode = .byWordWrapping
         return field
     }()
 
     override var isFlipped: Bool { true }
+
+    func refreshTheme() {
+        appearance = CCMBTheme.appearance
+        unavailableLabel.textColor = CCMBColors.secondary
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        NSColor.htt(CCMBColors.tokens.paper).setFill()
+        bounds.fill()
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: 100))
@@ -5663,6 +5704,7 @@ final class CCMBInlineStatusContainerView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("서버 현황 패널")
+        refreshTheme()
     }
 
     required init?(coder: NSCoder) {

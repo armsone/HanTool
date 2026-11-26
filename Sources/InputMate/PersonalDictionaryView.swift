@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 // 개인 변환 사전: 직접 추가한 단어와 성공한 수동 변환('') 결과를 추가·수정·삭제하는 설정 항목. 목록은 이 Mac에만 저장된다.
 @MainActor
@@ -68,7 +69,7 @@ struct PersonalDictionaryView: View {
                 if let notice {
                     Text(notice.text)
                         .font(.caption)
-                        .foregroundStyle(notice.isError ? Color.red : Color.secondary)
+                        .foregroundStyle(notice.isError ? HTTStyle(.danger) : HTTStyle(.muted))
                 }
 
                 HStack(spacing: 8) {
@@ -166,7 +167,7 @@ struct PersonalDictionaryView: View {
             .contentShape(Rectangle())
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+            .background(isSelected ? AnyShapeStyle(.tint.opacity(0.18)) : AnyShapeStyle(.clear))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)

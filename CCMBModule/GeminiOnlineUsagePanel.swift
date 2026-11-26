@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 import Foundation
 import WebKit
 
@@ -151,14 +152,14 @@ final class GeminiOnlineWebController: NSObject, WKNavigationDelegate, NSWindowD
         bar.autoresizingMask = [.width]
         let label = NSTextField(labelWithString: "")
         label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
+        label.textColor = CCMBColors.secondary
         label.lineBreakMode = .byTruncatingTail
         label.frame = NSRect(x: 10, y: 7, width: contentRect.width - 130, height: 16)
         label.autoresizingMask = [.width]
         statusLabel = label
         bar.addSubview(label)
 
-        let readButton = NSButton(title: "사용량 다시 읽기", target: self, action: #selector(rereadUsage))
+        let readButton = RolloverButton(title: "사용량 다시 읽기", target: self, action: #selector(rereadUsage))
         readButton.bezelStyle = .rounded
         readButton.controlSize = .small
         readButton.font = .systemFont(ofSize: 11)
@@ -168,6 +169,8 @@ final class GeminiOnlineWebController: NSObject, WKNavigationDelegate, NSWindowD
         bar.addSubview(readButton)
         root.addSubview(bar)
 
+        panel.appearance = CCMBTheme.appearance
+        panel.backgroundColor = .htt(CCMBColors.tokens.paper)
         panel.contentView = root
         panel.center()
         window = panel

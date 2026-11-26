@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 /// 확인 결과 목록. 각 항목을 개별 선택할 수 있고 종류별 필터·경로 검색·전체 선택·해제를 제공한다.
 struct CandidateListView: View {
@@ -58,7 +59,7 @@ struct CandidateListView: View {
             if !scan.isComplete {
                 Label(incompleteText, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -68,7 +69,7 @@ struct CandidateListView: View {
                     VStack(spacing: 8) {
                         Image(systemName: scan.isComplete ? "checkmark.seal.fill" : "questionmark.circle.fill")
                             .font(.system(size: 36))
-                            .foregroundStyle(scan.isComplete ? Color.green : Color.orange)
+                            .foregroundStyle(scan.isComplete ? HTTStyle(.success) : HTTStyle(.warn))
                         Text(scan.isComplete
                              ? "이 볼륨에는 정리할 파일이 없습니다."
                              : "확인한 범위에서는 정리할 파일이 없습니다. 확인하지 못한 폴더가 있어 볼륨 전체가 깨끗하다고 말할 수는 없습니다.")

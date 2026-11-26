@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import SwiftUI
 import HTTHTDCore
+import HTTThemeCore
 
 /// HTT 루트 호스트와 HTTHTDCore 모듈 간의 단일 창·통합 사이드바·도구 라우팅 브리지.
 @MainActor
@@ -11,10 +12,8 @@ public final class UnifiedBrowserManager {
 
     private var isUpdatingFromModule = false
     private var isUpdatingFromHost = false
-    private var isSyncingTheme = false
     private var isInitialized = false
     private var hostedToolCancellable: AnyCancellable?
-    private var themeCancellable: AnyCancellable?
 
     private init() {}
 
@@ -41,9 +40,9 @@ public final class UnifiedBrowserManager {
                 return false
             }
             isInitialized = true
-            setupThemeSynchronization()
-            syncTheme()
             subscribeToHostedToolChanges()
+            // 브라우저 구성(AppModel)이 만들어진 다음 차례에 계정 테마를 읽는다.
+            DispatchQueue.main.async { HTTThemeCenter.shared.requestAccountRefresh() }
         }
         return true
     }
@@ -184,38 +183,10 @@ public final class UnifiedBrowserManager {
         HTDHostExport.shared.terminateBrowserExecution()
     }
 
-    /// 현재 호스트 테마를 모듈에 동기화
-    public func syncTheme() {
-        syncTheme(HTTAppearanceStore.shared.theme)
-    }
-
-    private func syncTheme(_ theme: HTTTheme) {
-        guard isInitialized, !isSyncingTheme else { return }
-        isSyncingTheme = true
-        defer { isSyncingTheme = false }
-        let rawTheme = theme.rawValue
-        HTDHostExport.shared.setTheme(rawTheme)
-    }
-
-    /// 루트 HTTAppearanceStore와 모듈 HTDHostExport 간의 양방향 테마 동기화 설정
-    private func setupThemeSynchronization() {
-        HTDHostExport.shared.onThemeChanged = { [weak self] rawValue in
-            guard let self = self, !self.isSyncingTheme else { return }
-            let mappedTheme = HTTTheme.from(storedString: rawValue)
-            if HTTAppearanceStore.shared.theme != mappedTheme {
-                self.isSyncingTheme = true
-                HTTAppearanceStore.shared.theme = mappedTheme
-                self.isSyncingTheme = false
-            }
-        }
-
-        guard themeCancellable == nil else { return }
-        themeCancellable = HTTAppearanceStore.shared.$theme
-            .dropFirst()
-            .removeDuplicates()
-            .sink { [weak self] theme in
-                self?.syncTheme(theme)
-            }
+    /// 계정 테마를 읽고 쓰는 통로(하나 웹 세션). 브라우저 자료 준비가 끝나지 않았으면 아직 만들지 않는다.
+    public func accountThemeTransport() -> HTTAccountThemeTransport? {
+        guard isInitialized || BrowserDataMigration.isReadyWithoutPrompt else { return nil }
+        return HTDThemeSync.transport()
     }
 
     /// 모듈 내 도구 선택 상태를 관찰하여 도구가 해제(nil)되고 네이티브 작업 공간으로 전환될 때 캡처 중단 상태를 정리한다.

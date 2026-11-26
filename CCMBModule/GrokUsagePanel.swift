@@ -436,5 +436,5 @@ enum GrokAuthenticationClient {
 /// the X social-network logo — a plain code-native prompt chevron in the
 /// same neutral ink the rest of CCMB's UI already uses for secondary text.
 enum GrokBrandColor {
-    static let mark = NSColor.labelColor.withAlphaComponent(0.72)
+    static var mark: NSColor { CCMBColors.ink.withAlphaComponent(0.72) }
 }

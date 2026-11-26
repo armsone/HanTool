@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 import Foundation
 
 /// Reads Claude Code's non-secret cached account metadata only. The OAuth
@@ -176,7 +177,7 @@ struct UsagePanelQuotaGroup {
         quotaGradients: [[NSColor]?] = [],
         detailLines: [String] = [],
         statusLine: String? = nil,
-        statusColor: NSColor = .secondaryLabelColor,
+        statusColor: NSColor = CCMBColors.secondary,
         action: UsagePanelGroupAction? = nil,
         glyph: BKIconGlyph = .gauge
     ) {
@@ -278,7 +279,7 @@ struct UsageHistoryStrip {
     }
 
     /// The ordinary meter's colour, used for the column's identity mark.
-    var color: NSColor { series.first?.color ?? .controlAccentColor }
+    var color: NSColor { series.first?.color ?? CCMBColors.accent }
 }
 
 struct UsagePanelColumn {
@@ -370,10 +371,10 @@ private final class UsageRingView: NSView {
     private static let ornamentInset: CGFloat = 7.5
 
     var lineWidth: CGFloat = 4.5
-    var trackColor: NSColor = .quaternaryLabelColor {
+    var trackColor: NSColor = CCMBColors.line {
         didSet { needsDisplay = true }
     }
-    var progressColor: NSColor = .controlAccentColor {
+    var progressColor: NSColor = CCMBColors.accent {
         didSet { needsDisplay = true }
     }
     var fraction: Double = 0 {
@@ -419,7 +420,7 @@ private final class UsageRingView: NSView {
         let radius = diameter / 2
 
         let face = NSBezierPath(ovalIn: squareRect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2))
-        NSColor.controlBackgroundColor.withAlphaComponent(0.16).setFill()
+        BKStyleTokens.currentPalette.surface.withAlphaComponent(0.16).setFill()
         face.fill()
 
         let innerRim = NSBezierPath()
@@ -430,7 +431,7 @@ private final class UsageRingView: NSView {
             endAngle: 360
         )
         innerRim.lineWidth = 1
-        NSColor.labelColor.withAlphaComponent(0.08).setStroke()
+        CCMBColors.ink.withAlphaComponent(0.08).setStroke()
         innerRim.stroke()
 
         let track = NSBezierPath()
@@ -638,7 +639,7 @@ private final class UsageRowBackgroundView: NSView {
         super.draw(dirtyRect)
         // Read-only metrics are table rows, not controls. A single hairline
         // separates them without the rounded filled surface used by buttons.
-        NSColor.separatorColor.withAlphaComponent(0.45).setFill()
+        CCMBColors.line.setFill()
         NSBezierPath.fill(NSRect(x: 4, y: bounds.maxY - 1, width: max(0, bounds.width - 8), height: 1))
     }
 }
@@ -651,20 +652,20 @@ private final class UsageMetricRowView: NSView {
     private static let minimumValueWidth: CGFloat = 88
 
     private let backgroundView = UsageRowBackgroundView()
-    private let labelField = UsageMetricRowView.makeLabel(color: .secondaryLabelColor, size: 11.5, weight: .regular)
+    private let labelField = UsageMetricRowView.makeLabel(color: CCMBColors.secondary, size: 11.5, weight: .regular)
     private let valueField: NSTextField = {
-        let field = UsageMetricRowView.makeLabel(color: .labelColor, size: 12, weight: .regular)
+        let field = UsageMetricRowView.makeLabel(color: CCMBColors.ink, size: 12, weight: .regular)
         field.alignment = .right
         return field
     }()
     private let detailField: NSTextField = {
-        let field = UsageMetricRowView.makeLabel(color: .secondaryLabelColor, size: 10, weight: .regular)
+        let field = UsageMetricRowView.makeLabel(color: CCMBColors.secondary, size: 10, weight: .regular)
         field.maximumNumberOfLines = 0
         field.cell?.usesSingleLineMode = false
         return field
     }()
     private let actionButton: NSButton = {
-        let button = NSButton(title: "", target: nil, action: nil)
+        let button = RolloverButton(title: "", target: nil, action: nil)
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.font = .systemFont(ofSize: 11, weight: .medium)
@@ -720,7 +721,7 @@ private final class UsageMetricRowView: NSView {
         paragraph.paragraphSpacingBefore = 0
         detailField.attributedStringValue = NSAttributedString(string: row.detail ?? "", attributes: [
             .font: NSFont.systemFont(ofSize: 10),
-            .foregroundColor: detailField.textColor ?? NSColor.secondaryLabelColor,
+            .foregroundColor: detailField.textColor ?? CCMBColors.secondary,
             .paragraphStyle: paragraph
         ])
         if let action = row.action {
@@ -934,7 +935,7 @@ private final class UsageInUseBadgeView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let accent = label.textColor ?? .controlAccentColor
+        let accent = label.textColor ?? CCMBColors.accent
         let pill = NSBezierPath(
             roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
             xRadius: bounds.height / 2,
@@ -958,7 +959,7 @@ private final class UsageSectionHeaderView: NSView {
     private let titleLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .semibold)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.lineBreakMode = .byClipping
         return field
     }()
@@ -1015,7 +1016,7 @@ private final class UsageQuotaGroupView: NSView {
     private let contextLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 9, weight: .regular)
-        field.textColor = .tertiaryLabelColor
+        field.textColor = CCMBColors.muted
         field.lineBreakMode = .byClipping
         return field
     }()
@@ -1025,13 +1026,13 @@ private final class UsageQuotaGroupView: NSView {
         let field = NSTextField(labelWithString: "")
         field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
         field.alignment = .center
-        field.textColor = NSColor.labelColor.withAlphaComponent(0.60)
+        field.textColor = CCMBColors.secondary
         return field
     }
     private let captionLabels: [NSTextField] = (0..<2).map { _ in
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10, weight: .medium)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.alignment = .center
         field.lineBreakMode = .byClipping
         return field
@@ -1039,7 +1040,7 @@ private final class UsageQuotaGroupView: NSView {
     private let detailLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 9.5)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         return field
     }()
     private let statusLabel: NSTextField = {
@@ -1317,6 +1318,7 @@ final class UsageHorizontalMeterView: NSView {
         let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
         barColor.setFill()
         fillPath.fill()
+        CCMBColors.strokeBarEdge(fillPath)
     }
 }
 
@@ -1476,6 +1478,8 @@ private final class GeminiAccountRowView: NSView {
         titleLabel.stringValue = accountTitle
         titleLabel.textColor = BKStyleTokens.charcoalInk
         dotView.layer?.backgroundColor = color.cgColor
+        dotView.layer?.borderWidth = CCMBColors.tokens.barEdgeAlpha > 0 ? 0.5 : 0
+        dotView.layer?.borderColor = CCMBColors.ink.withAlphaComponent(CGFloat(CCMBColors.tokens.barEdgeAlpha)).cgColor
         for view in [dotView, titleLabel] { view.toolTip = identityTip.isEmpty ? nil : identityTip }
         dotView.setAccessibilityElement(false)
         titleLabel.setAccessibilityLabel("\(accountTitle) 계정")
@@ -1538,14 +1542,14 @@ private final class UsageColumnView: NSView {
     private let accountLabel: NSTextField = {
         let field = NSTextField(wrappingLabelWithString: "")
         field.font = .systemFont(ofSize: 10)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.lineBreakMode = .byTruncatingMiddle
         return field
     }()
     private let refreshLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.lineBreakMode = .byClipping
         return field
     }()
@@ -1945,32 +1949,30 @@ enum UsagePanelLayout {
     }
 }
 
-/// Native rounded button with a deliberately quiet rollover. Custom views in
+/// Rounded button painted with the shared palette, with a deliberately quiet rollover. Custom views in
 /// an `NSMenu` do not always receive AppKit's usual hover treatment, so the
-/// bezel gets a light tint only while the pointer is over an enabled button.
+/// surface changes only while the pointer is over an enabled button.
 @MainActor
 class RolloverButton: NSButton {
     private var hoverTrackingArea: NSTrackingArea?
-    private var restingAttributedTitle: NSAttributedString?
-    /// The resting `contentTintColor`, captured once the button lands in a
-    /// window. When `hoverTintColor` is set, the button reverts to this
-    /// (normally still `nil`, i.e. the system default) once the pointer
-    /// leaves, instead of staying stuck on the hover color.
-    private var restingTintColor: NSColor?
-    /// When set, the button's foreground/bezel stay neutral at rest and only
-    /// switch to this color while the pointer is over the button — used by
+    private var isHovering = false { didSet { needsDisplay = true } }
+    /// Brand color the title takes only while the pointer is over the button — used by
     /// controls that should read as quiet until rollover names their brand.
-    /// `nil` preserves the earlier bezel-only rollover, which leaves
-    /// `contentTintColor` exactly as the caller configured it.
     var hoverTintColor: NSColor?
+    /// Brand color the title always carries (refresh cadence controls).
+    var restingTitleColor: NSColor? { didSet { needsDisplay = true } }
+    /// Theme selector in dark themes: the current selection carries the accent.
+    var usesAccentTitle = false { didSet { needsDisplay = true } }
 
     /// Enabled buttons always read at full strength; only a truly disabled
-    /// button is dimmed (on top of AppKit's own disabled rendering).
+    /// button is dimmed.
     private var restingAlpha: CGFloat { isEnabled ? 1 : 0.5 }
 
     override var isEnabled: Bool {
         didSet { alphaValue = restingAlpha }
     }
+
+    override var wantsUpdateLayer: Bool { false }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1984,41 +1986,60 @@ class RolloverButton: NSButton {
         addTrackingArea(area)
         hoverTrackingArea = area
         alphaValue = restingAlpha
-        restingTintColor = contentTintColor
     }
 
     override func mouseEntered(with event: NSEvent) {
         guard isEnabled else { return }
-        let tint = hoverTintColor ?? contentTintColor ?? .controlAccentColor
         alphaValue = 1
-        contentTintColor = tint
-        bezelColor = tint.withAlphaComponent(0.18)
-        if hoverTintColor != nil {
-            restingAttributedTitle = attributedTitle.copy() as? NSAttributedString
-            let coloredTitle = NSMutableAttributedString(attributedString: attributedTitle)
-            if coloredTitle.length == 0, !title.isEmpty {
-                coloredTitle.append(NSAttributedString(
-                    string: title,
-                    attributes: [.font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]
-                ))
-            }
-            coloredTitle.addAttribute(
-                .foregroundColor,
-                value: tint,
-                range: NSRange(location: 0, length: coloredTitle.length)
-            )
-            attributedTitle = coloredTitle
-        }
+        isHovering = true
     }
 
     override func mouseExited(with event: NSEvent) {
         alphaValue = restingAlpha
-        contentTintColor = restingTintColor
-        bezelColor = nil
-        if let restingAttributedTitle {
-            attributedTitle = restingAttributedTitle
-            self.restingAttributedTitle = nil
+        isHovering = false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let palette = BKStyleTokens.currentPalette
+        let box = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
+        (isHighlighted ? palette.accentSoft : (isHovering ? palette.surface2 : palette.surface)).setFill()
+        box.fill()
+        (isHovering ? palette.accent : palette.border2).setStroke()
+        box.lineWidth = 1
+        box.stroke()
+
+        let color: NSColor
+        if isHovering, let hoverTintColor {
+            color = CCMBColors.series(hoverTintColor)
+        } else if let restingTitleColor {
+            color = CCMBColors.series(restingTitleColor)
+        } else {
+            color = usesAccentTitle ? palette.accentStrong : palette.text
         }
+
+        if imagePosition == .imageOnly, let image {
+            let tinted = image.withSymbolConfiguration(.init(paletteColors: [color])) ?? image
+            let size = tinted.size
+            tinted.draw(
+                in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                           width: size.width, height: size.height),
+                from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil
+            )
+            return
+        }
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byTruncatingTail
+        let text = NSAttributedString(string: title, attributes: [
+            .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .foregroundColor: color,
+            .paragraphStyle: style
+        ])
+        let height = ceil(text.size().height)
+        text.draw(
+            with: NSRect(x: 4, y: bounds.midY - height / 2, width: max(0, bounds.width - 8), height: height),
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine]
+        )
     }
 }
 
@@ -2055,7 +2076,7 @@ final class PanelBackgroundView: NSVisualEffectView {
         material = theme.isDark ? .hudWindow : .popover
         bkTintView.isHidden = false
         let palette = theme.palette
-        bkTintView.layer?.backgroundColor = palette.bg.withAlphaComponent(theme.isDark ? 0.94 : 0.96).cgColor
+        bkTintView.layer?.backgroundColor = palette.bg.cgColor
         // Window rim: cyan under Jarvis, crimson under Ultron; none for the light themes.
         // Drawn by `rimView` so it stacks above the opaque dashboard body.
         rimView.layer?.borderWidth = theme.isDark ? 1 : 0
@@ -2127,6 +2148,7 @@ final class SplitUsagePanelView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
         for rect in cardRects {
             BKStyleTokens.drawCard(in: rect, radius: 9)
         }
@@ -2194,16 +2216,10 @@ final class ThemeControlButton: RolloverButton {
     func updateDisplay() {
         let theme = UsagePanelThemeStore.current
         title = "테마 · \(theme.displayName)"
-        if theme.isDark {
-            // Current-selection label carries the theme accent; same text, same width.
-            let style = NSMutableParagraphStyle()
-            style.alignment = .center
-            attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: font ?? NSFont.systemFont(ofSize: 11),
-                .foregroundColor: theme.palette.accentStrong,
-                .paragraphStyle: style
-            ])
-        }
+        // Current-selection label carries the theme accent in dark themes.
+        usesAccentTitle = theme.isDark
+        toolTip = HTTThemeCenter.shared.status.label
+        needsDisplay = true
         let next = theme.nextTheme
         let accessibleLabel = "병기스타일 테마: \(theme.displayName) (누르면 \(next.displayName), 길게 누르면 목록)"
         setAccessibilityLabel(accessibleLabel)
@@ -2254,7 +2270,7 @@ final class ThemeControlButton: RolloverButton {
     func cycleNextTheme() {
         let current = UsagePanelThemeStore.current
         let next = current.nextTheme
-        UsagePanelThemeStore.current = next
+        UsagePanelThemeStore.select(next)
         onSelect?(next)
         updateDisplay()
     }
@@ -2280,6 +2296,11 @@ final class ThemeControlButton: RolloverButton {
             item.state = theme == current ? .on : .off
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        let note = NSMenuItem(title: HTTThemeCenter.shared.status.label, action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        menu.addItem(note)
+        menu.appearance = CCMBTheme.appearance
         _ = menu.popUp(positioning: nil, at: screenOrigin, in: nil)
     }
 
@@ -2287,7 +2308,7 @@ final class ThemeControlButton: RolloverButton {
         guard let raw = sender.representedObject as? String,
               let theme = UsagePanelTheme(rawValue: raw)
         else { return }
-        UsagePanelThemeStore.current = theme
+        UsagePanelThemeStore.select(theme)
         onSelect?(theme)
         updateDisplay()
     }
@@ -2362,17 +2383,17 @@ final class TaskStatusPillView: NSView {
             plain("확인 중", ink)
             tip = "NAS 작업 상태 확인 중"
         case .unavailable:
-            plain("연결 확인 필요", NSColor.systemOrange.withAlphaComponent(0.9))
+            plain("연결 확인 필요", CCMBColors.warn)
             tip = "NAS 작업 상태를 가져오지 못했습니다. 연결 확인 필요"
         case .counts(let counts, let fetchedAt, let stale, let failed):
             let dim: CGFloat = stale || failed ? 0.55 : 1
-            segment("실행", counts.running, NSColor.systemGreen.withAlphaComponent(0.9 * dim))
-            segment("준비", counts.preparing, NSColor.systemBlue.withAlphaComponent(0.9 * dim))
-            segment("대기", counts.waiting, NSColor.systemOrange.withAlphaComponent(0.9 * dim), last: true)
+            segment("실행", counts.running, CCMBColors.success.withAlphaComponent(dim))
+            segment("준비", counts.preparing, CCMBColors.info.withAlphaComponent(dim))
+            segment("대기", counts.waiting, CCMBColors.warn.withAlphaComponent(dim), last: true)
             if stale || failed {
                 result.append(NSAttributedString(string: " !", attributes: [
                     .font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                    .foregroundColor: NSColor.systemOrange
+                    .foregroundColor: CCMBColors.warn
                 ]))
             }
             tip = "NAS 작업 상태 · 실행 \(counts.running) · 준비 \(counts.preparing) · 대기 \(counts.waiting)"
@@ -2424,7 +2445,7 @@ final class UsagePanelHeaderView: NSView {
     private let updatedLabel: NSTextField = {
         let field = NSTextField(labelWithString: "")
         field.font = .systemFont(ofSize: 10)
-        field.textColor = .secondaryLabelColor
+        field.textColor = CCMBColors.secondary
         field.alignment = .right
         field.lineBreakMode = .byClipping
         return field
@@ -2526,6 +2547,7 @@ final class UsagePanelHeaderView: NSView {
     /// Header rule in the theme accent (dark themes only).
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
         guard BKStyleTokens.isAccentTheme else { return }
         BKStyleTokens.structureHairline.setFill()
         let inset = UsagePanelLayout.sidePadding
@@ -2935,7 +2957,17 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
         headerView.setSettingsExpanded(isSettingsExpanded)
     }
 
+    /// 열려 있는 패널(설정 줄 포함)을 현재 팔레트로 바로 다시 칠한다. 사용량 자료가 아직 없어도 적용한다.
+    func refreshTheme() {
+        let theme = UsagePanelThemeStore.current
+        window?.appearance = theme.isDark ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
+        containerView.applyTheme(theme)
+        if let contentView = window?.contentView { CCMBTheme.refresh(contentView) }
+    }
+
     func show() {
+        HTTThemeCenter.shared.requestAccountRefresh()
+        refreshTheme()
         if !hasPositionedWindow {
             window?.center()
             hasPositionedWindow = true
@@ -3139,7 +3171,7 @@ final class PinnedUsageWindowController: NSWindowController, NSWindowDelegate {
 /// native submenu item. The pinned panel uses the same label and opens that
 /// very same submenu through an AppDelegate callback.
 @MainActor
-final class SingleActionRowView: NSView {
+final class SingleActionRowView: NSView, CCMBThemeRefreshing {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
     private let title: String
     let button: NSPopUpButton
@@ -3165,6 +3197,27 @@ final class SingleActionRowView: NSView {
         )
     }
 
+    func refreshTheme() {
+        let palette = BKStyleTokens.currentPalette
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 6
+        button.layer?.borderWidth = 1
+        button.layer?.backgroundColor = palette.surface.cgColor
+        button.layer?.borderColor = palette.border2.cgColor
+        button.menu?.appearance = CCMBTheme.appearance
+        button.menu?.items.first?.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: button.font ?? NSFont.systemFont(ofSize: 12),
+            .foregroundColor: palette.text
+        ])
+        button.contentTintColor = palette.text
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
+    }
+
     func setMenu(_ menu: NSMenu) {
         // In pull-down mode AppKit uses the first item as the control's
         // persistent title and handles menu tracking itself. This avoids
@@ -3175,6 +3228,7 @@ final class SingleActionRowView: NSView {
         menu.insertItem(titleItem, at: 0)
         button.menu = menu
         button.selectItem(at: 0)
+        refreshTheme()
     }
 
     required init?(coder: NSCoder) {
@@ -3194,7 +3248,7 @@ enum UsageDashboardURLs {
 /// hosted as a single `NSMenuItem`, directly above the refresh item. Shares
 /// the split usage panel's own column geometry.
 @MainActor
-final class UsagePageButtonsView: NSView {
+final class UsagePageButtonsView: NSView, CCMBThemeRefreshing {
     private static let viewWidth: CGFloat = UsagePanelLayout.viewWidth
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
 
@@ -3205,7 +3259,7 @@ final class UsagePageButtonsView: NSView {
     private let dividers: [NSView] = (0..<UsagePanelLayout.columnCount - 1).map { _ in
         let view = NSView()
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        view.layer?.backgroundColor = CCMBColors.line.cgColor
         return view
     }
 
@@ -3236,6 +3290,15 @@ final class UsagePageButtonsView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func refreshTheme() {
+        dividers.forEach { $0.layer?.backgroundColor = CCMBColors.line.cgColor }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
     }
 
     func applyGrokAuthState(loginRequired: Bool, loginInProgress: Bool) {
@@ -3334,6 +3397,7 @@ private final class IntervalControlButton: RolloverButton {
 
     private func presentIntervalMenu(at screenOrigin: NSPoint) {
         let menu = NSMenu()
+        menu.appearance = CCMBTheme.appearance
         for seconds in options {
             let item = NSMenuItem(
                 title: seconds == UsageCore.smartRefreshPreference
@@ -3420,15 +3484,19 @@ final class RefreshIntervalControlsView: NSView {
         // The Grok control stays configured but out of the visible row while
         // its column is hidden.
         [codexButton, claudeButton, geminiButton].forEach { addSubview($0) }
-        codexButton.contentTintColor = UsageBrandColors.codex
-        claudeButton.contentTintColor = UsageBrandColors.claude
-        geminiButton.contentTintColor = UsageBrandColors.geminiText
-        grokButton.contentTintColor = GrokBrandColor.mark
+        codexButton.restingTitleColor = UsageBrandColors.codex
+        claudeButton.restingTitleColor = UsageBrandColors.claude
+        geminiButton.restingTitleColor = UsageBrandColors.geminiText
         layoutControls()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
     }
 
     func apply(codex: Int, claude: Int, gemini: Int, grok: Int) {
@@ -3481,7 +3549,7 @@ final class RefreshIntervalControlsView: NSView {
 /// A compact action row used by the menu's lower controls. Keeping these
 /// actions in shared geometry makes each group scan as one unit.
 @MainActor
-final class MenuActionRowView: NSView {
+final class MenuActionRowView: NSView, CCMBThemeRefreshing {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
     let buttons: [NSButton]
     private let dividers: [NSView]
@@ -3497,13 +3565,22 @@ final class MenuActionRowView: NSView {
         dividers = (0..<(titles.count - 1)).map { _ in
             let view = NSView()
             view.wantsLayer = true
-            view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            view.layer?.backgroundColor = CCMBColors.line.cgColor
             return view
         }
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
         buttons.forEach(addSubview)
         dividers.forEach(addSubview)
         layoutButtons()
+    }
+
+    func refreshTheme() {
+        dividers.forEach { $0.layer?.backgroundColor = CCMBColors.line.cgColor }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
     }
 
     convenience init(leftTitle: String, rightTitle: String) {
@@ -3518,7 +3595,6 @@ final class MenuActionRowView: NSView {
         let button = RolloverButton(title: title, target: nil, action: nil)
         button.bezelStyle = .rounded
         button.font = .systemFont(ofSize: 12, weight: .regular)
-        button.contentTintColor = .controlAccentColor
         button.alignment = .center
         return button
     }
@@ -3574,7 +3650,7 @@ final class MenuActionRowView: NSView {
 /// destinations, then restart/quit — keeping the outer grid aligned with
 /// every row above it.
 @MainActor
-final class LifecycleActionsRowView: NSView {
+final class LifecycleActionsRowView: NSView, CCMBThemeRefreshing {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight
     private static let innerGap: CGFloat = 2
 
@@ -3613,15 +3689,23 @@ final class LifecycleActionsRowView: NSView {
         let button = RolloverButton(title: title, target: nil, action: nil)
         button.bezelStyle = .rounded
         button.font = .systemFont(ofSize: 12, weight: .regular)
-        button.contentTintColor = .controlAccentColor
         button.alignment = .center
         return button
+    }
+
+    func refreshTheme() {
+        (columnDividers + [supportDivider, lifecycleDivider]).forEach { $0.layer?.backgroundColor = CCMBColors.line.cgColor }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
     }
 
     private static func makeDivider() -> NSView {
         let view = NSView()
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        view.layer?.backgroundColor = CCMBColors.line.cgColor
         return view
     }
 
@@ -3677,7 +3761,7 @@ final class LifecycleActionsRowView: NSView {
 
 /// Three-column settings row: always-on-top, combined update/version, opacity.
 @MainActor
-final class VersionOpacityRowView: NSView {
+final class VersionOpacityRowView: NSView, CCMBThemeRefreshing {
     private static let viewHeight: CGFloat = UsagePanelLayout.controlRowHeight * 2
     private static let cellInset: CGFloat = UsagePanelLayout.controlVerticalInset
 
@@ -3707,7 +3791,7 @@ final class VersionOpacityRowView: NSView {
         dividers = (0..<UsagePanelLayout.columnCount - 1).map { _ in
             let view = NSView()
             view.wantsLayer = true
-            view.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            view.layer?.backgroundColor = CCMBColors.line.cgColor
             return view
         }
         super.init(frame: NSRect(x: 0, y: 0, width: UsagePanelLayout.viewWidth, height: Self.viewHeight))
@@ -3722,14 +3806,27 @@ final class VersionOpacityRowView: NSView {
         opacitySlider.isContinuous = true
         opacitySlider.setAccessibilityLabel("패널 투명도")
         opacityLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        opacityLabel.textColor = .secondaryLabelColor
+        opacityLabel.textColor = CCMBColors.secondary
         opacityLabel.alignment = .left
         opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        opacityValueLabel.textColor = .secondaryLabelColor
+        opacityValueLabel.textColor = CCMBColors.secondary
         opacityValueLabel.alignment = .right
         setVersionText(versionTitle)
         setOpacity(1)
         layoutSubviews()
+        refreshTheme()
+    }
+
+    func refreshTheme() {
+        opacityLabel.textColor = CCMBColors.secondary
+        opacityValueLabel.textColor = CCMBColors.secondary
+        opacitySlider.trackFillColor = CCMBColors.accent
+        dividers.forEach { $0.layer?.backgroundColor = CCMBColors.line.cgColor }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        CCMBTheme.fillMenuBackground(of: self)
     }
 
     /// Shows the current version on the same clickable update control.
@@ -3754,7 +3851,6 @@ final class VersionOpacityRowView: NSView {
         let button = RolloverButton(title: title, target: nil, action: nil)
         button.bezelStyle = .rounded
         button.font = .systemFont(ofSize: 12, weight: .regular)
-        button.contentTintColor = .controlAccentColor
         button.alignment = .center
         return button
     }

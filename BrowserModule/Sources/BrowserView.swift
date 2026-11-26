@@ -133,6 +133,7 @@ struct BrowserPane: View {
     /// a finished choice, Esc). Only text that differs from it was typed or pasted by the user.
     @State private var pickerSuppressedText: String? = nil
     @State private var pickerKeyMonitor: Any?
+    @State private var paneAvailableHeight: CGFloat = 400
     @StateObject private var webPageAgent = WebPageAgentCoordinator()
     let plannerSession: SAWProjectSession?
 
@@ -256,6 +257,8 @@ struct BrowserPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(palette.bgColor)
                 }
+                .onAppear { paneAvailableHeight = geo.size.height }
+                .onChange(of: geo.size.height) { _, newHeight in paneAvailableHeight = newHeight }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
@@ -458,6 +461,7 @@ struct BrowserPane: View {
                 .overlay(alignment: .topLeading) {
                     if slashListVisible {
                         AddressSlashPicker(choices: slashChoices,
+                                           maxAvailableHeight: max(60, paneAvailableHeight - 8),
                                            selection: $pickerSelection,
                                            onHover: { pickerHovering = $0 },
                                            onChoose: { chooseSlash($0) })
@@ -634,6 +638,10 @@ struct BrowserPane: View {
             } else {
                 appModel.setAIPanelOpen(true)
             }
+        case .openApp(let shortcut):
+            finishAddressEntry()
+            model.address = model.isShowingHome ? "" : (model.currentURL?.absoluteString ?? "")
+            launchAppShortcut(shortcut)
         case .hana(let question, let fresh):
             if let ps = plannerSession {
                 ps.composerDraft = question
@@ -691,6 +699,43 @@ struct BrowserPane: View {
         }
     }
 
+    private func launchAppShortcut(_ shortcut: AppShortcut) {
+        let ws = NSWorkspace.shared
+        let fileURL = URL(fileURLWithPath: shortcut.appPath)
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+
+        // 1. Prefer selected bundle URL if still valid and matches selected bundle ID
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let actualBundleID = Bundle(url: fileURL)?.bundleIdentifier
+            if shortcut.bundleIdentifier.isEmpty || actualBundleID == shortcut.bundleIdentifier {
+                ws.openApplication(at: fileURL, configuration: config) { _, error in
+                    if let error {
+                        DispatchQueue.main.async {
+                            self.model.notice = "'\(shortcut.alias)' 앱을 실행하지 못했습니다: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                return
+            }
+        }
+
+        // 2. Validated NSWorkspace bundle-id fallback if app moved
+        if !shortcut.bundleIdentifier.isEmpty,
+           let fallbackURL = ws.urlForApplication(withBundleIdentifier: shortcut.bundleIdentifier) {
+            ws.openApplication(at: fallbackURL, configuration: config) { _, error in
+                if let error {
+                    DispatchQueue.main.async {
+                        self.model.notice = "'\(shortcut.alias)' 앱을 실행하지 못했습니다: \(error.localizedDescription)"
+                    }
+                }
+            }
+            return
+        }
+
+        model.notice = "'\(shortcut.alias)' 앱을 찾을 수 없습니다: \(shortcut.displayName)"
+    }
+
     private func chooseSearch(_ index: Int) {
         let engines = SearchEngine.allCases
         guard engines.indices.contains(index), let query = pickerQuery,
@@ -706,9 +751,10 @@ struct BrowserPane: View {
         guard pickerKeyMonitor == nil else { return }
         pickerKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard isPaneActive else { return event }
-            guard slashListVisible || addressPickerVisible, fieldFocused,
-                  let window = event.window, window === NSApp.keyWindow,
-                  let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+            guard slashListVisible || addressPickerVisible, fieldFocused else { return event }
+            let keyWindow = NSApp.keyWindow
+            if let eventWindow = event.window, let keyWindow, eventWindow !== keyWindow { return event }
+            guard let editor = keyWindow?.firstResponder as? NSTextView, editor.isFieldEditor,
                   !editor.hasMarkedText(),
                   event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return event }
             let slash = slashListVisible
@@ -786,7 +832,7 @@ struct BrowserPane: View {
             }
         } label: {
             Image(systemName: effective == .assist ? "network.badge.shield.half.filled" : "network")
-                .foregroundColor(waiting ? palette.warnColor : (effective == .assist ? Color.green : palette.textColor))
+                .foregroundColor(waiting ? palette.warnColor : (effective == .assist ? palette.successColor : palette.textColor))
                 .frame(width: 22, height: 22)
         } primaryAction: {
             model.setSiteRoute(effective == .assist ? .off : .on)
@@ -1899,7 +1945,7 @@ private struct AddressSearchPicker: View {
                 .onTapGesture { onChoose(index) }
                 .onHover { if $0 { selection = index } }
                 .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isButton)
+                .accessibilityAddTraits(index == selection ? [.isButton, .isSelected] : .isButton)
             }
         }
         .background(palette.cardColor)
@@ -1933,9 +1979,10 @@ private struct AddressSearchPicker: View {
     }
 }
 
-/// The `/` list under the address field: compact, shows all rows without scrolling.
+/// The `/` list under the address field: compact, shows choices with keyboard and scroll tracking.
 private struct AddressSlashPicker: View {
     let choices: [SlashChoice]
+    var maxAvailableHeight: CGFloat = 400
     @Binding var selection: Int
     let onHover: (Bool) -> Void
     let onChoose: (Int) -> Void
@@ -1943,32 +1990,50 @@ private struct AddressSlashPicker: View {
 
     private static let rowHeight: CGFloat = 28
 
+    private var contentHeight: CGFloat {
+        CGFloat(choices.count) * Self.rowHeight
+    }
+
+    private var pickerHeight: CGFloat {
+        min(contentHeight, max(Self.rowHeight, maxAvailableHeight))
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
-                HStack(spacing: 8) {
-                    Text(choice.name)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .foregroundColor(palette.textColor)
-                    Text(choice.hint)
-                        .font(.caption)
-                        .lineLimit(1)
-                        .foregroundColor(palette.mutedColor)
-                    Spacer(minLength: 4)
-                    if index == selection {
-                        Image(systemName: "return").font(.caption).foregroundColor(palette.mutedColor)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: contentHeight > pickerHeight) {
+                VStack(spacing: 0) {
+                    ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
+                        HStack(spacing: 8) {
+                            Text(choice.name)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .foregroundColor(palette.textColor)
+                            Text(choice.hint)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .foregroundColor(palette.mutedColor)
+                            Spacer(minLength: 4)
+                            if index == selection {
+                                Image(systemName: "return").font(.caption).foregroundColor(palette.mutedColor)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(height: Self.rowHeight)
+                        .background(index == selection ? palette.accentSoftColor : Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onChoose(index) }
+                        .onHover { if $0 { selection = index } }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityAddTraits(index == selection ? [.isButton, .isSelected] : .isButton)
+                        .id(index)
                     }
                 }
-                .padding(.horizontal, 8)
-                .frame(height: Self.rowHeight)
-                .background(index == selection ? palette.accentSoftColor : Color.clear)
-                .contentShape(Rectangle())
-                .onTapGesture { onChoose(index) }
-                .onHover { if $0 { selection = index } }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isButton)
-                .id(index)
+            }
+            .frame(height: pickerHeight)
+            .onChange(of: selection) { _, newIndex in
+                withAnimation(.easeInOut(duration: 0.1)) {
+                    proxy.scrollTo(newIndex, anchor: nil)
+                }
             }
         }
         .background(palette.cardColor)

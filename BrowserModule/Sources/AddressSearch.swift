@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import AppKit
 import MapKit
 import CoreLocation
@@ -196,15 +197,34 @@ struct AddressServiceDraft: Equatable {
     }
 }
 
+// MARK: - App Shortcuts
+
+struct AppShortcut: Identifiable, Codable, Equatable {
+    var id: String
+    var alias: String
+    var appPath: String
+    var bundleIdentifier: String
+    var displayName: String
+
+    init(id: String = UUID().uuidString, alias: String, appPath: String, bundleIdentifier: String = "", displayName: String = "") {
+        self.id = id
+        self.alias = alias
+        self.appPath = appPath
+        self.bundleIdentifier = bundleIdentifier
+        self.displayName = displayName.isEmpty ? (URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent) : displayName
+    }
+}
+
 private struct AddressSearchData: Codable {
     var version = 1
     var services: [AddressService] = []
     var directionsEnabled = true
     var departFromCurrentLocation = true
+    var appShortcuts: [AppShortcut] = []
 
     init() {}
 
-    enum CodingKeys: String, CodingKey { case version, services, directionsEnabled, departFromCurrentLocation }
+    enum CodingKeys: String, CodingKey { case version, services, directionsEnabled, departFromCurrentLocation, appShortcuts }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -212,6 +232,7 @@ private struct AddressSearchData: Codable {
         services = try c.decodeIfPresent([AddressService].self, forKey: .services) ?? []
         directionsEnabled = try c.decodeIfPresent(Bool.self, forKey: .directionsEnabled) ?? true
         departFromCurrentLocation = try c.decodeIfPresent(Bool.self, forKey: .departFromCurrentLocation) ?? true
+        appShortcuts = try c.decodeIfPresent([AppShortcut].self, forKey: .appShortcuts) ?? []
     }
 }
 
@@ -227,6 +248,7 @@ final class AddressSearchStore: ObservableObject {
     @Published private(set) var services: [AddressService] = AddressServiceDefaults.all
     @Published private(set) var directionsEnabled = true
     @Published private(set) var departFromCurrentLocation = true
+    @Published private(set) var appShortcuts: [AppShortcut] = []
 
     /// Set when an existing address-search.json could not be read. The file is left untouched until the user's first
     /// explicit save, which must first make a fresh, uniquely named copy of that exact file.
@@ -256,22 +278,29 @@ final class AddressSearchStore: ObservableObject {
         if a.split(separator: " ").first.map({ String($0) }) == AddressText.fold(AddressText.reservedDirections) {
             return "'\(AddressText.reservedDirections)'는 길찾기 전용입니다."
         }
+        let reserved = ["인공지능", "ai", "하나", "하나야", "하나씨", "하나 새창", "새대화", "새하나", "브리핑"]
+        if reserved.contains(a) {
+            return "'\(alias)'는 예약된 명령어입니다."
+        }
         guard AddressInput.classify(alias) != .url else { return "주소처럼 보이는 이름은 쓸 수 없습니다." }
         return nil
     }
 
-    /// First name/alias of `candidate` that another service already uses.
-    private static func conflict(of candidate: AddressService, with others: [AddressService]) -> String? {
+    /// First name/alias of `candidate` that another service or registered app shortcut already uses.
+    private static func conflict(of candidate: AddressService, with others: [AddressService], apps: [AppShortcut] = []) -> String? {
         for name in candidate.allNames {
             let key = AddressText.fold(name)
             if let other = others.first(where: { $0.id != candidate.id && $0.allNames.contains { AddressText.fold($0) == key } }) {
                 return "'\(name)'는 '\(other.name)'에서 이미 쓰고 있습니다."
             }
+            if let app = apps.first(where: { AddressText.fold($0.alias) == key }) {
+                return "'\(name)'는 등록된 앱 '\(app.alias)'에서 이미 쓰고 있습니다."
+            }
         }
         return nil
     }
 
-    static func validate(_ draft: AddressServiceDraft, editing id: String?, among services: [AddressService]) -> Result<AddressService, ValidationError> {
+    static func validate(_ draft: AddressServiceDraft, editing id: String?, among services: [AddressService], apps: [AppShortcut] = []) -> Result<AddressService, ValidationError> {
         let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if let p = aliasProblem(name) { return .failure(ValidationError(message: p)) }
         var aliases: [String] = []
@@ -294,7 +323,7 @@ final class AddressSearchStore: ObservableObject {
         }
         let service = AddressService(id: id ?? "custom-\(UUID().uuidString)", name: name, aliases: aliases,
                                      homeURL: home, searchTemplate: template, enabled: draft.enabled)
-        if let c = conflict(of: service, with: services) { return .failure(ValidationError(message: c)) }
+        if let c = conflict(of: service, with: services, apps: apps) { return .failure(ValidationError(message: c)) }
         return .success(service)
     }
 
@@ -321,7 +350,7 @@ final class AddressSearchStore: ObservableObject {
         guard services.filter({ !$0.isBuiltin }).count < Self.maxCustomServices else {
             return "직접 추가한 사이트는 \(Self.maxCustomServices)개까지 쓸 수 있습니다."
         }
-        switch Self.validate(draft, editing: nil, among: services) {
+        switch Self.validate(draft, editing: nil, among: services, apps: appShortcuts) {
         case .failure(let e): return e.message
         case .success(let s): return commit(services: services + [s])
         }
@@ -329,7 +358,7 @@ final class AddressSearchStore: ObservableObject {
 
     func update(id: String, _ draft: AddressServiceDraft) -> String? {
         guard let index = services.firstIndex(where: { $0.id == id }) else { return "사이트를 찾을 수 없습니다." }
-        switch Self.validate(draft, editing: id, among: services) {
+        switch Self.validate(draft, editing: id, among: services, apps: appShortcuts) {
         case .failure(let e): return e.message
         case .success(let s):
             var next = services
@@ -379,15 +408,40 @@ final class AddressSearchStore: ObservableObject {
         commit(services: services, depart: on)
     }
 
-    private func commit(services next: [AddressService], directions: Bool? = nil, depart: Bool? = nil) -> String? {
+    func addAppShortcut(alias: String, appURL: URL) -> String? {
+        let trimmedAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let problem = Self.aliasProblem(trimmedAlias) { return problem }
+        let key = AddressText.fold(trimmedAlias)
+        if let conflictService = services.first(where: { $0.allNames.contains { AddressText.fold($0) == key } }) {
+            return "'\(trimmedAlias)'는 사이트 '\(conflictService.name)'에서 이미 쓰고 있습니다."
+        }
+        if appShortcuts.contains(where: { AddressText.fold($0.alias) == key }) {
+            return "이미 등록된 별명입니다."
+        }
+        guard appURL.pathExtension.lowercased() == "app" || FileManager.default.fileExists(atPath: appURL.path) else {
+            return "유효한 응용 프로그램 번들이 아닙니다."
+        }
+        let bundleID = Bundle(url: appURL)?.bundleIdentifier ?? ""
+        let name = appURL.deletingPathExtension().lastPathComponent
+        let shortcut = AppShortcut(alias: trimmedAlias, appPath: appURL.path, bundleIdentifier: bundleID, displayName: name)
+        return commit(services: services, appShortcuts: appShortcuts + [shortcut])
+    }
+
+    func deleteAppShortcut(id: String) -> String? {
+        commit(services: services, appShortcuts: appShortcuts.filter { $0.id != id })
+    }
+
+    private func commit(services next: [AddressService], directions: Bool? = nil, depart: Bool? = nil, appShortcuts nextShortcuts: [AppShortcut]? = nil) -> String? {
         var data = AddressSearchData()
         data.services = next
         data.directionsEnabled = directions ?? directionsEnabled
         data.departFromCurrentLocation = depart ?? departFromCurrentLocation
+        data.appShortcuts = nextShortcuts ?? appShortcuts
         if let error = persist(data) { return error }
         services = next
         directionsEnabled = data.directionsEnabled
         departFromCurrentLocation = data.departFromCurrentLocation
+        appShortcuts = data.appShortcuts
         return nil
     }
 
@@ -441,6 +495,7 @@ final class AddressSearchStore: ObservableObject {
             services = Self.sanitized(decoded.services)
             directionsEnabled = decoded.directionsEnabled
             departFromCurrentLocation = decoded.departFromCurrentLocation
+            appShortcuts = decoded.appShortcuts
         } catch {
             // Unreadable file: run on the defaults and leave the file alone. persist() backs it up (uniquely) before
             // the first explicit save replaces it, and refuses to save if that backup fails.
@@ -529,6 +584,7 @@ enum AddressCommand: Equatable {
     case hana(question: String, fresh: Bool)
     case hanaWindow
     case openAI
+    case openApp(AppShortcut)
     case route(RouteRequest)
     /// Ordinary search words: the Google / 네이버 / YouTube choice.
     case pickEngine(String)
@@ -576,8 +632,13 @@ enum AddressCommandResolver {
             return .openAI
         }
 
+        // An exact registered app alias entered by itself launches the chosen app
+        if let shortcut = store.appShortcuts.first(where: { AddressText.fold($0.alias) == foldedKey }) {
+            return .openApp(shortcut)
+        }
+
         // An exact name or alias (`구글 포토`) wins over a shorter service prefix (`구글` + `포토`).
-        let key = AddressText.fold(text)
+        let key = foldedKey
         if let s = store.services.first(where: { $0.enabled && $0.allNames.contains { AddressText.fold($0) == key } }) {
             guard let home = BrowserPreferences.validateWebURL(s.homeURL), let url = URL(string: home) else {
                 return .invalid("'\(s.name)' 홈 주소를 열 수 없습니다. 설정을 확인해 주세요.")
@@ -617,8 +678,9 @@ enum AddressCommandResolver {
         return .pickEngine(text)
     }
 
-    /// `/` (optionally `/네`) in the address field: every enabled service once under its canonical name, plus 길찾기
-    /// when it is on. Only while the text is `/` followed by a name prefix without spaces; empty = not a command list.
+    /// `/` (optionally `/네`) in the address field: every enabled service once under its canonical name,
+    /// built-in commands (Hana, AI, directions), and registered app shortcuts.
+    /// Only while the text is `/` followed by a name prefix without spaces; empty = not a command list.
     static func slashChoices(_ raw: String, store: AddressSearchStore) -> [SlashChoice] {
         let text = raw.drop(while: { $0.isWhitespace })
         guard text.hasPrefix("/") else { return [] }
@@ -629,9 +691,18 @@ enum AddressCommandResolver {
             filter.isEmpty || names.contains { AddressText.fold($0).hasPrefix(filter) }
         }
         var out: [SlashChoice] = []
-        for s in store.services where s.enabled && matches(s.allNames) {
-            out.append(SlashChoice(id: s.id, name: s.name, hint: s.supportsSearch ? "검색어" : "홈 열기"))
+        // Group 1: Enabled services with search support (hint: "검색어")
+        for s in store.services where s.enabled && s.supportsSearch && matches(s.allNames) {
+            out.append(SlashChoice(id: s.id, name: s.name, hint: "검색어"))
         }
+        // Group 2: Enabled site rows without search (hint: "홈 열기") followed by enabled 길찾기
+        for s in store.services where s.enabled && !s.supportsSearch && matches(s.allNames) {
+            out.append(SlashChoice(id: s.id, name: s.name, hint: "홈 열기"))
+        }
+        if store.directionsEnabled, matches([AddressText.reservedDirections]) {
+            out.append(SlashChoice(id: "directions", name: AddressText.reservedDirections, hint: "출발지, 도착지"))
+        }
+        // Group 3: Hana companion rows and generic AI
         if matches(["하나", "하나야", "하나씨"]) {
             out.append(SlashChoice(id: "hana-chat", name: "하나", hint: "대화"))
         }
@@ -647,8 +718,9 @@ enum AddressCommandResolver {
         if matches(["ai", "인공지능"]) {
             out.append(SlashChoice(id: "ai-panel", name: "AI", hint: "AI 대화창 열기"))
         }
-        if store.directionsEnabled, matches([AddressText.reservedDirections]) {
-            out.append(SlashChoice(id: "directions", name: AddressText.reservedDirections, hint: "출발지, 도착지"))
+        // Group 4: Registered app shortcuts
+        for app in store.appShortcuts where matches([app.alias]) {
+            out.append(SlashChoice(id: "app-\(app.id)", name: app.alias, hint: "앱 실행"))
         }
         return out
     }
@@ -1136,75 +1208,153 @@ struct AddressSearchSettingsView: View {
     @ObservedObject var store: AddressSearchStore
     @Environment(\.bkPalette) private var palette
     @State private var editing: AddressEditorTarget?
+    @State private var showingAddApp = false
     @State private var message: String?
     @State private var confirmRestoreAll = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                if let warning = store.loadWarning {
-                    Text(warning).font(.caption).foregroundStyle(.orange)
-                }
-                GroupBox("길찾기") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("길찾기 사용", isOn: Binding(
-                            get: { store.directionsEnabled },
-                            set: { message = store.setDirectionsEnabled($0) }))
-                        Toggle("출발지가 없으면 현재 위치에서 출발", isOn: Binding(
-                            get: { store.departFromCurrentLocation },
-                            set: { message = store.setDepartFromCurrentLocation($0) }))
-                            .disabled(!store.directionsEnabled)
-                        LabeledContent("이동 수단", value: "자동차")
-                    }
-                    .padding(8)
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            if let warning = store.loadWarning {
+                Text(warning).font(.caption).foregroundStyle(.httWarn)
+            }
 
-                GroupBox("바로가기 사이트") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("스위치는 이름 입력 바로가기만 켜고 끕니다. 그 외 입력의 Google·네이버·YouTube 3행 선택은 항상 나옵니다.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        ForEach(store.services) { service in
-                            row(service)
-                            Divider()
-                        }
-                        HStack {
-                            Button("사이트 추가") { editing = AddressEditorTarget(serviceID: nil) }
-                                .buttonStyle(.bordered)
-                            Spacer()
-                            Button("기본 사이트 모두 기본값으로") { confirmRestoreAll = true }
-                                .buttonStyle(.bordered)
-                        }
-                        if let message {
-                            Text(message).font(.caption).foregroundColor(palette.dangerColor)
-                        }
-                    }
-                    .padding(8)
+            // 1. 길찾기
+            GroupBox("길찾기") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("길찾기 사용", isOn: Binding(
+                        get: { store.directionsEnabled },
+                        set: { message = store.setDirectionsEnabled($0) }))
+                    Toggle("출발지가 없으면 현재 위치에서 출발", isOn: Binding(
+                        get: { store.departFromCurrentLocation },
+                        set: { message = store.setDepartFromCurrentLocation($0) }))
+                        .disabled(!store.directionsEnabled)
+                    LabeledContent("이동 수단", value: "자동차")
                 }
+                .padding(8)
+            }
 
-                GroupBox("입력 예시") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("AI · 인공지능 · 하나 · 새대화 · 하나 새창 · 브리핑")
+            // 2. 바로가기 사이트 (incl 사이트 추가)
+            GroupBox("바로가기 사이트") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("스위치는 이름 입력 바로가기만 켜고 끕니다. 그 외 입력의 Google·네이버·YouTube 3행 선택은 항상 나옵니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    ForEach(store.services) { service in
+                        row(service)
+                        Divider()
+                    }
+                    HStack {
+                        Button("사이트 추가") { editing = AddressEditorTarget(serviceID: nil) }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                        Button("기본 사이트 모두 기본값으로") { confirmRestoreAll = true }
+                            .buttonStyle(.bordered)
+                    }
+                    if let message {
+                        Text(message).font(.caption).foregroundColor(palette.dangerColor)
+                    }
+                }
+                .padding(8)
+            }
+
+            // 3. 앱 바로가기 (incl 앱 추가)
+            GroupBox("앱 바로가기") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("앱을 추가해 두고 주소창에 이름(예: 카카오톡)만 입력하면 해당 앱이 바로 실행됩니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+
+                    if store.appShortcuts.isEmpty {
+                        Text("등록된 앱 바로가기가 없습니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                        example("AI", "기본 AI 대화창 열기")
-                        example("구글", "Google 홈 열기")
-                        example("네이버 날씨", "네이버에서 날씨 검색")
-                        example("지도 장항동", "네이버 지도에서 장소 검색")
-                        example("길찾기 부산서면", "현재 위치에서 부산서면까지")
-                        example("길찾기 장항동, 부산서면", "출발지, 도착지")
-                        example("그 밖의 검색어", "Google · 네이버 · YouTube 중에서 고르기")
+                            .padding(.vertical, 4)
+                    } else {
+                        ForEach(store.appShortcuts) { shortcut in
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(shortcut.alias)
+                                        .font(.subheadline.bold())
+                                    Text(shortcut.displayName)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Button("삭제") {
+                                    message = store.deleteAppShortcut(id: shortcut.id)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            Divider()
+                        }
                     }
-                    .padding(8)
+
+                    HStack {
+                        Button("앱 추가") {
+                            showingAddApp = true
+                        }
+                        .buttonStyle(.bordered)
+                        Spacer()
+                    }
+                    if let message {
+                        Text(message).font(.caption).foregroundColor(palette.dangerColor)
+                    }
                 }
+                .padding(8)
             }
-            .padding(20)
+
+            // 4. 입력 예시
+            GroupBox("입력 예시") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("AI · 인공지능 · 하나 · 새대화 · 하나 새창 · 브리핑")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    example("AI", "기본 AI 대화창 열기")
+                    example("구글", "Google 홈 열기")
+                    example("네이버 날씨", "네이버에서 날씨 검색")
+                    example("지도 장항동", "네이버 지도에서 장소 검색")
+                    example("길찾기 부산서면", "현재 위치에서 부산서면까지")
+                    example("길찾기 장항동, 부산서면", "출발지, 도착지")
+                    example("카카오톡", "등록된 카카오톡 앱 바로 실행")
+                    example("그 밖의 검색어", "Google · 네이버 · YouTube 중에서 고르기")
+                }
+                .padding(8)
+            }
+
+            // 5. 명령줄로 사이트 열기 (supporting content at the end)
+            GroupBox("명령줄로 사이트 열기") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("터미널에서 아래 명령으로 사이트를 바로 엽니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("복사") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(#"open -a "/Applications/HanTool.app" "https://www.youtube.com""#, forType: .string)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(8)
+            }
         }
         .sheet(item: $editing) { target in
             AddressServiceEditorSheet(store: store, serviceID: target.serviceID) { editing = nil }
                 .byungkiThemed(palette)
+        }
+        .sheet(isPresented: $showingAddApp) {
+            AddressAppEditorSheet(store: store) {
+                showingAddApp = false
+            }
+            .byungkiThemed(palette)
         }
         .confirmationDialog("기본 사이트 \(AddressServiceDefaults.all.count)개를 기본값으로 되돌릴까요?", isPresented: $confirmRestoreAll) {
             Button("기본값으로 되돌리기") { message = store.restoreAllDefaults() }
@@ -1252,6 +1402,100 @@ struct AddressSearchSettingsView: View {
     }
 }
 
+struct AddressAppEditorSheet: View {
+    @ObservedObject var store: AddressSearchStore
+    let onClose: () -> Void
+    @State private var alias = ""
+    @State private var selectedAppURL: URL?
+    @State private var errorMessage: String?
+    @Environment(\.bkPalette) private var palette
+
+    private var appName: String? {
+        selectedAppURL?.deletingPathExtension().lastPathComponent
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("앱 추가").font(.headline)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("이름(별칭)").font(.caption).foregroundStyle(.secondary)
+                TextField("예: 카카오톡", text: $alias)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("실행할 응용 프로그램").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    if let name = appName {
+                        Text(name)
+                            .font(.subheadline)
+                            .lineLimit(1)
+                    } else {
+                        Text("선택된 앱 없음")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("앱 선택…") {
+                        chooseAppFile()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(palette.surface2Color))
+            }
+
+            if let error = errorMessage {
+                Text(error).font(.caption).foregroundColor(palette.dangerColor)
+            }
+
+            HStack {
+                Spacer()
+                Button("취소") { onClose() }
+                    .keyboardShortcut(.cancelAction)
+                Button("저장") {
+                    let trimmed = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else {
+                        errorMessage = "이름이 비어 있습니다."
+                        return
+                    }
+                    guard let appURL = selectedAppURL else {
+                        errorMessage = "실행할 앱을 선택해 주세요."
+                        return
+                    }
+                    if let err = store.addAppShortcut(alias: trimmed, appURL: appURL) {
+                        errorMessage = err
+                    } else {
+                        onClose()
+                    }
+                }
+                .buttonStyle(.bkProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 400)
+    }
+
+    private func chooseAppFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "선택"
+        panel.message = "바로가기로 등록할 응용 프로그램(.app)을 선택하세요."
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedAppURL = url
+            if alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                alias = url.deletingPathExtension().lastPathComponent
+            }
+            errorMessage = nil
+        }
+    }
+}
+
 struct AddressServiceEditorSheet: View {
     @ObservedObject var store: AddressSearchStore
     let serviceID: String?
@@ -1261,7 +1505,7 @@ struct AddressServiceEditorSheet: View {
     @State private var saveError: String?
 
     private var problem: String? {
-        if case .failure(let e) = AddressSearchStore.validate(draft, editing: serviceID, among: store.services) { return e.message }
+        if case .failure(let e) = AddressSearchStore.validate(draft, editing: serviceID, among: store.services, apps: store.appShortcuts) { return e.message }
         return nil
     }
 
@@ -1278,7 +1522,7 @@ struct AddressServiceEditorSheet: View {
                 .textFieldStyle(.roundedBorder)
             Toggle("바로가기 사용", isOn: $draft.enabled)
             if let text = saveError ?? (draft == AddressServiceDraft() ? nil : problem) {
-                Text(text).font(.caption).foregroundColor(.red)
+                Text(text).font(.caption).foregroundStyle(.httDanger)
             }
             HStack {
                 if let id = serviceID, let current = store.service(id: id), store.isModified(current) {

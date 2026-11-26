@@ -16,7 +16,6 @@ public final class HTDHostExport: ObservableObject {
     @Published public private(set) var hostedToolID: String? = nil
 
     public var onToolSelected: ((String) -> Void)? = nil
-    public var onThemeChanged: ((String) -> Void)? = nil
     public var hostedTranslationControl: ((String) -> AnyView?)? = nil
     public var hostedFeatureSettings: ((String) -> AnyView?)? = nil
     /// 호스트의 번역 OCR(ImageTextRecognizer) 연결. 없으면 nil(OCR 불가). 이미지는 호출 전에 이미 마스킹된 것이어야 하고,
@@ -24,18 +23,11 @@ public final class HTDHostExport: ObservableObject {
     public var hostedImageTextRecognizer: ((CGImage) async throws -> String)? = nil
 
     private var cachedController: NSViewController? = nil
-    private var themeCancellable: AnyCancellable? = nil
 
     private init() {
         ExternalURLCoordinator.shared.ingestLaunchArguments(CommandLine.arguments)
         self.appModel = AppModel()
         self.appearance = AppearanceStore()
-        self.themeCancellable = appearance.$choice
-            .dropFirst()
-            .removeDuplicates()
-            .sink { [weak self] choice in
-                self?.onThemeChanged?(choice.rawValue)
-            }
     }
 
     /// 호스트 메인 윈도우용 브라우저 뷰 컨트롤러 생성 (단일 인스턴스 캐싱)
@@ -184,25 +176,6 @@ public final class HTDHostExport: ObservableObject {
             !job.state.isTerminal && job.state != .paused
         }
         return activeJobs || appModel.hasActiveRun
-    }
-
-    /// 호스트의 원본 테마 문자열을 모듈의 ThemeChoice에 매핑하여 적용합니다.
-    public func setTheme(_ raw: String) {
-        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let choice: ThemeChoice
-        switch lower {
-        case "light", "라이트":
-            choice = .light
-        case "friday", "프라이데이":
-            choice = .friday
-        case "jarvis", "자비스", "dark", "다크":
-            choice = .jarvis
-        case "ultron", "울트론":
-            choice = .ultron
-        default:
-            choice = .auto
-        }
-        appearance.select(choice)
     }
 }
 

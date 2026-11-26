@@ -1,4 +1,5 @@
 import Foundation
+import HTTThemeCore
 import OSLog
 import SwiftUI
 import AppKit
@@ -838,7 +839,7 @@ fileprivate final class AIPanelNativeResizeHandle: NSView {
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill(using: .copy)
-        NSColor.separatorColor.setFill()
+        NSColor.htt(HTTThemeSnapshot.app.line2).setFill()
         let separatorWidth: CGFloat = 1.0
         let separatorRect = NSRect(
             x: bounds.midX - (separatorWidth / 2.0),

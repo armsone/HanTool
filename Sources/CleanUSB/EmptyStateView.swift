@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 struct CleanUSBEmptyStateView: View {
     @EnvironmentObject private var state: AppState
@@ -35,6 +36,6 @@ struct CleanUSBEmptyStateView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(.httPaper)
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import HTTThemeCore
 import Carbon.HIToolbox
 import Combine
 import HTTHTDCore
@@ -194,6 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MailWindowCoordinator.shared.cancelCaptureWork = { [weak self] in self?.viewModel.windowWillHide() }
 
         buildStatusItem()
+        // 계정 테마 통로는 작업 창이나 서버 현황을 처음 열 때 만든다(백그라운드 시작만으로는 웹 화면을 불러오지 않는다).
+        HTTThemeCenter.shared.transportProvider = { UnifiedBrowserManager.shared.accountThemeTransport() }
         // 서버 현황(CCMB) 모듈 초기화 및 활성화 시 시작 (한툴 버튼 좌측에 밀착 생성)
         CCMBIntegration.shared.setup(updater: updater, loginItem: loginItem)
         CCMBIntegration.shared.startIfEnabled()

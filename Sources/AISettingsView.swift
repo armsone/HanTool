@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import ServiceManagement
 import HTTHTDCore
 
@@ -129,7 +130,7 @@ struct AISettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.httWarn)
                         Text("다른 앱 실행 중 전역 키 감지에는 손쉬운 사용 권한이 필요합니다. 권한이 없으면 한툴 앱 외부에서의 두 번 누름이 동작하지 않을 수 있습니다.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -272,7 +273,7 @@ struct AISettingsView: View {
                     Text("아직 기록된 외부 AI 실행이 없습니다.").foregroundStyle(.secondary)
                 }
                 if let error = diagnostics.storageError {
-                    Text(error).foregroundStyle(.orange)
+                    Text(error).foregroundStyle(.httWarn)
                 }
             } header: {
                 Text("진단")
@@ -336,9 +337,9 @@ struct AISettingsView: View {
     private func statusLabel(_ status: AIBILoginStatus?) -> some View {
         switch status {
         case .authenticated?:
-            Label(AIBILoginStatus.authenticated.label, systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            Label(AIBILoginStatus.authenticated.label, systemImage: "checkmark.circle.fill").foregroundStyle(.httSuccess)
         case .loginRequired?:
-            Label(AIBILoginStatus.loginRequired.label, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+            Label(AIBILoginStatus.loginRequired.label, systemImage: "exclamationmark.circle.fill").foregroundStyle(.httDanger)
         case .checking?:
             HStack(spacing: 4) { ProgressView().controlSize(.mini); Text(AIBILoginStatus.checking.label) }.foregroundStyle(.secondary)
         case .unknown?, nil:

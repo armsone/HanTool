@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 struct VolumeDetailView: View {
     @EnvironmentObject private var state: AppState
@@ -36,7 +37,7 @@ struct VolumeDetailView: View {
             }
             .padding(20)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(.httPaper)
         .navigationTitle(volume.name)
         .navigationSubtitle(volume.mountPath)
     }
@@ -266,7 +267,7 @@ struct FailureListView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text(f.message)
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(.httDanger)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -278,7 +279,7 @@ struct FailureListView: View {
         } label: {
             Label("실패한 항목 \(failures.count)개", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
         }
         .card()
     }

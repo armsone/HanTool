@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import Foundation
 
 // MARK: - Supported Sites Catalog Models (Schema v1)
@@ -860,7 +861,7 @@ public struct SupportedSitesView: View {
                     summaryBadge("시험 대기 \(trialCounts.pending)개",
                                  bg: palette.surface2Color, fg: palette.mutedColor)
                     summaryBadge("해당 모드 저장 성공 \(trialCounts.savePassed)개",
-                                 bg: Color.green.opacity(0.16), fg: Color.green)
+                                 bg: Color.htt(HTTThemeSnapshot.app.success).opacity(0.16), fg: Color.htt(HTTThemeSnapshot.app.success))
                     summaryBadge("분석 성공 \(trialCounts.analysisPassed)개",
                                  bg: palette.accentSoftColor, fg: palette.accentColor)
                     summaryBadge("시험 실패 \(trialCounts.failed)개 · 현재 이용 불가 \(trialCounts.unavailable)개",
@@ -1215,7 +1216,7 @@ private struct SupportedSiteRowView: View {
             badge(site.resolvedModeTrial.badgeTitle, bg: palette.accentSoftColor, fg: palette.accentColor)
                 .help("분석 점검 시각: \(checkedAt) (메타데이터·추출 분석만 확인됨, MP4 파일 저장 완료 증명이 아님)")
         case .savePassed(_, let checkedAt):
-            badge(site.resolvedModeTrial.badgeTitle, bg: Color.green.opacity(0.16), fg: Color.green)
+            badge(site.resolvedModeTrial.badgeTitle, bg: Color.htt(HTTThemeSnapshot.app.success).opacity(0.16), fg: Color.htt(HTTThemeSnapshot.app.success))
                 .help("저장 검증 시각: \(checkedAt)")
         case .failed(_, let checkedAt):
             badge(site.resolvedModeTrial.badgeTitle, bg: palette.dangerSoftColor, fg: palette.dangerColor)

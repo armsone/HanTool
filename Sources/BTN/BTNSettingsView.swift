@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 /// HTT 메인 창의 Mac 관리 섹션 '설정' 구간에 포함되는 Mac 관리(BTN) 설정 뷰.
 /// 전달받은 `BTNIntegration` 인스턴스의 `@Published` 상태를 그대로 관찰하며 인스턴스를 중복 생성하지 않는다.
@@ -76,7 +77,7 @@ public struct BTNSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.httDanger)
                 }
                 .padding(4)
             }
@@ -95,7 +96,7 @@ public struct BTNSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } icon: {
                     Image(systemName: "pause.circle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.httWarn)
                 }
                 .padding(4)
             }

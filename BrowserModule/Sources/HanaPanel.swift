@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import WebKit
+import HTTThemeCore
 
 struct HanaHandoff {
     let goal: String
@@ -124,6 +125,7 @@ final class HanaPanelHost: ObservableObject {
 
     @Published var isPanelOpen: Bool = false {
         didSet {
+            if isPanelOpen && !oldValue { HTTThemeCenter.shared.requestAccountRefresh() }
             if !isPanelOpen {
                 locationHandler?.cancelPending()
                 uiDelegateHandler?.dismissActiveAlert()
@@ -143,6 +145,7 @@ final class HanaPanelHost: ObservableObject {
     private var lastHandoffErrorMessage: String?
 
     let webView: WKWebView
+    let themeSync = HanaThemeSync()
     private var navigationDelegateHandler: HanaNavigationDelegate?
     private var uiDelegateHandler: HanaUIDelegate?
     private var locationHandler: HanaLocationScriptMessageHandler?
@@ -205,6 +208,7 @@ final class HanaPanelHost: ObservableObject {
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
         PageAudioController.shared.prepareConfiguration(config)
+        themeSync.prepareConfiguration(config)
         let delegationHandler = HanaDelegationMessageHandler()
         config.userContentController.addUserScript(WKUserScript(
             source: Self.delegationScript, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Self.delegationWorld))
@@ -228,6 +232,7 @@ final class HanaPanelHost: ObservableObject {
         self.uiDelegateHandler = uiDelegate
         wv.uiDelegate = uiDelegate
 
+        themeSync.start(webView: wv)
         wv.load(URLRequest(url: Self.trustedURL))
     }
 
@@ -619,6 +624,7 @@ final class HanaPanelHost: ObservableObject {
     }
 
     func handleDidStartProvisionalNavigation() {
+        themeSync.pageWillChange()
         locationHandler?.cancelPending()
         uiDelegateHandler?.dismissActiveAlert()
         if isDispatching {
@@ -649,6 +655,7 @@ final class HanaPanelHost: ObservableObject {
 
     func handleDidFinishNavigation() {
         isLoading = false
+        themeSync.pageDidLoad()
         guard Self.isTrustedAlfredURL(webView.url) else {
             isBridgeReady = false
             stopReadinessPolling()
@@ -2206,6 +2213,7 @@ fileprivate final class HanaNativeResizeHandle: NSView {
     var onChanged: ((CGFloat) -> Void)?
     var onEnded: ((CGFloat) -> Void)?
     var onDoubleClick: (() -> Void)?
+    var lineColor: NSColor = .separatorColor { didSet { needsDisplay = true } }
 
     private var startWindowX: CGFloat?
 
@@ -2237,7 +2245,7 @@ fileprivate final class HanaNativeResizeHandle: NSView {
     override func draw(_ dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill(using: .copy)
-        NSColor.separatorColor.setFill()
+        lineColor.setFill()
         let separatorWidth: CGFloat = 1.0
         let separatorRect = NSRect(
             x: bounds.midX - (separatorWidth / 2.0),
@@ -2277,9 +2285,11 @@ fileprivate struct HanaNativeResizeDivider: NSViewRepresentable {
     var onChanged: (CGFloat) -> Void
     var onEnded: (CGFloat) -> Void
     var onDoubleClick: () -> Void
+    var lineColor: NSColor
 
     func makeNSView(context: Context) -> HanaNativeResizeHandle {
         let view = HanaNativeResizeHandle(frame: .zero)
+        view.lineColor = lineColor
         view.onBegan = onBegan
         view.onChanged = onChanged
         view.onEnded = onEnded
@@ -2288,6 +2298,7 @@ fileprivate struct HanaNativeResizeDivider: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: HanaNativeResizeHandle, context: Context) {
+        nsView.lineColor = lineColor
         nsView.onBegan = onBegan
         nsView.onChanged = onChanged
         nsView.onEnded = onEnded
@@ -2323,7 +2334,8 @@ struct HanaPanelDivider: View {
             },
             onDoubleClick: {
                 host.setPreferredWidth(HanaPanelHost.defaultWidth)
-            }
+            },
+            lineColor: Palette.nsColor(palette.border2)
         )
         .frame(width: 16)
         .frame(maxHeight: .infinity)

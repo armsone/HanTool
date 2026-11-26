@@ -431,6 +431,7 @@ public final class NASLoginWindowController: NSObject, NSWindowDelegate, WKNavig
             defer: false
         )
         self.window.title = "놀이터 로그인"
+        self.window.appearance = CCMBTheme.appearance
         self.window.center()
         self.window.contentView = webView
         self.window.isReleasedWhenClosed = false

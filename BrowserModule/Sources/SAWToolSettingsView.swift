@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import AppKit
 
 private struct SAWToolSettingsError: LocalizedError {
@@ -104,7 +105,7 @@ struct SAWToolSettingsView: View {
             if !errorMessage.isEmpty {
                 Text(errorMessage)
                     .font(.system(size: 12))
-                    .foregroundColor(.red)
+                    .foregroundStyle(.httDanger)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -251,7 +252,7 @@ struct SAWToolSettingsView: View {
             if let message = serverErrors[server.id] {
                 Text(message)
                     .font(.system(size: 12))
-                    .foregroundColor(.red)
+                    .foregroundStyle(.httDanger)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }

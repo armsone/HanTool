@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import UniformTypeIdentifiers
 
 struct InputMateSettingsView: View {
@@ -52,7 +53,7 @@ struct InputMateSettingsView: View {
                     .padding(4)
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.httDanger)
                 }
             }
             Spacer()
@@ -64,7 +65,7 @@ struct InputMateSettingsView: View {
     private func warningBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
                 .accessibilityHidden(true)
             Text(message)
                 .font(.callout)
@@ -74,7 +75,7 @@ struct InputMateSettingsView: View {
                 .accessibilityLabel("경고 확인 및 닫기")
         }
         .padding(10)
-        .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        .background(.httWarnSoft, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
     }
 
@@ -209,7 +210,7 @@ struct InputMateSettingsView: View {
                     }
                 }
                 .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .background(.httCard, in: RoundedRectangle(cornerRadius: 8))
 
                 Form {
                     Section("트랙패드 잠금 보호") {
@@ -252,7 +253,7 @@ struct InputMateSettingsView: View {
                     }
                 }
                 .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .background(.httCard, in: RoundedRectangle(cornerRadius: 8))
             }
             .padding(14)
         }
@@ -275,7 +276,7 @@ struct InputMateSettingsView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "keyboard.badge.ellipsis")
                         .font(.system(size: 48))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(.tint)
                     Text("입력 도우미")
                         .font(.title2.bold())
                     Text("키보드와 트랙패드를 편하게")
@@ -309,7 +310,7 @@ struct InputMateSettingsView: View {
                         .foregroundStyle(.tertiary)
                 }
                 .padding(16)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .background(.httCard, in: RoundedRectangle(cornerRadius: 8))
             }
             .padding(14)
         }
@@ -384,12 +385,12 @@ struct InputMateSettingsView: View {
         }
     }
 
-    private var statusColor: Color {
+    private var statusColor: HTTStyle {
         switch appState.serviceStatus {
-        case .ready: appState.isLocked ? .orange : .green
-        case .off: .secondary
-        case .needsAccessibility: .orange
-        case .unavailable: .red
+        case .ready: appState.isLocked ? HTTStyle(.warn) : HTTStyle(.success)
+        case .off: HTTStyle(.muted)
+        case .needsAccessibility: HTTStyle(.warn)
+        case .unavailable: HTTStyle(.danger)
         }
     }
 

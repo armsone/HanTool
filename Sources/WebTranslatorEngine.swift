@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import HTTThemeCore
 import WebKit
 
 // 웹 번역기(DeepL·Google 번역·Papago) 어댑터. API 키·비공식 HTTP 주소·가로챈 토큰 없이 각 서비스의 공식 HTTPS 번역 페이지를
@@ -1358,7 +1359,7 @@ struct WebTranslatorPanelContent: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(.httPaper)
     }
 }
 

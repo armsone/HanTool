@@ -36,6 +36,11 @@ public enum BrowserDataMigration {
         alert.runModal()
     }
 
+    /// 이전 자료 옮기기가 이미 끝나 대화상자 없이 브라우저 저장소를 열어도 되는 상태.
+    public static var isReadyWithoutPrompt: Bool {
+        FileManager.default.fileExists(atPath: markerURL.path) && !isLegacyAppRunning()
+    }
+
     public enum MigrationResult {
         case alreadyDone
         case freshInstall

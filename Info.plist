@@ -64,7 +64,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.35.2</string>
+	<string>1.36.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -80,7 +80,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>202611261525</string>
+	<string>202611261746</string>
 	<key>HTDBuildStamp</key>
 	<string>202611181945</string>
 	<key>LSApplicationCategoryType</key>

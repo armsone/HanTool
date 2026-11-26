@@ -107,6 +107,24 @@ SWIFT_SOURCES=(
 
 CCMB_MODULE_DIR="$BUILD_DIR/Modules"
 mkdir -p "$CCMB_MODULE_DIR"
+
+# 본체·브라우저·서버 현황이 함께 쓰는 단일 팔레트/계정 테마 모듈
+echo "==> HTTThemeCore 정적 모듈 컴파일 (target: $SWIFT_TARGET)"
+xcrun swiftc \
+  -O \
+  -swift-version 5 \
+  -target "$SWIFT_TARGET" \
+  -sdk "$SDK_PATH" \
+  -module-name HTTThemeCore \
+  -parse-as-library \
+  -emit-module \
+  -emit-module-path "$CCMB_MODULE_DIR/HTTThemeCore.swiftmodule" \
+  -emit-library \
+  -static \
+  -o "$CCMB_MODULE_DIR/libHTTThemeCore.a" \
+  -framework AppKit \
+  -framework SwiftUI \
+  "$ROOT_DIR"/Sources/HTTThemeCore/*.swift
 if compgen -G "$ROOT_DIR/CCMBModule/*.swift" > /dev/null; then
   echo "==> HTTCCMB 정적 모듈 컴파일 (target: $SWIFT_TARGET)"
   xcrun swiftc \
@@ -121,6 +139,7 @@ if compgen -G "$ROOT_DIR/CCMBModule/*.swift" > /dev/null; then
     -static \
     -o "$CCMB_MODULE_DIR/libHTTCCMB.a" \
     -F "$SPARKLE_DIR" \
+    -I "$CCMB_MODULE_DIR" \
     -framework Sparkle \
     -framework AppKit \
     -framework SwiftUI \
@@ -158,6 +177,7 @@ xcrun swiftc \
   -module-name HTTHTDCore \
   -output-file-map "$HTD_OUTPUT_MAP" \
   -D HTT_HOST \
+  -I "$CCMB_MODULE_DIR" \
   -parse-as-library \
   -emit-module \
   -emit-module-path "$HTD_MODULE_DIR/HTTHTDCore.swiftmodule" \
@@ -187,6 +207,7 @@ xcrun swiftc \
   -I "$HTD_MODULE_DIR" \
   -L "$HTD_MODULE_DIR" \
   -lHTTHTDCore \
+  -lHTTThemeCore \
   -framework Sparkle \
   -framework AppKit \
   -framework SwiftUI \

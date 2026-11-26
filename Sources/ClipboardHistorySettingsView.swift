@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import AppKit
 
 /// 한툴 환경설정 내 "클립보드" 설정 화면.
@@ -123,7 +124,7 @@ public struct ClipboardHistorySettingsView: View {
             // 손쉬운 사용 권한 상태
             HStack(spacing: 12) {
                 Image(systemName: shortcut.isAccessibilityTrusted ? "checkmark.shield.fill" : "exclamationmark.triangle.fill")
-                    .foregroundColor(shortcut.isAccessibilityTrusted ? .green : .orange)
+                    .foregroundStyle(shortcut.isAccessibilityTrusted ? HTTStyle(.success) : HTTStyle(.warn))
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(shortcut.isAccessibilityTrusted ? "손쉬운 사용 권한 부여됨" : "손쉬운 사용 권한 필요")

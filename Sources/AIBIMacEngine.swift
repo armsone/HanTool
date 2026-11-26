@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import HTTThemeCore
 import WebKit
 
 // AIBI(AI Browser Interface)의 macOS 네이티브 어댑터.
@@ -195,7 +196,7 @@ private final class AIBICoverView: NSView {
     override var isOpaque: Bool { true }
     override func updateLayer() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = (fixedColor?.withAlphaComponent(1) ?? NSColor.windowBackgroundColor).cgColor
+            layer?.backgroundColor = (fixedColor?.withAlphaComponent(1) ?? NSColor.htt(HTTThemeSnapshot.app.paper)).cgColor
         }
     }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -1288,7 +1289,7 @@ private struct AIBITaskHeader: View {
                 Button("응답 적용") { runner.applyManual(pasted) }
                     .disabled(pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if let error = status.manualError {
-                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.httWarn)
                 }
             }
             TextEditor(text: $pasted)

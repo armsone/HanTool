@@ -1,4 +1,6 @@
 import AppKit
+import Combine
+import HTTThemeCore
 import SwiftUI
 
 // MARK: - 병기스타일 테마 (Byungki-Style Themes)
@@ -66,89 +68,22 @@ public struct HTTThemePalette {
     public let danger: Color
     public let dangerSoft: Color
 
-    public static let light = HTTThemePalette(
-        bg: Color(hex: "#f5f4f0"),
-        card: Color(hex: "#fbfaf7"),
-        surface: Color(hex: "#ffffff"),
-        surface2: Color(hex: "#ecebe4"),
-        text: Color(hex: "#1f211c"),
-        text2: Color(hex: "#4a4c44"),
-        muted: Color(hex: "#666860"),
-        border: Color(hex: "#e2dfd5"),
-        border2: Color(hex: "#d0cdc0"),
-        accent: Color(hex: "#5c6b3c"),
-        accentStrong: Color(hex: "#46532c"),
-        accentSoft: Color(hex: "#e8ebdb"),
-        onAccent: Color(hex: "#ffffff"),
-        warn: Color(hex: "#9c5415"),
-        warnSoft: Color(hex: "#f7e9d8"),
-        warnInk: Color(hex: "#6d3c10"),
-        danger: Color(hex: "#9c3b2a"),
-        dangerSoft: Color(hex: "#f6e3de")
-    )
+    /// 색 값은 HTTThemeCore의 공용 팔레트 하나에서만 온다.
+    public static let light = HTTThemePalette(tokens: .light)
+    public static let friday = HTTThemePalette(tokens: .friday)
+    public static let jarvis = HTTThemePalette(tokens: .jarvis)
+    public static let ultron = HTTThemePalette(tokens: .ultron)
+}
 
-    public static let friday = HTTThemePalette(
-        bg: Color(hex: "#c8ccd0"),
-        card: Color(hex: "#d4d8dc"),
-        surface: Color(hex: "#e0e4e8"),
-        surface2: Color(hex: "#b8bec4"),
-        text: Color(hex: "#16191d"),
-        text2: Color(hex: "#383d44"),
-        muted: Color(hex: "#4c535c"),
-        border: Color(hex: "#a8afb7"),
-        border2: Color(hex: "#8e96a0"),
-        accent: Color(hex: "#743c16"),
-        accentStrong: Color(hex: "#6f350c"),
-        accentSoft: Color(hex: "#b4c0cc"),
-        onAccent: Color(hex: "#ffffff"),
-        warn: Color(hex: "#855200"),
-        warnSoft: Color(hex: "#dfd2b5"),
-        warnInk: Color(hex: "#663a0a"),
-        danger: Color(hex: "#9e2638"),
-        dangerSoft: Color(hex: "#dfc2c8")
-    )
-
-    public static let jarvis = HTTThemePalette(
-        bg: Color(hex: "#0c1420"),
-        card: Color(hex: "#121c2b"),
-        surface: Color(hex: "#162337"),
-        surface2: Color(hex: "#1c2d44"),
-        text: Color(hex: "#e3edf7"),
-        text2: Color(hex: "#b3c4d6"),
-        muted: Color(hex: "#8da2b8"),
-        border: Color(hex: "#20324a"),
-        border2: Color(hex: "#2d4663"),
-        accent: Color(hex: "#4cc2e6"),
-        accentStrong: Color(hex: "#8fdcf3"),
-        accentSoft: Color(hex: "#12324a"),
-        onAccent: Color(hex: "#04202b"),
-        warn: Color(hex: "#f0b45c"),
-        warnSoft: Color(hex: "#3a2d16"),
-        warnInk: Color(hex: "#f4cf94"),
-        danger: Color(hex: "#f28b82"),
-        dangerSoft: Color(hex: "#3d2126")
-    )
-
-    public static let ultron = HTTThemePalette(
-        bg: Color(hex: "#08090c"),
-        card: Color(hex: "#121418"),
-        surface: Color(hex: "#1a1d22"),
-        surface2: Color(hex: "#24282e"),
-        text: Color(hex: "#f2f3f5"),
-        text2: Color(hex: "#c7cbd1"),
-        muted: Color(hex: "#a0a6af"),
-        border: Color(hex: "#30343b"),
-        border2: Color(hex: "#515964"),
-        accent: Color(hex: "#ff4d63"),
-        accentStrong: Color(hex: "#ff8795"),
-        accentSoft: Color(hex: "#35171e"),
-        onAccent: Color(hex: "#21050a"),
-        warn: Color(hex: "#e8a24f"),
-        warnSoft: Color(hex: "#36291a"),
-        warnInk: Color(hex: "#f2c27f"),
-        danger: Color(hex: "#ff9a9a"),
-        dangerSoft: Color(hex: "#3e1f22")
-    )
+extension HTTThemePalette {
+    public init(tokens t: HTTPaletteTokens) {
+        self.init(
+            bg: .htt(t.paper), card: .htt(t.card), surface: .htt(t.surface), surface2: .htt(t.surface2),
+            text: .htt(t.ink), text2: .htt(t.ink2), muted: .htt(t.muted), border: .htt(t.line), border2: .htt(t.line2),
+            accent: .htt(t.olive), accentStrong: .htt(t.oliveDeep), accentSoft: .htt(t.oliveSoft), onAccent: .htt(t.onAccent),
+            warn: .htt(t.orange), warnSoft: .htt(t.orangeSoft), warnInk: .htt(t.warnInk),
+            danger: .htt(t.red), dangerSoft: .htt(t.redSoft))
+    }
 }
 // MARK: - 병기스타일 아이콘 스타일 (Icon Styles)
 
@@ -178,14 +113,18 @@ public enum HTTIconStyle: String, CaseIterable, Identifiable {
 public final class HTTAppearanceStore: ObservableObject {
     public static let shared = HTTAppearanceStore()
 
-    private let themeKey = "HTTThemeSelection"
     private let iconStyleKey = "HTTIconStyleSelection"
+    private let center = HTTThemeCenter.shared
+    private var centerObservation: AnyCancellable?
 
-    @Published public var theme: HTTTheme {
-        didSet {
-            UserDefaults.standard.set(theme.rawValue, forKey: themeKey)
-        }
+    /// 공용 테마 원본(`HTTThemeCenter`)의 값. 대입은 사용자의 직접 선택이며, 로그인 상태면 계정에 저장한다.
+    public var theme: HTTTheme {
+        get { HTTTheme(rawValue: center.selection.rawValue) ?? .auto }
+        set { center.select(HTTThemeSelection(rawValue: newValue.rawValue) ?? .auto) }
     }
+
+    /// 계정 연동 상태 안내.
+    public var accountStatusText: String { center.status.label }
 
     @Published public var iconStyle: HTTIconStyle {
         didSet {
@@ -194,14 +133,6 @@ public final class HTTAppearanceStore: ObservableObject {
     }
 
     private init() {
-        // 첫 렌더링 전 동기적으로 설정 읽기 및 마이그레이션 수행
-        let storedTheme = UserDefaults.standard.string(forKey: themeKey)
-        let resolvedTheme = HTTTheme.from(storedString: storedTheme)
-        self.theme = resolvedTheme
-        if storedTheme != resolvedTheme.rawValue {
-            UserDefaults.standard.set(resolvedTheme.rawValue, forKey: themeKey)
-        }
-
         let storedIcon = UserDefaults.standard.string(forKey: iconStyleKey)
         if let storedIcon, let parsed = HTTIconStyle(rawValue: storedIcon) {
             self.iconStyle = parsed
@@ -209,38 +140,17 @@ public final class HTTAppearanceStore: ObservableObject {
             self.iconStyle = .simple
             UserDefaults.standard.set(HTTIconStyle.simple.rawValue, forKey: iconStyleKey)
         }
+        centerObservation = NotificationCenter.default.publisher(for: HTTThemeCenter.didChangeNotification)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.objectWillChange.send() } }
     }
 
     public func palette(for systemColorScheme: ColorScheme) -> HTTThemePalette {
-        switch theme {
-        case .auto:
-            let isDark: Bool
-            if let appearance = NSApp?.effectiveAppearance ?? NSApplication.shared.effectiveAppearance as NSAppearance? {
-                isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            } else {
-                isDark = systemColorScheme == .dark
-            }
-            return isDark ? .jarvis : .light
-        case .light:
-            return .light
-        case .friday:
-            return .friday
-        case .jarvis:
-            return .jarvis
-        case .ultron:
-            return .ultron
-        }
+        HTTThemePalette(tokens: center.paletteID.tokens)
     }
 
     public func effectiveColorScheme(for systemColorScheme: ColorScheme) -> ColorScheme? {
-        switch theme {
-        case .auto:
-            return nil
-        case .light, .friday:
-            return .light
-        case .jarvis, .ultron:
-            return .dark
-        }
+        // `auto`도 공용 원본이 시스템 외형을 따라 팔레트를 고르므로 창은 시스템 설정에 맡긴다.
+        theme == .auto ? nil : (center.paletteID.isDark ? .dark : .light)
     }
 
     public func cycleTheme() {
@@ -494,9 +404,16 @@ public struct HTTThemeButton: View {
                     }
                     .buttonStyle(.plain)
                 }
+                Divider()
+                Text(store.accountStatusText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
             }
             .padding(6)
-            .frame(width: 170)
+            .frame(width: 190)
         }
         .contextMenu {
             ForEach(HTTTheme.allCases) { item in
@@ -512,33 +429,5 @@ public struct HTTThemeButton: View {
             }
         }
         .accessibilityLabel("병기스타일 테마: \(store.theme.displayName) (누르면 \(store.theme.next.displayName), 길게 누르면 목록)")
-    }
-}
-
-// MARK: - Color Hex 초기화 도우미
-
-private extension Color {
-    init(hex: String) {
-        let cleanHex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: cleanHex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch cleanHex.count {
-        case 3:
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6:
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8:
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (255, 0, 0, 0)
-        }
-        self.init(
-            .sRGB,
-            red: Double(r) / 255.0,
-            green: Double(g) / 255.0,
-            blue: Double(b) / 255.0,
-            opacity: Double(a) / 255.0
-        )
     }
 }

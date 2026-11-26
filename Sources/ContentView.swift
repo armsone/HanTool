@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import Translation
 import UniformTypeIdentifiers
 
@@ -38,7 +39,7 @@ struct ContentView: View {
             .overlay {
                 if isDropTargeted {
                     RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                        .strokeBorder(.tint, style: StrokeStyle(lineWidth: 3, dash: [8]))
                         .padding(8)
                 }
             }
@@ -88,7 +89,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 520, minHeight: 380)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(.httPaper)
         // 외부 AI 숨김 실행용 실제 크기 웹 보기 표면(불투명 덮개 아래, 입력을 받지 않음)
         .aibiHiddenSurface(isMain: true)
         // 번역 세션은 항상 존재하는 최상위 뷰에 붙여, 화면 전환으로 작업이 끊기지 않게 한다.
@@ -290,10 +291,10 @@ struct OriginalTranslateSwitch: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12, weight: isActive ? .bold : .regular))
-                .foregroundStyle(isActive ? Color.white : Color.secondary)
+                .foregroundStyle(isActive ? AnyShapeStyle(.httOnAccent) : AnyShapeStyle(.secondary))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
-                .background(isActive ? Color.accentColor : Color.clear)
+                .background(isActive ? AnyShapeStyle(.httAccent) : AnyShapeStyle(.clear))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -317,7 +318,7 @@ private struct StatusBar: View {
 
             if let error = model.errorMessage {
                 HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.httWarn)
                     Text(error).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     if model.errorNeedsAutomationSettings {
@@ -332,7 +333,7 @@ private struct StatusBar: View {
                 }
                 .font(.callout)
                 .padding(10)
-                .background(Color.orange.opacity(0.12))
+                .background(.httWarnSoft)
             }
         }
     }
@@ -366,7 +367,7 @@ private struct StatusBar: View {
                 Text("번역할 텍스트가 없거나 이미 대상 언어입니다.")
             } else {
                 Image(systemName: p.failed > 0 ? "exclamationmark.circle" : "checkmark.circle")
-                    .foregroundStyle(p.failed > 0 ? .orange : .green)
+                    .foregroundStyle(p.failed > 0 ? HTTStyle(.warn) : HTTStyle(.success))
                 Text(p.failed > 0 ? "번역 완료 · \(p.failed)개 부분 실패" : "번역 완료")
             }
             let remote = model.remoteProgress
@@ -376,7 +377,7 @@ private struct StatusBar: View {
             }
             if remote.failed > 0 {
                 Text("· 원격 이미지 \(remote.failed)개 실패")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
             }
             if model.runningOCRCount > 0 {
                 Text("· 이미지 글자 인식 중")
@@ -393,7 +394,7 @@ private struct StatusBar: View {
             }
             if let failure = model.groupFailures.values.first {
                 Text("· \(failure)")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
                     .lineLimit(2)
             }
         } else {
@@ -419,7 +420,7 @@ private struct StatusBar: View {
             Text("(\(p.done + p.failed)/\(p.total))").foregroundStyle(.secondary)
             Button("취소") { model.cancelExternal() }
         case .failed(let message):
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.httWarn)
             Text(message).lineLimit(3).fixedSize(horizontal: false, vertical: true)
             Button("다시 시도") { model.requestExternalTranslation() }
             if isAI {
@@ -444,7 +445,7 @@ private struct StatusBar: View {
                 Text("번역할 텍스트가 없거나 이미 대상 언어입니다.")
             } else {
                 Image(systemName: p.failed > 0 ? "exclamationmark.circle" : "checkmark.circle")
-                    .foregroundStyle(p.failed > 0 ? .orange : .green)
+                    .foregroundStyle(p.failed > 0 ? HTTStyle(.warn) : HTTStyle(.success))
                 Text(p.failed > 0 ? "번역 완료 · \(p.failed)개 부분 실패" : "번역 완료")
                 if p.failed > 0 { Button("실패 항목 다시 번역") { model.retryExternalFailures() } }
             }
@@ -707,7 +708,7 @@ private struct PlaceholderView: View {
             case .loading?:
                 HStack { ProgressView().controlSize(.mini); Text("불러오는 중…") }.font(.caption)
             case .failed(let message)?:
-                Text(message).font(.caption).foregroundStyle(.orange)
+                Text(message).font(.caption).foregroundStyle(.httWarn)
             default:
                 EmptyView()
             }
@@ -770,7 +771,7 @@ struct TranslatedTextView: View {
         case .failed(let message)?:
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
         default:
             EmptyView()
         }
@@ -822,7 +823,7 @@ struct TranslatedTextView: View {
         case .quote(let depth):
             HStack(alignment: .top, spacing: 8) {
                 Rectangle()
-                    .fill(Color.accentColor.opacity(0.4))
+                    .fill(.tint.opacity(0.4))
                     .frame(width: 3)
                 view
             }
@@ -980,14 +981,14 @@ private struct ImageBlockView: View {
                                       width: region.box.width * geo.size.width,
                                       height: region.box.height * geo.size.height)
                     Rectangle()
-                        .stroke(Color.accentColor.opacity(0.8), lineWidth: 1.5)
+                        .stroke(.tint.opacity(0.8), lineWidth: 1.5)
                         .frame(width: rect.width, height: rect.height)
                         .position(x: rect.midX, y: rect.midY)
                     Text("\(index + 1)")
                         .font(.caption2.bold())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.httOnAccent)
                         .padding(.horizontal, 3)
-                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 3))
+                        .background(.httAccent, in: RoundedRectangle(cornerRadius: 3))
                         .position(x: max(rect.minX, 8), y: max(rect.minY, 8))
                 }
             }
@@ -1008,7 +1009,7 @@ private struct ImageBlockView: View {
         case .failed(let message)?:
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
         default:
             EmptyView()
         }

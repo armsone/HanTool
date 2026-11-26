@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import HTTCCMB
 
 /// HTT 설정 창 내의 '서버 현황' 설정 화면.
@@ -62,7 +63,7 @@ public struct CCMBSettingsView: View {
         HStack(alignment: .center, spacing: 14) {
             Image(systemName: integration.isEnabled ? "server.rack" : "pause.circle")
                 .font(.system(size: 24))
-                .foregroundStyle(integration.isEnabled ? Color.accentColor : palette.muted)
+                .foregroundStyle(integration.isEnabled ? palette.accent : palette.muted)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -73,8 +74,8 @@ public struct CCMBSettingsView: View {
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(integration.isRunning ? Color.green.opacity(0.15) : Color.orange.opacity(0.15))
-                            .foregroundStyle(integration.isRunning ? Color.green : Color.orange)
+                            .background((integration.isRunning ? HTTStyle(.success) : HTTStyle(.warn)).opacity(0.15))
+                            .foregroundStyle(integration.isRunning ? HTTStyle(.success) : HTTStyle(.warn))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
@@ -221,10 +222,10 @@ public struct CCMBSettingsView: View {
                 if case .invalid(let message) = targetValidation {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(Color.red)
+                            .foregroundStyle(.httDanger)
                         Text(message)
                             .font(.caption)
-                            .foregroundStyle(Color.red)
+                            .foregroundStyle(.httDanger)
                     }
                 } else if integration.targetDraft.isEmpty {
                     Text("주소가 비어 있으면 연결을 시도하지 않는 안전한 미설정 상태가 유지됩니다.")
@@ -233,7 +234,7 @@ public struct CCMBSettingsView: View {
                 } else if integration.targetDraft != integration.serverTarget {
                     Text("수정된 주소가 아직 적용되지 않았습니다. '적용' 버튼을 눌러주세요.")
                         .font(.caption)
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(.httWarn)
                 } else {
                     Text("현재 적용된 주소: \(integration.serverTarget)")
                         .font(.caption)
@@ -262,25 +263,25 @@ public struct CCMBSettingsView: View {
         case .connected(let authenticated, let role):
             HStack(spacing: 6) {
                 Image(systemName: authenticated ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(authenticated ? Color.green : Color.orange)
+                    .foregroundStyle(authenticated ? HTTStyle(.success) : HTTStyle(.warn))
                 if authenticated {
                     let roleSuffix = role.map { " (역할: \($0))" } ?? ""
                     Text("연결 성공 · 로그인 완료\(roleSuffix)")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.green)
+                        .foregroundStyle(.httSuccess)
                 } else {
                     Text("연결 성공 · 로그인이 필요합니다. '로그인' 버튼을 눌러 로그인해 주세요.")
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(.httWarn)
                 }
             }
         case .failed(let message):
             HStack(spacing: 6) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(Color.red)
+                    .foregroundStyle(.httDanger)
                 Text("연결 실패: \(message)")
                     .font(.caption)
-                    .foregroundStyle(Color.red)
+                    .foregroundStyle(.httDanger)
             }
         }
     }

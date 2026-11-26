@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Combine
+import HTTThemeCore
 
 // MARK: - 병기스타일 테마 (byungki-style-theme)
 
@@ -58,30 +60,20 @@ struct Palette: Equatable {
     let bg, card, surface, surface2, text, text2, muted, border, border2: UInt32
     let accent, accentStrong, accentSoft, onAccent, warn, warnSoft, warnInk, danger, dangerSoft: UInt32
 
-    static let light = Palette(
-        id: "light", isDark: false,
-        bg: 0xf5f4f0, card: 0xfbfaf7, surface: 0xffffff, surface2: 0xecebe4, text: 0x1f211c, text2: 0x4a4c44,
-        muted: 0x666860, border: 0xe2dfd5, border2: 0xd0cdc0, accent: 0x5c6b3c, accentStrong: 0x46532c,
-        accentSoft: 0xe8ebdb, onAccent: 0xffffff, warn: 0x9c5415, warnSoft: 0xf7e9d8, warnInk: 0x6d3c10,
-        danger: 0x9c3b2a, dangerSoft: 0xf6e3de)
-    static let friday = Palette(
-        id: "friday", isDark: false,
-        bg: 0xc8ccd0, card: 0xd4d8dc, surface: 0xe0e4e8, surface2: 0xb8bec4, text: 0x16191d, text2: 0x383d44,
-        muted: 0x4c535c, border: 0xa8afb7, border2: 0x8e96a0, accent: 0x743c16, accentStrong: 0x6f350c,
-        accentSoft: 0xb4c0cc, onAccent: 0xffffff, warn: 0x855200, warnSoft: 0xdfd2b5, warnInk: 0x663a0a,
-        danger: 0x9e2638, dangerSoft: 0xdfc2c8)
-    static let jarvis = Palette(
-        id: "jarvis", isDark: true,
-        bg: 0x0c1420, card: 0x121c2b, surface: 0x162337, surface2: 0x1c2d44, text: 0xe3edf7, text2: 0xb3c4d6,
-        muted: 0x8da2b8, border: 0x20324a, border2: 0x2d4663, accent: 0x4cc2e6, accentStrong: 0x8fdcf3,
-        accentSoft: 0x12324a, onAccent: 0x04202b, warn: 0xf0b45c, warnSoft: 0x3a2d16, warnInk: 0xf4cf94,
-        danger: 0xf28b82, dangerSoft: 0x3d2126)
-    static let ultron = Palette(
-        id: "ultron", isDark: true,
-        bg: 0x08090c, card: 0x121418, surface: 0x1a1d22, surface2: 0x24282e, text: 0xf2f3f5, text2: 0xc7cbd1,
-        muted: 0xa0a6af, border: 0x30343b, border2: 0x515964, accent: 0xff4d63, accentStrong: 0xff8795,
-        accentSoft: 0x35171e, onAccent: 0x21050a, warn: 0xe8a24f, warnSoft: 0x36291a, warnInk: 0xf2c27f,
-        danger: 0xff9a9a, dangerSoft: 0x3e1f22)
+    init(_ t: HTTPaletteTokens) {
+        id = t.id.rawValue
+        isDark = t.isDark
+        bg = t.paper; card = t.card; surface = t.surface; surface2 = t.surface2
+        text = t.ink; text2 = t.ink2; muted = t.muted; border = t.line; border2 = t.line2
+        accent = t.olive; accentStrong = t.oliveDeep; accentSoft = t.oliveSoft; onAccent = t.onAccent
+        warn = t.orange; warnSoft = t.orangeSoft; warnInk = t.warnInk; danger = t.red; dangerSoft = t.redSoft
+    }
+
+    // 색 값은 HTTThemeCore의 공용 팔레트 하나에서만 온다.
+    static let light = Palette(HTTPaletteTokens.light)
+    static let friday = Palette(HTTPaletteTokens.friday)
+    static let jarvis = Palette(HTTPaletteTokens.jarvis)
+    static let ultron = Palette(HTTPaletteTokens.ultron)
 }
 extension Palette {
     static func color(_ hex: UInt32) -> Color {
@@ -111,6 +103,8 @@ extension Palette {
     var warnInkColor: Color { Self.color(warnInk) }
     var dangerColor: Color { Self.color(danger) }
     var dangerSoftColor: Color { Self.color(dangerSoft) }
+    var tokens: HTTPaletteTokens { (HTTPaletteID(rawValue: id) ?? .light).tokens }
+    var successColor: Color { Self.color(tokens.success) }
 }
 
 private struct PaletteKey: EnvironmentKey {
@@ -124,35 +118,47 @@ extension EnvironmentValues {
     }
 }
 
-/// Selection + live system appearance. Loaded synchronously in `init` (before the first render); only the
-/// production configuration reads or writes UserDefaults, so isolated runs never touch the real preference.
+/// Browser-side view of the theme. The production configuration mirrors the app-wide `HTTThemeCenter` (this Mac's
+/// choice and the signed-in account's theme); isolated runs keep a private in-memory choice and never touch it.
 @MainActor
 final class AppearanceStore: ObservableObject {
     static let defaultsKey = "byungkiTheme"
 
-    @Published private(set) var choice: ThemeChoice
-    @Published private(set) var systemIsDark: Bool
-    private let persists: Bool
+    @Published private(set) var choice: ThemeChoice = .auto
+    @Published private(set) var systemIsDark: Bool = false
+    @Published private(set) var sharedPaletteID: HTTPaletteID = .light
+    private let center: HTTThemeCenter?
     private var observation: NSKeyValueObservation?
+    private var centerObservation: AnyCancellable?
 
-    var palette: Palette { choice.resolved(systemIsDark: systemIsDark) }
+    var palette: Palette {
+        center == nil ? choice.resolved(systemIsDark: systemIsDark) : Palette(sharedPaletteID.tokens)
+    }
+
+    /// 로그인한 계정 상태 안내(메뉴 표시용). 격리 실행에서는 없다.
+    var accountStatusText: String? { center?.status.label }
 
     init(persists: Bool = AppConfiguration.production().usesUserDefaults) {
-        self.persists = persists
-        let stored = persists ? HTDBrowserDefaults.standard.string(forKey: Self.defaultsKey) : nil
-        let (choice, migrated) = ThemeChoice.fromStored(stored)
-        self.choice = choice
+        center = persists ? HTTThemeCenter.shared : nil
         if let app = NSApp as NSApplication? {
             systemIsDark = Self.isDark(app.effectiveAppearance)
-        } else {
-            systemIsDark = HTDBrowserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
         }
-        if persists && migrated { HTDBrowserDefaults.standard.set(choice.rawValue, forKey: Self.defaultsKey) }
+        syncFromCenter()
+        centerObservation = NotificationCenter.default.publisher(for: HTTThemeCenter.didChangeNotification)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.syncFromCenter() } }
         startObservingSystem()
+    }
+
+    private func syncFromCenter() {
+        guard let center else { return }
+        let next = ThemeChoice(rawValue: center.selection.rawValue) ?? .auto
+        if choice != next { choice = next }
+        if sharedPaletteID != center.paletteID { sharedPaletteID = center.paletteID }
     }
 
     /// Follows the system light/dark setting live (the app never sets NSApp.appearance, only window appearance).
     func startObservingSystem() {
+        center?.observeSystemAppearance()
         guard observation == nil, let app = NSApp as NSApplication? else { return }
         systemIsDark = Self.isDark(app.effectiveAppearance)
         observation = app.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
@@ -166,9 +172,10 @@ final class AppearanceStore: ObservableObject {
         if systemIsDark != dark { systemIsDark = dark }
     }
 
+    /// 사용자가 직접 고른 경우에만 호출한다(로그인 상태면 계정에 저장한다).
     func select(_ choice: ThemeChoice) {
-        self.choice = choice
-        if persists { HTDBrowserDefaults.standard.set(choice.rawValue, forKey: Self.defaultsKey) }
+        guard let center else { self.choice = choice; return }
+        center.select(HTTThemeSelection(rawValue: choice.rawValue) ?? .auto)
     }
 
     func cycle() { select(choice.next) }
@@ -185,6 +192,7 @@ extension View {
     func byungkiThemed(_ palette: Palette) -> some View {
         self
             .environment(\.bkPalette, palette)
+            .environment(\.httPalette, palette.tokens)
             // Primary only (foregroundColor): a two-level foregroundStyle(text, muted) makes native .bordered/Menu bezels
             // fill with the muted secondary level (solid dark gray / brown on 라이트·프라이데이). Secondary text falls
             // back to the system secondary for the colorScheme set below.
@@ -286,6 +294,7 @@ struct ThemeButton: NSViewRepresentable {
         let s = store   // lives for the whole app (App @StateObject)
         v.choice = s.choice
         v.palette = s.palette
+        v.statusText = s.accountStatusText
         v.onSelect = { s.select($0) }
         v.needsDisplay = true
     }
@@ -294,6 +303,7 @@ struct ThemeButton: NSViewRepresentable {
 final class ThemeButtonView: NSView {
     var choice: ThemeChoice = .auto { didSet { if oldValue != choice { refreshAccessibility() } } }
     var palette: Palette = .light
+    var statusText: String?
     var onSelect: (ThemeChoice) -> Void = { _ in }
 
     private static let side: CGFloat = 26
@@ -476,6 +486,12 @@ final class ThemeButtonView: NSView {
             item.representedObject = c.rawValue
             item.state = c == choice ? .on : .off   // native checkmark = checked menu item for VoiceOver
             menu.addItem(item)
+        }
+        if let statusText {
+            menu.addItem(.separator())
+            let note = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            menu.addItem(note)
         }
         // Opens below the button; arrows / Return / Esc are the native menu keys.
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 4), in: self)

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import SwiftUI
+import HTTThemeCore
 import UniformTypeIdentifiers
 
 struct AppInputLanguageSettingsView: View {
@@ -64,7 +65,7 @@ struct AppInputLanguageSettingsView: View {
     private func recoveryBanner(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
                 .accessibilityHidden(true)
             Text(message)
                 .font(.callout)
@@ -74,7 +75,7 @@ struct AppInputLanguageSettingsView: View {
                 .accessibilityLabel("복구 알림 닫기")
         }
         .padding(10)
-        .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        .background(.httWarnSoft, in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Action Bar
@@ -169,7 +170,7 @@ struct AppInputLanguageSettingsView: View {
             }
         }
         .padding(10)
-        .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .background(.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Rules Section
@@ -200,7 +201,7 @@ struct AppInputLanguageSettingsView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 32)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .background(.httCard, in: RoundedRectangle(cornerRadius: 8))
             } else {
                 VStack(spacing: 6) {
                     ForEach(store.rules) { rule in
@@ -243,10 +244,10 @@ struct AppInputLanguageSettingsView: View {
                 if !isSourceInstalled {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.httWarn)
                         Text("설치되지 않은 입력 소스 ('\(rule.inputSourceName)') - 다른 언어로 변경해 주세요")
                             .font(.caption2)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.httWarn)
                     }
                 }
             }
@@ -286,8 +287,8 @@ struct AppInputLanguageSettingsView: View {
         .padding(10)
         .background(
             isSelected
-                ? Color.accentColor.opacity(0.12)
-                : Color(nsColor: .controlBackgroundColor),
+                ? AnyShapeStyle(.tint.opacity(0.12))
+                : AnyShapeStyle(.httCard),
             in: RoundedRectangle(cornerRadius: 8)
         )
     }
@@ -306,15 +307,15 @@ struct AppInputLanguageSettingsView: View {
             if let error = sheetErrorMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.httWarn)
                     Text(error)
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.httWarn)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+                .background(.httWarnSoft, in: RoundedRectangle(cornerRadius: 6))
             }
 
             ScrollView {
@@ -334,7 +335,7 @@ struct AppInputLanguageSettingsView: View {
                 .padding(8)
             }
             .frame(maxHeight: 180)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            .background(.httSurface, in: RoundedRectangle(cornerRadius: 6))
 
             HStack {
                 Text("기본 입력 소스:")

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import HTTThemeCore
 
 enum CleanupActivity: Equatable {
     case idle
@@ -900,15 +901,15 @@ final class MonitorViewModel: ObservableObject {
         }
     }
 
-    var statusColor: Color {
-        if hasMigrationError { return .red }
-        if isStandaloneConflictActive { return .orange }
-        if !isManagementEnabled { return .secondary }
+    var statusColor: HTTStyle {
+        if hasMigrationError { return HTTStyle(.danger) }
+        if isStandaloneConflictActive { return HTTStyle(.warn) }
+        if !isManagementEnabled { return HTTStyle(.muted) }
         switch diagnosis.status {
-        case .scanning: return .gray
-        case .healthy: return .green
-        case .caution: return .yellow
-        case .pressure: return .red
+        case .scanning: return HTTStyle(.muted)
+        case .healthy: return HTTStyle(.success)
+        case .caution: return HTTStyle(.warn)
+        case .pressure: return HTTStyle(.danger)
         }
     }
 }

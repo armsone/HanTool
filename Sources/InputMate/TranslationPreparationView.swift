@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 #if canImport(Translation)
 import Translation
 #endif
@@ -63,7 +64,7 @@ private struct TranslationPreparationContentView: View {
             if let message = statusMessage {
                 Text(message)
                     .font(.caption)
-                    .foregroundStyle(message.contains("실패") ? .orange : .secondary)
+                    .foregroundStyle(message.contains("실패") ? HTTStyle(.warn) : HTTStyle(.muted))
             }
 
             Text("macOS 26 이상에서 온디바이스 번역 모델을 준비해 두면, 사과''→apple 처럼 한국어 단어 뒤에 ''를 입력했을 때, 또는 문장 끝에 \\\\(역슬래시 두 번)를 입력했을 때(문장 번역, 단어 사전에는 저장하지 않음) 시스템 내부에서 안전하게 번역할 수 있습니다. 영어 문장을 한국어로 옮기는 데는 영어-한국어 모델이 필요하며, 모델이 없으면 자동으로 내려받지 않고 원문을 그대로 둡니다.")

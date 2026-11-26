@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 struct RegionEditorView: View {
     @Binding var region: ActivationRegion
@@ -14,7 +15,7 @@ struct RegionEditorView: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(.httCard)
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .stroke(Color.secondary.opacity(0.45), lineWidth: 2)
 

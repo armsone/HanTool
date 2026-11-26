@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 import AppKit
 
 /// Settings page for selecting preferred AI service, managing custom services,
@@ -382,10 +383,10 @@ public struct AIServiceSettingsView: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(palette.textColor)
             case .loggedIn, .connected:
-                Circle().fill(Color.green).frame(width: 6, height: 6)
+                Circle().fill(.httSuccess).frame(width: 6, height: 6)
                 Text(status.label)
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Color.green)
+                    .foregroundStyle(.httSuccess)
             case .notLoggedIn:
                 Circle().fill(palette.textColor.opacity(0.4)).frame(width: 6, height: 6)
                 Text(status.label)

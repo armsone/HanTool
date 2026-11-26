@@ -1,18 +1,19 @@
 import SwiftUI
+import HTTThemeCore
 
-/// 앱 전체에서 쓰는 색·간격. 청록(teal)과 파랑을 강조색으로 사용한다.
+/// USB 정리 화면의 색·간격.
 enum Theme {
-    static let accent = Color(red: 0.00, green: 0.55, blue: 0.62)
-    static let accentDeep = Color(red: 0.05, green: 0.36, blue: 0.62)
-    static let gradient = LinearGradient(colors: [accent, accentDeep], startPoint: .topLeading, endPoint: .bottomTrailing)
+    /// 강조색은 공용 팔레트를 따른다.
+    static let accent = HTTStyle(.accent)
+    static let gradient = HTTStyle(.accent)
     static let cardCorner: CGFloat = 12
 
-    static func color(for level: StatusMessage.Level) -> Color {
+    static func color(for level: StatusMessage.Level) -> HTTStyle {
         switch level {
         case .info: return accent
-        case .success: return .green
-        case .warning: return .orange
-        case .error: return .red
+        case .success: return HTTStyle(.success)
+        case .warning: return HTTStyle(.warn)
+        case .error: return HTTStyle(.danger)
         }
     }
 
@@ -25,12 +26,12 @@ enum Theme {
         }
     }
 
-    static func color(for outcome: OperationSummary.Outcome) -> Color {
+    static func color(for outcome: OperationSummary.Outcome) -> HTTStyle {
         switch outcome {
-        case .success: return .green
-        case .partial: return .orange
-        case .failed: return .red
-        case .cancelled: return .secondary
+        case .success: return HTTStyle(.success)
+        case .partial: return HTTStyle(.warn)
+        case .failed: return HTTStyle(.danger)
+        case .cancelled: return HTTStyle(.muted)
         }
     }
 
@@ -49,7 +50,7 @@ struct CardBackground: ViewModifier {
             .padding(16)
             .background(
                 RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(.httCard)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardCorner, style: .continuous)

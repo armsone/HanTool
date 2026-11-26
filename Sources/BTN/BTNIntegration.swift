@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import HTTThemeCore
 
 /// HTT 내부 BTN 모듈의 설정 키·기본값 및 UserDefaults 도메인 해석.
 public enum BTNPreferences {
@@ -635,10 +636,10 @@ public final class BTNIntegration: ObservableObject {
         return model.statusSymbolName
     }
 
-    public var statusColor: Color {
-        if hasMigrationError { return .red }
-        if isStandaloneConflictActive { return .orange }
-        if !isManagementEnabled || !isRuntimeActive { return .secondary }
+    var statusColor: HTTStyle {
+        if hasMigrationError { return HTTStyle(.danger) }
+        if isStandaloneConflictActive { return HTTStyle(.warn) }
+        if !isManagementEnabled || !isRuntimeActive { return HTTStyle(.muted) }
         return model.statusColor
     }
 

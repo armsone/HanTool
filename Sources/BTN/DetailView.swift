@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import HTTThemeCore
 
 /// Mac 관리 상세 영역: 지표, 진단 설명, 개발 관련 프로세스 목록(HTT 메인 창의 Mac 관리 섹션에 직접 들어간다).
 struct DetailView: View {
@@ -49,7 +50,7 @@ struct DetailView: View {
                     Image(systemName: model.hasMigrationError
                           ? "exclamationmark.triangle.fill"
                           : (model.isStandaloneConflictActive ? "pause.circle.fill" : "info.circle.fill"))
-                        .foregroundStyle(model.hasMigrationError ? .red : (model.isStandaloneConflictActive ? .orange : .secondary))
+                        .foregroundStyle(model.hasMigrationError ? HTTStyle(.danger) : (model.isStandaloneConflictActive ? HTTStyle(.warn) : HTTStyle(.muted)))
                 }
                 .padding(4)
             }
@@ -103,7 +104,7 @@ struct DetailView: View {
                         GridRow {
                             Text("테스트 복제본 의심")
                             Text("\(storage.ephemeralSimulatorCount)개")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(.httWarn)
                         }
                     }
                     GridRow {
@@ -395,7 +396,7 @@ struct DetailView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(alignment: .firstTextBaseline) {
                                     Image(systemName: entry.status == .cleaned ? "checkmark.circle" : "exclamationmark.triangle")
-                                        .foregroundStyle(entry.status == .cleaned ? .green : .orange)
+                                        .foregroundStyle(entry.status == .cleaned ? HTTStyle(.success) : HTTStyle(.warn))
                                     Text("\(entry.category) · \(entry.target)")
                                         .lineLimit(1)
                                     Spacer()
@@ -491,7 +492,7 @@ private struct CleanupCandidateRow: View {
             Button(action: toggle) {
                 HStack(alignment: .top, spacing: 10) {
                 Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(candidate.kind.koreanLabel).bold()
@@ -518,7 +519,7 @@ private struct CleanupCandidateRow: View {
                         Text(candidate.recoveryMethod.koreanLabel)
                     }
                     .font(.caption2)
-                    .foregroundStyle(candidate.isRecoverable ? .green : .orange)
+                    .foregroundStyle(candidate.isRecoverable ? HTTStyle(.success) : HTTStyle(.warn))
                 }
                 }
                 .contentShape(Rectangle())
@@ -554,7 +555,7 @@ private struct CleanupResultLabel: View {
             }
         } icon: {
             Image(systemName: status == .cleaned ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(status == .cleaned ? .green : .orange)
+                .foregroundStyle(status == .cleaned ? HTTStyle(.success) : HTTStyle(.warn))
         }
     }
 }
@@ -572,7 +573,7 @@ private struct ProcessCleanupCandidateRow: View {
             Button(action: toggle) {
                 HStack(alignment: .top, spacing: 10) {
                 Image(systemName: candidate.isActionable ? (isSelected ? "checkmark.square.fill" : "square") : "eye")
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(candidate.kind.koreanLabel).bold()
@@ -597,7 +598,7 @@ private struct ProcessCleanupCandidateRow: View {
                         Text(candidate.isActionable ? "종료 후 복구 불가" : "관찰 전용 · 종료 차단")
                     }
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
                 }
                 }
                 .contentShape(Rectangle())
@@ -696,7 +697,7 @@ private struct CleanupConfirmationView: View {
             if irreversibleCount > 0 {
                 VStack(alignment: .leading, spacing: 4) {
                     Label("시뮬레이터 \(irreversibleCount)개는 실행 후 내부 데이터를 복구할 수 없습니다.", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.httWarn)
                     if simulatorSelectionBytes > 0 {
                         Text("시뮬레이터에서 예상 확보 \(DiagnosticEngine.formatBytes(simulatorSelectionBytes)) · 데이터 초기화는 기기 자체를 남기고 앱·콘텐츠 데이터만 지웁니다.")
                             .font(.caption)
@@ -710,7 +711,7 @@ private struct CleanupConfirmationView: View {
                         + "의도적으로 띄워 둔 서버나 진행 중인 작업을 중단시킬 수 있습니다.",
                     systemImage: "exclamationmark.triangle.fill"
                 )
-                .foregroundStyle(.orange)
+                .foregroundStyle(.httWarn)
             }
             List {
                 ForEach(model.selectedCandidates) { candidate in
@@ -733,7 +734,7 @@ private struct CleanupConfirmationView: View {
                             Text("방식: \(candidate.recoveryMethod.koreanLabel)")
                             Text("·")
                             Text(candidate.isRecoverable ? "복구 가능" : "복구 불가")
-                                .foregroundStyle(candidate.isRecoverable ? .green : .orange)
+                                .foregroundStyle(candidate.isRecoverable ? HTTStyle(.success) : HTTStyle(.warn))
                             Text("·")
                             Text("위험도: \(candidate.risk.koreanLabel)")
                         }
@@ -805,7 +806,7 @@ private struct ProcessRow: View {
             if let note = process.uncertaintyNote {
                 Label(note, systemImage: "questionmark.circle")
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.httWarn)
             }
         }
         .padding(.vertical, 2)
@@ -827,10 +828,10 @@ private struct CleanupReceiptCardView: View {
             }
             HStack(spacing: 12) {
                 Text("완료 \(receipt.cleanedCount)건")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(.httSuccess)
                 if receipt.blockedCount > 0 {
                     Text("차단 \(receipt.blockedCount)건")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.httWarn)
                 }
                 if receipt.failedCount > 0 {
                     Text("실패 \(receipt.failedCount)건")

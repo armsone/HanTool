@@ -1,4 +1,5 @@
 import SwiftUI
+import HTTThemeCore
 
 /// HTT 메인 창의 사이드바 섹션. 모든 기능이 이 한 창 안에서 목적별로 이동한다.
 /// 홈, 메일·이미지 번역, 화면 번역, 브라우저 번역, 입력 도우미, Mac 관리, 사용 방법, 앱 설정으로 구성된다.
@@ -170,6 +171,7 @@ public struct SettingsView: View {
             }
         }
         .preferredColorScheme(appearance.effectiveColorScheme(for: systemColorScheme))
+        .environment(\.httPalette, HTTThemeCenter.shared.paletteID.tokens)
     }
 
     // MARK: - 사이드바 (Sidebar)
