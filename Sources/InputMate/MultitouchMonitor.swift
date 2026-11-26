@@ -79,13 +79,16 @@ final class MultitouchMonitor {
         }
     }
 
-    var onActivationTouch: (() -> Void)?
+    var onActivationTouch: ((Double) -> Void)?
 
     private let lock = NSLock()
     private var activationRegion = ActivationRegion.default
     private var ignoredFingerIDs = Set<Int32>()
     private var activeFingerIDs = Set<Int32>()
     private var isArmed = false
+    private var activationEarliestUptime: Double = 0
+    private var lastContactTime: Double = 0
+    private var recentContactGraceSeconds: Double = 0.080
 
     private var frameworkHandle: UnsafeMutableRawPointer?
     private var device: UnsafeMutableRawPointer?
@@ -96,7 +99,13 @@ final class MultitouchMonitor {
     var isRunning: Bool { device != nil }
 
     var hasActiveTouches: Bool {
-        lock.withLock { !activeFingerIDs.isEmpty }
+        lock.withLock {
+            if !activeFingerIDs.isEmpty { return true }
+            // Grace window (80ms): preserves trackpad contact briefly across frame gaps or lift
+            // so physical tap/click tail is still reliably classified as trackpad without blocking mice.
+            let now = ProcessInfo.processInfo.systemUptime
+            return (now - lastContactTime) < recentContactGraceSeconds
+        }
     }
 
     func start() throws {
@@ -143,6 +152,8 @@ final class MultitouchMonitor {
         guard let device else { return }
         lock.withLock {
             isArmed = false
+            activationEarliestUptime = 0
+            lastContactTime = 0
             ignoredFingerIDs.removeAll()
             activeFingerIDs.removeAll()
         }
@@ -161,9 +172,10 @@ final class MultitouchMonitor {
         lock.withLock { activationRegion = region }
     }
 
-    func arm() {
+    func arm(earliestActivationUptime: Double = 0) {
         lock.withLock {
             ignoredFingerIDs = activeFingerIDs
+            activationEarliestUptime = earliestActivationUptime
             isArmed = true
         }
     }
@@ -171,28 +183,39 @@ final class MultitouchMonitor {
     func disarm() {
         lock.withLock {
             isArmed = false
+            activationEarliestUptime = 0
             ignoredFingerIDs.removeAll()
         }
     }
 
     fileprivate func handleFrame(_ touches: [MTTouch]) {
         var shouldActivate = false
+        let now = ProcessInfo.processInfo.systemUptime
 
         lock.withLock {
             let currentTouches = touches.filter { $0.state == 3 || $0.state == 4 }
             let currentIDs = Set(currentTouches.map(\.fingerID))
+            if currentIDs.isEmpty && !activeFingerIDs.isEmpty {
+                lastContactTime = now
+            }
             ignoredFingerIDs.formIntersection(currentIDs)
 
             if isArmed {
+                let isEarly = now < activationEarliestUptime
                 for touch in currentTouches where touch.state == 3 && !ignoredFingerIDs.contains(touch.fingerID) {
                     let point = NormalizedPoint(
                         x: Double(touch.normalizedVector.position.x),
                         y: Double(touch.normalizedVector.position.y)
                     )
                     if activationRegion.contains(point) {
-                        isArmed = false
-                        shouldActivate = true
-                        break
+                        if isEarly {
+                            ignoredFingerIDs.insert(touch.fingerID)
+                        } else {
+                            isArmed = false
+                            activationEarliestUptime = 0
+                            shouldActivate = true
+                            break
+                        }
                     }
                 }
             }
@@ -201,7 +224,7 @@ final class MultitouchMonitor {
 
         if shouldActivate {
             DispatchQueue.main.async { [weak self] in
-                self?.onActivationTouch?()
+                self?.onActivationTouch?(now)
             }
         }
     }

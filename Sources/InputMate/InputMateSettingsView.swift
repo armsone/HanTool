@@ -227,7 +227,7 @@ struct InputMateSettingsView: View {
 
                     Section("긴급 해제") {
                         LabeledContent("단축키", value: "⌃⌥⌘ Esc")
-                        Text("트랙패드가 아닌 마우스 등 외부 포인터 장치를 조작하거나 위 단축키를 누르면 즉시 잠금이 해제됩니다.")
+                        Text("위 단축키를 누르면 즉시 잠금이 해제됩니다. 클릭 차단을 켜면 잠금 중에는 외장 마우스 클릭도 차단됩니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
