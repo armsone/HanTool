@@ -31,6 +31,7 @@ final class InputMateAppState: ObservableObject {
     private var accessibilityPollingCancellable: AnyCancellable?
     private var automaticUnlockTask: Task<Void, Never>?
     private var lastAutomaticServiceRecoveryAt: Date?
+    private var lastActualKeyDownUptime: Double = 0
 
     // 권한 요청 창을 이미 한 번 띄웠는지만 기억한다. 권한이 있다는 근거로는 쓰지 않고 자동 재요청을 막는 데만 쓴다.
     private let accessibilityPromptedKey = "TrackpadGuard.didPromptForAccessibility"
@@ -78,8 +79,13 @@ final class InputMateAppState: ObservableObject {
         eventTap.shouldBlock = { [weak self] type in
             self?.shouldBlock(type) ?? false
         }
-        multitouchMonitor.onActivationTouch = { [weak self] in
-            self?.unlock(reason: nil)
+        multitouchMonitor.onActivationTouch = { [weak self] touchUptime in
+            guard let self, self.isLocked else { return }
+            // Stale guard: verify touch is not older than the latest actual keyDown
+            if touchUptime < self.lastActualKeyDownUptime {
+                return
+            }
+            self.unlock(reason: nil)
         }
         healthMonitor.onIssue = { [weak self] issue, snapshot in
             self?.recoverFromHealthIssue(issue, snapshot: snapshot)
@@ -366,8 +372,10 @@ final class InputMateAppState: ObservableObject {
     // @Published는 같은 값을 다시 대입해도 알림을 보내므로 실제 전환만 발행한다.
     private func lockForTyping() {
         guard isStarted, settings.preferences.isEnabled, settings.preferences.trackpadProtectionEnabled, serviceStatus == .ready else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        lastActualKeyDownUptime = now
         setLocked(true)
-        multitouchMonitor.arm()
+        multitouchMonitor.arm(earliestActivationUptime: now + 0.250)
         scheduleAutomaticUnlock()
     }
 
@@ -408,12 +416,26 @@ final class InputMateAppState: ObservableObject {
 
         guard isStarted, settings.preferences.trackpadProtectionEnabled, isLocked else { return false }
 
-        if isPointerInput(type), !multitouchMonitor.hasActiveTouches {
-            unlock(reason: nil)
-            return false
+        let preferences = settings.preferences
+        let isClickEvent: Bool = switch type {
+        case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp:
+            true
+        default:
+            false
         }
 
-        let preferences = settings.preferences
+        // 클릭 차단이 켜져 있는 동안에는 터치 관찰 여부(마우스 휴리스틱)와 무관하게 모든 마우스 버튼 이벤트를 차단한다.
+        // 터치 없는 움직임/스크롤은 타이핑 잠금을 해제하지 않고 정상 통과시키며, 클릭 차단이 꺼져 있을 때만 기존 외부 포인터 통과 및 잠금 해제를 유지한다.
+        if isClickEvent && preferences.blockClicks {
+            return true
+        }
+
+        if isPointerInput(type), !multitouchMonitor.hasActiveTouches {
+            if !preferences.blockClicks {
+                unlock(reason: nil)
+            }
+            return false
+        }
 
         return switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:

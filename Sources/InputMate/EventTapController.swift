@@ -1,5 +1,8 @@
 import AppKit
 import ApplicationServices
+import OSLog
+
+private let eventTapLogger = Logger(subsystem: "com.local.screentranslator", category: "EventTap")
 
 final class EventTapController {
     var beforeEvent: ((CGEventType, CGEvent, CGEventTapProxy) -> Bool)?
@@ -11,6 +14,7 @@ final class EventTapController {
     private var runLoopSource: CFRunLoopSource?
     private var keyboardEventTap: CFMachPort?
     private var keyboardRunLoopSource: CFRunLoopSource?
+    private var buttonBlockStates: [Int64: Bool] = [:]
 
     var isRunning: Bool { eventTap != nil && keyboardEventTap != nil }
 
@@ -85,10 +89,13 @@ final class EventTapController {
         keyboardEventTap = nil
         runLoopSource = nil
         eventTap = nil
+        buttonBlockStates.removeAll()
     }
 
     fileprivate func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            eventTapLogger.warning("Event tap disabled by system (type: \(type.rawValue, privacy: .public)), re-enabling")
+            buttonBlockStates.removeAll()
             if let eventTap {
                 CGEvent.tapEnable(tap: eventTap, enable: true)
             }
@@ -118,10 +125,31 @@ final class EventTapController {
             return Unmanaged.passUnretained(event)
         }
 
-        if shouldBlock?(type) == true {
-            return nil
+        let buttonNumber: Int64?
+        switch type {
+        case .leftMouseDown, .leftMouseUp:
+            buttonNumber = 0
+        case .rightMouseDown, .rightMouseUp:
+            buttonNumber = 1
+        case .otherMouseDown, .otherMouseUp:
+            buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
+        default:
+            buttonNumber = nil
         }
-        return Unmanaged.passUnretained(event)
+
+        switch type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            let block = shouldBlock?(type) == true
+            if let buttonNumber {
+                buttonBlockStates[buttonNumber] = block
+            }
+            return block ? nil : Unmanaged.passUnretained(event)
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            let block = buttonNumber.flatMap { buttonBlockStates.removeValue(forKey: $0) } ?? (shouldBlock?(type) == true)
+            return block ? nil : Unmanaged.passUnretained(event)
+        default:
+            return (shouldBlock?(type) == true) ? nil : Unmanaged.passUnretained(event)
+        }
     }
 }
 

@@ -72,9 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var browserHotKey: GlobalHotKey?
     private var statusItem: NSStatusItem?
     private var networkRateStatusItem: NSStatusItem?
+    private var cachedNormalMenuBarIcon: NSImage?
+    private var cachedLockedMenuBarIcon: NSImage?
     private var mainStatusMenu: NSMenu?
     private var networkRateMenu: NSMenu?
     private var networkRateCancellables = Set<AnyCancellable>()
+    private var trackpadLockCancellable: AnyCancellable?
     private var isStatusMenuOpen = false
     private var explicitAppTerminationRequested = false
 
@@ -359,7 +362,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 앱 아이콘 전체를 메뉴 막대 크기(18pt)로 축소한 이미지.
     /// 기존의 8.5% 모서리 크롭을 제거하여 앱 아이콘 본래의 둥근 모서리 실루엣과 투명 여백을 그대로 보존한다.
-    private func menuBarIconImage() -> NSImage? {
+    private func menuBarIconImage(isLocked: Bool = false) -> NSImage? {
+        if isLocked {
+            if let cachedLockedMenuBarIcon { return cachedLockedMenuBarIcon }
+            guard let baseIcon = menuBarIconImage(isLocked: false) else { return nil }
+            let lockedIcon = renderLockedMenuBarIcon(from: baseIcon)
+            cachedLockedMenuBarIcon = lockedIcon
+            return lockedIcon
+        }
+
+        if let cachedNormalMenuBarIcon { return cachedNormalMenuBarIcon }
         guard let icon = NSApp.applicationIconImage else { return nil }
         let size = NSSize(width: 18, height: 18)
         let sourceRect = NSRect(origin: .zero, size: icon.size)
@@ -368,7 +380,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         icon.draw(in: NSRect(origin: .zero, size: size), from: sourceRect, operation: .sourceOver, fraction: 1)
         image.unlockFocus()
         image.isTemplate = false
+        cachedNormalMenuBarIcon = image
         return image
+    }
+
+    /// 트랙패드가 실제로 잠겨있을 때 기존 메뉴 막대 아이콘의 흰색 및 안티앨리어싱된 밝은 테두리 부분을 빨간색으로 변환하여 캐시한다.
+    private func renderLockedMenuBarIcon(from baseImage: NSImage) -> NSImage {
+        let size = baseImage.size
+        guard let tiffData = baseImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let cgImage = bitmap.cgImage else {
+            return baseImage
+        }
+
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return baseImage }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ), let contextData = context.data else {
+            return baseImage
+        }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixelData = contextData.bindMemory(to: UInt8.self, capacity: height * bytesPerRow)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                let offset = (y * bytesPerRow) + (x * bytesPerPixel)
+                let r = Double(pixelData[offset])
+                let g = Double(pixelData[offset + 1])
+                let b = Double(pixelData[offset + 2])
+                let a = Double(pixelData[offset + 3])
+
+                guard a > 0 else { continue }
+
+                // 비곱셈화(un-premultiply)된 원본 색상 채널 비율 추정
+                let normR = r / a
+                let normG = g / a
+                let normB = b / a
+
+                let maxC = max(normR, max(normG, normB))
+                let minC = min(normR, min(normG, normB))
+                let diff = maxC - minC
+
+                // 흰색 및 밝은 무채색 테두리: 채도가 매우 낮고 밝기가 높은 픽셀 감지
+                let isWhitish = (diff < 0.18) && (minC > 0.65)
+                if isWhitish {
+                    // 흰색 부분을 빨간색(R=1.0, G=0.0, B=0.0)으로 전환 (premultiplied: R=a, G=0, B=0)
+                    pixelData[offset] = pixelData[offset + 3]
+                    pixelData[offset + 1] = 0
+                    pixelData[offset + 2] = 0
+                }
+            }
+        }
+
+        guard let outputCGImage = context.makeImage() else { return baseImage }
+        let resultImage = NSImage(cgImage: outputCGImage, size: size)
+        resultImage.isTemplate = false
+        return resultImage
     }
 
     // MARK: - 창 표시/숨김
@@ -412,6 +494,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.menu = menu
         mainStatusMenu = menu
         statusItem = item
+        setupTrackpadLockObservation()
+    }
+
+    private func setupTrackpadLockObservation() {
+        // Pre-warm the locked menu bar icon outside the keyboard event handler
+        _ = menuBarIconImage(isLocked: true)
+
+        trackpadLockCancellable = InputMateCoordinator.shared.appState.$isLocked
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isLocked in
+                self?.updateMenuBarIconForTrackpadLock(isLocked: isLocked)
+            }
+    }
+
+    private func updateMenuBarIconForTrackpadLock(isLocked: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.image = menuBarIconImage(isLocked: isLocked)
     }
 
     private func buildNetworkRateStatusItem() {
