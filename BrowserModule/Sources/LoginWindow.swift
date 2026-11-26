@@ -178,6 +178,22 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     /// The one address the fallback replay may load (fragment ignored); every top-level redirect away from it is cancelled.
     private var directFallbackURL: String?
 
+    /// YouTube's embedded player answers error 153 when a top-level embed request has no Referer, and a request this app
+    /// re-issues itself (link replay, retry, ad-wall reload) has none. Per YouTube's required-minimum-functionality policy
+    /// such a request gets the app's own identity, the https bundle ID, and nothing else changes. Only exact https
+    /// /embed/VIDEO_ID addresses on YouTube's own hosts that carry no Referer; every other request is returned as-is.
+    static func youTubeEmbedReferer(_ request: URLRequest) -> URLRequest {
+        guard request.value(forHTTPHeaderField: "Referer") == nil, let url = request.url,
+              url.scheme?.lowercased() == "https", url.port == nil, url.user == nil, url.password == nil,
+              let host = url.host?.lowercased(),
+              ["www.youtube.com", "youtube.com", "www.youtube-nocookie.com", "youtube-nocookie.com"].contains(host),
+              url.path.range(of: #"^/embed/[A-Za-z0-9_-]{6,32}$"#, options: .regularExpression) != nil,
+              let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty else { return request }
+        var out = request
+        out.setValue("https://" + bundleID, forHTTPHeaderField: "Referer")
+        return out
+    }
+
     private static func createSafeGETRequest(for url: URL) -> URLRequest? {
         guard let scheme = url.scheme?.lowercased(), scheme == "https",
               let host = url.host, !host.isEmpty,
@@ -710,7 +726,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     /// cancelled and replayed here for the connection policy, which would otherwise drop that intent).
     private func startLoad(_ request: URLRequest, in wv: WKWebView, asDownload: Bool) {
         guard asDownload, let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            wv.load(request)
+            wv.load(Self.youTubeEmbedReferer(request))
             return
         }
         wv.startDownload(using: request) { [weak self] download in
@@ -746,7 +762,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             self.lastError = nil
             self.pageStartedAt = Date()
             if let safeReq = self.safeRetryRequest, self.currentMainFrameMethod == "GET" {
-                wv.load(safeReq.request)
+                wv.load(Self.youTubeEmbedReferer(safeReq.request))
             } else if wv.url != nil {
                 wv.reload()
             } else if let url = self.currentURL ?? URL(string: self.address) {
@@ -1031,7 +1047,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             self.pageStartedAt = Date()
             self.isAutoReloading = true
             if let wv = self.webView {
-                wv.load(safeReq.request)
+                wv.load(Self.youTubeEmbedReferer(safeReq.request))
             }
         }
     }
