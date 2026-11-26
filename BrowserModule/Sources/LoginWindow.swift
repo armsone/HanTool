@@ -591,6 +591,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         // The translation extension's controller is bound to the primary store only.
         if primary { app.extensions.attach(to: config, store: store) }
         installDiscovery(into: config)
+        Self.installAliExpressSearchPatch(into: config)
         PageAudioController.shared.prepareConfiguration(config)
         let wv = LinkMenuWebView(frame: .zero, configuration: config)
         install(wv, mode: mode, route: route, primary: primary)
@@ -631,6 +632,20 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
             config.userContentController = ucc
             discoveryProblem = "영상 찾기 기능을 불러오지 못했습니다. '현재 페이지 분석'은 그대로 쓸 수 있습니다."
         }
+    }
+
+    /// Fix zero-size lazy-load placeholder div in AliExpress search bundle that causes offscreen image translation
+    private static func installAliExpressSearchPatch(into config: WKWebViewConfiguration) {
+        let scriptSource = """
+        if ((location.hostname === "ko.aliexpress.com" || location.hostname === "www.aliexpress.com") && location.pathname.startsWith("/w/")) {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync('.search-card-item [class*="images--imageWindow--"] > .lazy-load { flex: 0 0 100% !important; height: 100% !important; }');
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        }
+        """
+        let world = WKContentWorld.world(name: MediaDiscovery.worldName)
+        let userScript = WKUserScript(source: scriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: world)
+        config.userContentController.addUserScript(userScript)
     }
 
     /// Right-click target capture (isolated world, all frames): the exact link of each trusted `contextmenu` event is
@@ -2600,6 +2615,7 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         configuration.preferences.isElementFullscreenEnabled = true
         if primaryStore { app.extensions.attach(to: configuration, store: configuration.websiteDataStore) }
         installDiscovery(into: configuration)
+        Self.installAliExpressSearchPatch(into: configuration)
         guard configuration.userContentController !== openerUCC else {
             ownedUCC = nil
             sessionToken += 1
