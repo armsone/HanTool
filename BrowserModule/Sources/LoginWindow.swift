@@ -3,6 +3,7 @@ import HTTThemeCore
 import AppKit
 import WebKit
 import Combine
+import Security
 
 /// One browser tab (the "브라우저" screen shows the active one; the former login window routes here). Owned by AppModel
 /// (`tabs`) so it survives sidebar changes; every tab keeps its own WebView, history, candidates and callbacks, while
@@ -145,6 +146,14 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     private var stopEpoch = 0
     private var lastMainFrameURL: URL?
     private var currentNavigation: WKNavigation?
+    private var outstandingClaudeHandoffAttemptID: UUID?
+    private struct ClaudeManualAuthGrant {
+        let sessionToken: Int
+        let generation: Int
+        let committedURL: URL
+        let timestamp: ContinuousClock.Instant
+    }
+    private var claudeManualAuthGrant: ClaudeManualAuthGrant?
 
     private struct SafeRetryRequest {
         let request: URLRequest
@@ -638,6 +647,100 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         guard token == sessionToken, let wv = webView as? LinkMenuWebView, message.webView === wv,
               message.world.name == LinkMenuCapture.worldName,
               let body = message.body as? [String: Any] else { return }
+        if (body["kind"] as? String) == "claudeManualAuthClick" {
+            guard message.frameInfo.isMainFrame,
+                  let frameURL = message.frameInfo.request.url,
+                  isPermittedClaudeAuthSource(frameURL),
+                  sawProjectID == nil,
+                  let app = appModel,
+                  app.browser === self,
+                  app.selectedTab == .browser,
+                  let window = wv.window,
+                  window.isVisible,
+                  let committed = popupCommittedURL,
+                  isPermittedClaudeAuthSource(committed),
+                  let page = wv.url,
+                  isPermittedClaudeAuthSource(page) else { return }
+
+            let origin = message.frameInfo.securityOrigin
+            guard origin.protocol.lowercased() == "https",
+                  origin.host.lowercased() == "claude.ai",
+                  origin.port == 0 || origin.port == 443 else { return }
+
+            claudeManualAuthGrant = ClaudeManualAuthGrant(
+                sessionToken: token,
+                generation: self.generation,
+                committedURL: committed,
+                timestamp: .now
+            )
+            return
+        }
+        if (body["kind"] as? String) == "externalAppClick" {
+            guard sawProjectID == nil,
+                  let app = appModel,
+                  app.browser === self,
+                  app.selectedTab == .browser,
+                  let window = wv.window,
+                  window.isVisible,
+                  let committed = popupCommittedURL,
+                  let page = wv.url,
+                  let raw = body["link"] as? String, raw.count <= 4096,
+                  let targetURL = URL(string: raw),
+                  let scheme = targetURL.scheme?.lowercased(),
+                  targetURL.user == nil, targetURL.password == nil else { return }
+
+            if let components = URLComponents(url: targetURL, resolvingAgainstBaseURL: false) {
+                let parsedScheme = components.scheme?.lowercased()
+                let parsedHost = components.host?.lowercased()
+                let parsedPath = components.path
+                if parsedScheme == "claude" && parsedHost == "login" && (parsedPath == "/google-auth" || parsedPath == "/google-auth/") {
+                    return
+                }
+            }
+
+            guard let pageScheme = page.scheme?.lowercased(),
+                  (pageScheme == "http" || pageScheme == "https"),
+                  let pageHost = page.host?.lowercased(),
+                  let committedScheme = committed.scheme?.lowercased(),
+                  (committedScheme == "http" || committedScheme == "https"),
+                  let committedHost = committed.host?.lowercased() else { return }
+
+            let origin = message.frameInfo.securityOrigin
+            guard (origin.protocol == "http" || origin.protocol == "https"),
+                  !origin.host.isEmpty,
+                  pageScheme == origin.protocol,
+                  pageHost == origin.host.lowercased(),
+                  committedScheme == origin.protocol,
+                  committedHost == origin.host.lowercased() else { return }
+
+            let deniedSchemes: Set<String> = [
+                "http", "https", "ws", "wss", "ftp", "ftps", "file", "data", "blob", "javascript", "about"
+            ]
+            guard !deniedSchemes.contains(scheme),
+                  scheme.range(of: "^[a-z][a-z0-9+.-]*$", options: .regularExpression) != nil else { return }
+
+            guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: targetURL) else { return }
+            let standardizedAppURL = appURL.standardizedFileURL
+            let myBundleURL = Bundle.main.bundleURL.standardizedFileURL
+            if standardizedAppURL == myBundleURL { return }
+            let targetBundleID = Bundle(url: standardizedAppURL)?.bundleIdentifier
+            if targetBundleID == Bundle.main.bundleIdentifier { return }
+
+            lastError = nil
+            let capturedGen = self.generation
+            let config = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open([targetURL], withApplicationAt: standardizedAppURL, configuration: config) { [weak self] _, error in
+                if error != nil {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self,
+                              self.sessionToken == token,
+                              self.generation == capturedGen else { return }
+                        self.lastError = "요청한 외부 앱을 실행하는 중 오류가 발생했습니다."
+                    }
+                }
+            }
+            return
+        }
         var link: String? = nil
         if let raw = body["link"] as? String, raw.count <= 4096 { link = raw }
         guard let ms = (body["time"] as? NSNumber)?.doubleValue, ms.isFinite else { return }
@@ -1850,9 +1953,122 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
         return policy
     }
 
+    private func isPermittedClaudeAuthSource(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        guard components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "claude.ai",
+              components.user == nil,
+              components.password == nil,
+              components.port == nil || components.port == 443 else {
+            return false
+        }
+        return components.path == "/login/popup-google-auth" || components.path == "/login/popup-google-auth/"
+    }
+
+    private func handleClaudeGoogleAuthHandoffIfNeeded(
+        _ webView: WKWebView,
+        _ navigationAction: WKNavigationAction,
+        url: URL
+    ) -> Bool {
+        guard webView === self.webView,
+              sawProjectID == nil,
+              let app = appModel,
+              app.browser === self,
+              app.selectedTab == .browser,
+              let window = webView.window,
+              window.isVisible,
+              navigationAction.sourceFrame.isMainFrame,
+              !navigationAction.shouldPerformDownload,
+              let sourceURL = navigationAction.sourceFrame.request.url,
+              isPermittedClaudeAuthSource(sourceURL),
+              let committedURL = popupCommittedURL,
+              isPermittedClaudeAuthSource(committedURL) else {
+            return false
+        }
+
+        let origin = navigationAction.sourceFrame.securityOrigin
+        guard origin.protocol.lowercased() == "https",
+              origin.host.lowercased() == "claude.ai",
+              origin.port == 0 || origin.port == 443 else {
+            return false
+        }
+
+        if let targetFrame = navigationAction.targetFrame, !targetFrame.isMainFrame {
+            return false
+        }
+
+        guard let dest = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              dest.scheme?.lowercased() == "claude",
+              dest.host?.lowercased() == "login",
+              dest.path == "/google-auth",
+              dest.user == nil,
+              dest.password == nil,
+              dest.port == nil,
+              dest.fragment == nil else {
+            return false
+        }
+
+        let queryItems = dest.queryItems ?? []
+        let codes = queryItems.filter { $0.name == "code" }
+        let nonces = queryItems.filter { $0.name == "hop_nonce" }
+        guard codes.count == 1, let code = codes.first?.value, !code.isEmpty,
+              nonces.count == 1, let nonce = nonces.first?.value, !nonce.isEmpty else {
+            return false
+        }
+
+        guard let grant = claudeManualAuthGrant else { return false }
+        claudeManualAuthGrant = nil
+        guard grant.sessionToken == sessionToken,
+              grant.generation == generation,
+              grant.committedURL == committedURL,
+              grant.timestamp.duration(to: .now) <= .seconds(1) else {
+            return false
+        }
+
+        guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") else {
+            return false
+        }
+
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &staticCode) == errSecSuccess,
+              let staticCode else {
+            return false
+        }
+
+        var requirement: SecRequirement?
+        let reqString = "identifier \"com.anthropic.claudefordesktop\" and anchor apple generic and certificate leaf[subject.OU] = \"Q6L2SF6YDW\"" as CFString
+        guard SecRequirementCreateWithString(reqString, [], &requirement) == errSecSuccess,
+              let requirement,
+              SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSCheckAllArchitectures), requirement) == errSecSuccess else {
+            return false
+        }
+
+        lastError = nil
+        guard outstandingClaudeHandoffAttemptID == nil else {
+            return true
+        }
+        let attemptID = UUID()
+        outstandingClaudeHandoffAttemptID = attemptID
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        NSWorkspace.shared.open([url], withApplicationAt: applicationURL, configuration: configuration) { [weak self] _, error in
+            Task { @MainActor [weak self] in
+                guard let self, self.outstandingClaudeHandoffAttemptID == attemptID else { return }
+                self.outstandingClaudeHandoffAttemptID = nil
+                if error != nil {
+                    self.lastError = "Claude 앱을 열지 못했습니다."
+                }
+            }
+        }
+        return true
+    }
+
     private func decideNavigationAction(_ webView: WKWebView, _ navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
         guard webView === self.webView else { return .cancel }
         guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else { return .cancel }
+        if handleClaudeGoogleAuthHandoffIfNeeded(webView, navigationAction, url: url) {
+            return .cancel
+        }
         if url.scheme?.lowercased() == "file" {
             if navigationAction.targetFrame?.isMainFrame == true {
                 if let authURL = authorizedPlannerReportURL,
@@ -2047,6 +2263,8 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         lastError = nil
         if webView === self.webView {
+            outstandingClaudeHandoffAttemptID = nil
+            claudeManualAuthGrant = nil
             popupCommittedURL = nil
             webView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
             guard !isShowingHome else { return }
@@ -2213,6 +2431,10 @@ final class LoginBrowserModel: NSObject, ObservableObject, WKNavigationDelegate,
     /// The checks below add the app-level limits.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url,
+           handleClaudeGoogleAuthHandoffIfNeeded(webView, navigationAction, url: url) {
+            return nil
+        }
         // Routed popup handling for SAW project tab pools (H3)
         if let onOpenSAWPopup = self.onOpenSAWPopup {
             guard webView === self.webView, let app = appModel else { return nil }
@@ -2419,6 +2641,84 @@ enum LinkMenuCapture {
             try { var w = window; for (var i = 0; i < 8 && w !== w.top; i++) { w = w.parent; void w.document.body; } return w === w.top; }
             catch (e) { return false; }
           }
+          function findAnchor(e) {
+            if (!sameOriginChain()) return null;
+            var path = e.composedPath ? e.composedPath() : [e.target];
+            for (var i = 0; i < path.length && i < 60; i++) {
+              var n = path[i];
+              if (n && n.nodeType === 1 && n.tagName === 'A' && n.getAttribute('href') !== null) {
+                if (n.hasAttribute('download')) return null;
+                var raw = (typeof n.href === 'string') ? n.href : n.getAttribute('href');
+                try { return new URL(raw, n.baseURI).href; } catch (err) { return null; }
+              }
+            }
+            return null;
+          }
+          function isCustomAppScheme(url) {
+            if (typeof url !== 'string' || url.length > 4096) return false;
+            var m = url.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+            if (!m) return false;
+            var s = m[1].toLowerCase();
+            var standard = { http:1, https:1, ws:1, wss:1, ftp:1, ftps:1, file:1, data:1, blob:1, javascript:1, about:1 };
+            return !standard.hasOwnProperty(s);
+          }
+          function isClaudeOAuthURL(url) {
+            if (typeof url !== 'string' || url.length > 4096) return false;
+            try {
+              var u = new URL(url);
+              if (u.protocol.toLowerCase() !== 'claude:') return false;
+              if (u.hostname.toLowerCase() !== 'login') return false;
+              var p = u.pathname;
+              return p === '/google-auth' || p === '/google-auth/';
+            } catch (err) {
+              return false;
+            }
+          }
+          function isOfficialClaudeAuthPage() {
+            try {
+              if (window !== window.top) return false;
+              var loc = window.location;
+              if (loc.protocol !== 'https:' || loc.hostname.toLowerCase() !== 'claude.ai') return false;
+              var port = loc.port;
+              if (port && port !== '443') return false;
+              var path = loc.pathname;
+              return path === '/login/popup-google-auth' || path === '/login/popup-google-auth/';
+            } catch (err) { return false; }
+          }
+          function findClaudeManualAuthElement(e) {
+            if (!isOfficialClaudeAuthPage()) return null;
+            var path = e.composedPath ? e.composedPath() : [e.target];
+            for (var i = 0; i < path.length && i < 60; i++) {
+              var n = path[i];
+              if (!n || n.nodeType !== 1) continue;
+              if (n.tagName === 'BUTTON' && !n.disabled) return { type: 'button' };
+              if (n.tagName === 'A' && n.getAttribute('href') !== null) {
+                if (n.hasAttribute('download')) return null;
+                var raw = (typeof n.href === 'string') ? n.href : n.getAttribute('href');
+                if (isClaudeOAuthURL(raw)) return { type: 'claudeAnchor', href: raw };
+              }
+            }
+            return null;
+          }
+          function handleClick(e) {
+            if (!e.isTrusted) return;
+            if (e.type === 'click' && e.button !== 0) return;
+            var authTarget = findClaudeManualAuthElement(e);
+            if (authTarget) {
+              try {
+                window.webkit.messageHandlers.\(handlerName).postMessage({ kind: 'claudeManualAuthClick' });
+              } catch (err) {}
+              if (authTarget.type === 'claudeAnchor') return;
+            }
+            var href = findAnchor(e);
+            if (!href || !isCustomAppScheme(href)) return;
+            if (isClaudeOAuthURL(href)) return;
+            e.preventDefault();
+            try {
+              window.webkit.messageHandlers.\(handlerName).postMessage({ kind: 'externalAppClick', link: href });
+            } catch (err) {}
+          }
+          window.addEventListener('click', handleClick, true);
           window.addEventListener('contextmenu', function (e) {
             if (!e.isTrusted) return;
             var link = null, page = null, time = 0;
